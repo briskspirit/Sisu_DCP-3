@@ -1,0 +1,80 @@
+;
+; Minimal I2S transmitter derived from MicroPython's RP2 machine.I2S
+; 16-bit codec-side I2S PIO programs. The TX program drives codec BCLK/WS/DACIN;
+; the RX program passively samples NAU88C22 ADCOUT from those same clock pins.
+;
+; Copyright (c) 2021 Mike Teachman
+;
+; SPDX-License-Identifier: MIT
+;
+
+.program audio_i2s
+.side_set 2
+
+    ; Data is 16-bit stereo, MSB first. Mono sources duplicate each sample into
+    ; both left and right channels before DMA writes 16-bit words to the TX FIFO.
+    ; Rev B2 keeps the clock pins adjacent with side-set base GP13:
+    ; side-set bit 0 -> LRCLK / WS (GP13), bit 1 -> BCLK (GP14).
+
+public entry_point:
+    set x, 14 side 0b10
+bitloop_left:
+    out pins, 1 side 0b00
+    jmp x-- bitloop_left side 0b10
+    out pins, 1 side 0b01
+    set x, 14 side 0b11
+bitloop_right:
+    out pins, 1 side 0b01
+    jmp x-- bitloop_right side 0b11
+    out pins, 1 side 0b00
+
+% c-sdk {
+static inline void audio_i2s_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin_base) {
+    pio_sm_config config = audio_i2s_program_get_default_config(offset);
+    sm_config_set_out_pins(&config, data_pin, 1);
+    sm_config_set_sideset_pins(&config, clock_pin_base);
+    sm_config_set_out_shift(&config, false, true, 16);
+    sm_config_set_fifo_join(&config, PIO_FIFO_JOIN_TX);
+
+    pio_sm_init(pio, sm, offset, &config);
+
+#if PICO_PIO_USE_GPIO_BASE
+    uint64_t pin_mask = (1ull << data_pin) | (3ull << clock_pin_base);
+    pio_sm_set_pindirs_with_mask64(pio, sm, pin_mask, pin_mask);
+#else
+    uint32_t pin_mask = (1u << data_pin) | (3u << clock_pin_base);
+    pio_sm_set_pindirs_with_mask(pio, sm, pin_mask, pin_mask);
+#endif
+    pio_sm_set_pins(pio, sm, 0);
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_offset_entry_point));
+}
+%}
+
+.program audio_i2s_rx
+
+    ; Slave-style receiver for the codec ADCOUT pin. BCLK and WS are generated
+    ; by the TX state machine above on fixed Rev B2 pins GP13/GP14. The receiver
+    ; waits for a WS falling edge (left slot), skips the one-bit I2S delay, then
+    ; captures 32 bits: 16 left followed by 16 right. Autopush at 16 bits makes
+    ; the DMA stream match the TX buffer shape: interleaved stereo halfwords.
+
+; Sync to WS ONCE at SM (re)start, then free-run: capture 32 bits every frame
+; back-to-back without re-hunting WS. The old .wrap looped back to the WS wait
+; each frame, but a 32-bit capture spans a full frame and finishes past the next
+; WS edge, so the re-hunt skipped every other frame -> half sample rate (robotic
+; downlink, halved mic). The RP TX state machine is the clock master and emits
+; continuous 32-BCLK framing, so after the one-time sync the RX loop stays
+; aligned indefinitely.
+public entry_point:
+    wait 1 gpio 13
+    wait 0 gpio 13
+    wait 0 gpio 14
+    wait 1 gpio 14
+.wrap_target
+    set x, 31
+bitloop:
+    wait 0 gpio 14
+    wait 1 gpio 14
+    in pins, 1
+    jmp x-- bitloop
+.wrap

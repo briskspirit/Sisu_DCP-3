@@ -1,0 +1,42 @@
+.DS_Store
+build/
+/build-*/
+.pico-sdk/
+
+# Binary, log, and vendor-document artifacts anywhere in the tree: nothing of
+# these kinds is source, and stray bench output must never be committed
+# silently.
+*.uf2
+*.elf
+*.bin
+*.hex
+*.map
+*.log
+*.pdf
+*.zip
+
+# Local agent state and completed execution scratchpads.
+/.claude/
+/.superpowers/
+
+# Private vendor references and local bench artifacts (any depth).
+private/
+/recovery/
+/tmp/
+
+# Build-time generated from the original firmware (see firmware/README.md).
+# These embed Nokia/Tegic-derived data and are never committed; the build
+# regenerates them from a user-supplied firmware copy.
+/src/generated/
+/include/generated/
+
+# Original-firmware drop-in for build-time asset generation (see the README
+# inside; only the README itself is tracked).
+/firmware/*
+!/firmware/README.md
+
+# Asset-pipeline scratch outputs and its repo-wide generation lock.
+/tools/assetgen/out*/
+/.assetgen.lock
+__pycache__/
+*.pyc

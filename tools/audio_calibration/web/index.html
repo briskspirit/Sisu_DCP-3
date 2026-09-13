@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sisu audio calibration</title>
+    <link rel="stylesheet" href="./style.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">Sisu DCP-3 bench tool</p>
+          <h1>Audio level calibration</h1>
+        </div>
+        <p class="method">15.0 s capture | DTMF 1.5-3.5 s | active frames 1.5-14.5 s</p>
+      </header>
+
+      <section class="setup" aria-labelledby="setup-title">
+        <h2 id="setup-title">Input</h2>
+        <div class="input-row">
+          <label>
+            Microphone
+            <select id="audio-input"></select>
+          </label>
+          <button id="enable-input" type="button">Enable / apply input</button>
+        </div>
+        <p id="input-status" class="status">Microphone is not enabled.</p>
+        <div class="meter" aria-label="Live microphone level">
+          <span id="meter-fill"></span>
+        </div>
+        <output id="meter-value">-- dBFS</output>
+      </section>
+
+      <section class="procedure" aria-labelledby="procedure-title">
+        <h2 id="procedure-title">Capture</h2>
+        <div class="settings-row">
+          <label>
+            Take label
+            <input id="take-label" type="text" value="DTMF-5" maxlength="48">
+          </label>
+          <label>
+            Comparison metric
+            <select id="analysis-mode">
+              <option value="continuous">Held DTMF / continuous RMS</option>
+              <option value="active">Key tone / active-frame RMS</option>
+            </select>
+          </label>
+        </div>
+        <ol>
+          <li>Keep the microphone fixed; align the active acoustic outlet to the same marked position.</li>
+          <li>For a tune, click capture first, wait about one second, then start playback and let the complete melody finish.</li>
+          <li>For DTMF, hold the same digit before clicking capture and keep holding until its stock cutoff.</li>
+          <li>Record Original and DUT without changing microphone gain or room geometry.</li>
+        </ol>
+        <p id="capture-status" class="capture-status">Ready after the microphone is enabled.</p>
+      </section>
+
+      <section class="takes" aria-label="Recorded takes">
+        <article>
+          <div class="take-heading">
+            <div><span class="slot original"></span><h2>Original Nokia 3210</h2></div>
+            <button id="capture-original" type="button">Record Original</button>
+          </div>
+          <div id="original-result"><p class="empty">No take recorded.</p></div>
+        </article>
+        <article>
+          <div class="take-heading">
+            <div><span class="slot dut"></span><h2>Sisu DUT</h2></div>
+            <button id="capture-dut" type="button">Record DUT</button>
+          </div>
+          <div id="dut-result"><p class="empty">No take recorded.</p></div>
+        </article>
+      </section>
+
+      <section class="comparison" aria-labelledby="comparison-title">
+        <h2 id="comparison-title">DUT relative to Original</h2>
+        <div id="comparison"><p class="empty">Record both phones to calculate the difference.</p></div>
+      </section>
+    </main>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

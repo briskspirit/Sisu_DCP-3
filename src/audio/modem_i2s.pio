@@ -1,0 +1,84 @@
+;
+; Modem DVI/I2S slave-side capture.
+;
+; The modem is the I2S master and only drives CLK/WA while audio is active.
+; This receiver therefore sits in wait states until the modem clocks appear,
+; aligns on WA falling edge, skips the one-bit normal-I2S delay, and captures
+; 32 bits per frame as two 16-bit halfwords.
+;
+
+.program modem_i2s_rx
+
+; Bench-qualified Telit DVI frame lock: TXD changes on the CLK falling edge,
+; RXD is read on the rising edge, there is a one-bit MSB delay, downlink is in
+; both WA slots, and uplink is read from the WA-low slot.
+; Fully symmetric Philips I2S -- there is NO hardware RXD-vs-TXD bit offset. WA
+; transitions on the falling edge, so we sample it at the RISING edge where it is
+; stable. The first rising that reads WA low is one bit after WA fell; the MSB
+; (1-bit delay) lands on the NEXT rising, which the bitloop samples. RX then raises
+; IRQ 4 so modem_i2s_tx locks to the SAME grid and both directions align together.
+;
+; The grid alone is not enough: each SM's ISR/OSR shift residue is PRIVATE state
+; that survives a jmp re-seed and offsets that direction's word boundary by the
+; leftover bit count (white noise on one side only). Every (re)lock therefore goes
+; through resync_lock()/modem_i2s_hal_resync(), which pio_sm_restart both SMs so the
+; shift state is clean; a slotmiss-based self-correct in capture_buffer_done()
+; relocks until aligned (valid on real calls: the downlink is dual-mono per spec).
+public entry_point:
+    wait 1 gpio 9          ; get into the WA-high slot first (async ok)
+findfall:
+    wait 0 gpio 8          ; BCLK falling
+    wait 1 gpio 8          ; BCLK rising -- WA is STABLE here (it changes on the falling edge)
+    jmp pin findfall       ; WA still high -> keep hunting; WA low -> boundary found
+    irq set 4              ; signal the frame grid to modem_i2s_tx
+.wrap_target
+    set x, 31
+bitloop:
+    wait 0 gpio 8
+    wait 1 gpio 8
+    in pins, 1
+    jmp x-- bitloop
+.wrap
+
+;
+; Modem DVI/I2S slave-side uplink transmitter. Drives GP11 (modem RXD),
+; left-justified 16-bit MSB-first (high half of the OSR); drives on the BCLK falling
+; edge, the modem reads RXD on the rising edge (symmetric with
+; TXD, no offset). Locks to modem_i2s_rx's IRQ 4 so uplink and downlink share ONE
+; frame grid. NOTE the structural park hazard this program has: `out` sits between
+; wait0 and wait1, so when the modem parks BCLK low at call end, the final falling
+; edge slips one extra `out` through (OSR left 1 bit consumed), while RX's `in`
+; sits after wait1 and cannot slip. That residue is why every (re)lock MUST
+; pio_sm_restart this SM (resync_lock) -- a jmp re-seed alone carried the 1-bit
+; offset into the next call = white-noise mic with a clean earpiece.
+.program modem_i2s_tx
+
+public entry_point:
+    wait 1 irq 4           ; lock to modem_i2s_rx's frame boundary (clears the flag)
+.wrap_target
+    set x, 31
+txloop:
+    wait 0 gpio 8
+    out pins, 1
+    wait 1 gpio 8
+    jmp x-- txloop
+.wrap
+
+;
+; BCLK activity detector. The modem uses dynamic clocks (CLK/WA only run while the
+; audio path is active), so this is the hardware truth signal for "call audio
+; is live", independent of AT URC timing. It pushes one word per 32 BCLK periods
+; (~62.5 us @ 16 kHz); core1 drains the RX FIFO periodically -- any new word
+; means BCLK is toggling. push noblock so a full FIFO never stalls counting.
+;
+.program modem_bclk_count
+
+public entry_point:
+.wrap_target
+    set x, 31
+bclkloop:
+    wait 1 gpio 8
+    wait 0 gpio 8
+    jmp x-- bclkloop
+    push noblock
+.wrap

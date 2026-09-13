@@ -1,0 +1,18 @@
+;
+; Diagnostic-only input clock counter. The configured IN base selects either
+; modem BCLK or WA. One FIFO word represents exactly 1024 complete input cycles;
+; firmware times the first word with the RP system timer and stops the SM.
+;
+.program dvi_clock_probe
+
+.wrap_target
+    set y, 31
+outer:
+    set x, 31
+inner:
+    wait 1 pin 0
+    wait 0 pin 0
+    jmp x-- inner
+    jmp y-- outer
+    push block
+.wrap

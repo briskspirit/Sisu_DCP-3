@@ -1,0 +1,39 @@
+name: Host tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+
+      - name: Install macOS prerequisites
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
+
+      - name: Run host suite with public fixtures
+        env:
+          SISU_TEST_FORCE_SYNTHETIC_ASSETS: "1"
+        run: tests/run_tests.sh
