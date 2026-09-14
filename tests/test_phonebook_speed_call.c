@@ -35,6 +35,9 @@ static uint8_t s_phonebook_result_count;
 static uint8_t s_phonebook_entry_reads_before_failure = UINT8_MAX;
 static char s_display_text[32];
 static uint16_t s_phonebook_count = 1u;
+static bool s_phonebook_cache_valid;
+static modem_status_t s_modem_status;
+static unsigned s_phonebook_list_requests;
 
 static void check(bool condition, const char *message) {
     if (!condition) {
@@ -89,7 +92,14 @@ static bool admit_phonebook(uint32_t *request_id_out) {
 }
 
 bool modem_service_request_phonebook_list(uint32_t *request_id_out) {
+    s_phonebook_list_requests++;
     return admit_phonebook(request_id_out);
+}
+
+void modem_service_get_status(modem_status_t *out) {
+    if (out != NULL) {
+        *out = s_modem_status;
+    }
 }
 
 bool modem_service_request_phonebook_add(const char *name, const char *number,
@@ -123,6 +133,10 @@ bool modem_service_pop_phonebook_result(modem_phonebook_result_t *out) {
         (uint8_t)((s_phonebook_result_head + 1u) % 8u);
     s_phonebook_result_count--;
     return true;
+}
+
+bool modem_service_phonebook_cache_valid(void) {
+    return s_phonebook_cache_valid;
 }
 
 uint16_t modem_service_phonebook_count(void) {
@@ -474,6 +488,75 @@ static void test_memory_status_uses_full_telit_domain(void) {
     s_phonebook_count = 1u;
 }
 
+static void test_ready_sim_preloads_shared_phonebook_cache(void) {
+    app_t app;
+    memset(&app, 0, sizeof(app));
+    app.route = APP_ROUTE_MESSAGES_LIST;
+    memset(&s_modem_status, 0, sizeof(s_modem_status));
+    s_modem_status.at_ready = true;
+    s_modem_status.sim_ready = true;
+    s_phonebook_cache_valid = false;
+    s_phonebook_count = 0u;
+    unsigned requests_before = s_phonebook_list_requests;
+
+    check(!poll_phonebook(&app, 1000u) &&
+              app.route == APP_ROUTE_MESSAGES_LIST &&
+              app.phonebook_sync_request_id != 0u &&
+              s_phonebook_list_requests == requests_before + 1u,
+          "ready SIM starts one silent phonebook preload outside Phone book");
+
+    uint32_t request_id = app.phonebook_sync_request_id;
+    s_phonebook_cache_valid = true;
+    push_phonebook_result(request_id, MODEM_PHONEBOOK_OP_LIST,
+                          MODEM_PHONEBOOK_OUTCOME_OK);
+    check(poll_phonebook(&app, 1001u) &&
+              app.route == APP_ROUTE_MESSAGES_LIST &&
+              app.phonebook_sync_request_id == 0u && app.dirty &&
+              s_phonebook_list_requests == requests_before + 1u,
+          "silent preload publishes names without taking over the current UI");
+
+    app.dirty = false;
+    check(!poll_phonebook(&app, 40000u) &&
+              s_phonebook_list_requests == requests_before + 1u,
+          "a valid cache, including an empty one, is not reloaded repeatedly");
+
+    memset(&s_modem_status, 0, sizeof(s_modem_status));
+    s_phonebook_cache_valid = false;
+    s_phonebook_count = 1u;
+}
+
+static void test_phonebook_preload_retry_is_bounded(void) {
+    app_t app;
+    memset(&app, 0, sizeof(app));
+    app.route = APP_ROUTE_STANDBY;
+    memset(&s_modem_status, 0, sizeof(s_modem_status));
+    s_modem_status.at_ready = true;
+    s_modem_status.sim_ready = true;
+    s_phonebook_cache_valid = false;
+    unsigned requests_before = s_phonebook_list_requests;
+
+    check(!poll_phonebook(&app, 2000u) &&
+              app.phonebook_sync_request_id != 0u,
+          "preload fixture admits its first request");
+    push_phonebook_result(app.phonebook_sync_request_id,
+                          MODEM_PHONEBOOK_OP_LIST,
+                          MODEM_PHONEBOOK_OUTCOME_ERROR);
+    check(!poll_phonebook(&app, 2001u) &&
+              app.phonebook_sync_request_id == 0u &&
+              app.phonebook_sync_retry_ms == 32001u &&
+              s_phonebook_list_requests == requests_before + 1u,
+          "failed preload schedules a bounded retry without UI errors");
+    check(!poll_phonebook(&app, 32000u) &&
+              s_phonebook_list_requests == requests_before + 1u &&
+              !poll_phonebook(&app, 32001u) &&
+              app.phonebook_sync_request_id != 0u &&
+              s_phonebook_list_requests == requests_before + 2u,
+          "preload retries only after its deadline");
+
+    memset(&s_modem_status, 0, sizeof(s_modem_status));
+    s_phonebook_cache_valid = false;
+}
+
 int main(void) {
     test_options_call_uses_calls_app();
     test_high_list_selection_is_not_narrowed();
@@ -484,6 +567,8 @@ int main(void) {
     test_wrong_kind_and_backstop_fail_closed();
     test_erase_all_checks_admission_and_is_bounded();
     test_memory_status_uses_full_telit_domain();
+    test_ready_sim_preloads_shared_phonebook_cache();
+    test_phonebook_preload_retry_is_bounded();
     if (s_failures != 0) {
         fprintf(stderr, "%d phonebook speed-call test(s) failed\n", s_failures);
         return 1;

@@ -305,6 +305,7 @@ bool modem_service_request_phonebook_update(uint16_t index, const char *name,
 bool modem_service_request_phonebook_delete(uint16_t index,
                                             uint32_t *request_id_out);
 bool modem_service_pop_phonebook_result(modem_phonebook_result_t *out);
+bool modem_service_phonebook_cache_valid(void);
 uint16_t modem_service_phonebook_count(void);
 bool modem_service_phonebook_entry(uint16_t position, modem_phonebook_entry_t *out);
 

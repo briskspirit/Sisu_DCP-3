@@ -344,6 +344,7 @@ static modem_at_kind_t phonebook_protocol_command_to_at(
 static bool phonebook_protocol_emit(
     const modem_phonebook_protocol_action_t *action);
 static bool phonebook_start_current_request(uint32_t now_ms);
+static void phonebook_clear_cache(void);
 static const modem_phonebook_protocol_hooks_t s_phonebook_protocol_hooks;
 static bool phonebook_operation_from_request_type(
     modem_request_type_t type, modem_phonebook_op_t *out);
@@ -2645,6 +2646,16 @@ bool modem_service_pop_phonebook_result(modem_phonebook_result_t *out) {
     return ok;
 }
 
+bool modem_service_phonebook_cache_valid(void) {
+    if (!s_phonebook_lock_ready) {
+        return false;
+    }
+    critical_section_enter_blocking(&s_phonebook_lock);
+    bool valid = modem_phonebook_state_cache_valid();
+    critical_section_exit(&s_phonebook_lock);
+    return valid;
+}
+
 uint16_t modem_service_phonebook_count(void) {
     if (!s_phonebook_lock_ready) {
         return 0;
@@ -4838,6 +4849,7 @@ static void provision_begin_reboot_wait(uint32_t now_ms) {
     s_ri_release_pending = false;
     s_ri_release_deadline_ms = 0u;
     sms_wake_reset_session();
+    phonebook_clear_cache();
     s_power_pulsed = true;
     s_boot_deadline_ms = now_ms + g_modem_vendor.power.ready_budget_ms;
     modem_enter_module_wait(now_ms);
@@ -6596,6 +6608,15 @@ static void phonebook_finish_operation(uint32_t request_id,
     set_operation_busy(false);
 }
 
+static void phonebook_clear_cache(void) {
+    if (!s_phonebook_lock_ready) {
+        return;
+    }
+    critical_section_enter_blocking(&s_phonebook_lock);
+    modem_phonebook_state_clear();
+    critical_section_exit(&s_phonebook_lock);
+}
+
 static void phonebook_push_result(uint32_t request_id,
                                   modem_phonebook_op_t kind,
                                   modem_phonebook_outcome_t outcome) {
@@ -6901,6 +6922,7 @@ static void apply_sim_observation(modem_sim_observation_t observation) {
     critical_section_exit(&s_status_lock);
 
     if (observation != MODEM_SIM_OBSERVATION_READY) {
+        phonebook_clear_cache();
         /* SIM removal/PIN lock invalidates runtime settings owned by the SIM
          * subsystem. Wait for the next trustworthy readiness edge before
          * attempting their bounded completion pass. */
@@ -7025,6 +7047,7 @@ static void modem_enter_off(void) {
     modem_supplementary_reset_transient();
     modem_sms_protocol_reset_pending_arrivals();
     modem_sms_protocol_operation_finished();
+    phonebook_clear_cache();
     modem_uart_hal_set_power_pin(false);
     modem_uart_hal_set_dtr_sleep_permitted(false);
     /* OFF_DISCHARGE may have left RX enabled as a SIO break sensor. Re-park

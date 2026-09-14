@@ -213,6 +213,11 @@ typedef struct {
     uint8_t phonebook_pending_kind;
     uint8_t phonebook_pending_label;
     uint32_t phonebook_request_id;
+    /* Silent startup refresh which makes the shared SIM-phonebook resolver
+     * available to messages, calls, and call-register writers before the
+     * Phone book application itself has been opened. */
+    uint32_t phonebook_sync_request_id;
+    uint32_t phonebook_sync_retry_ms;
     /* The phonebook request whose progress note currently owns the display.
      * Its token remains through erase-all's short post-request grace; every
      * generic dialog open clears the claim before replacing that note. */

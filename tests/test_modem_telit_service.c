@@ -5854,7 +5854,9 @@ static void test_phonebook_list_and_crud_contract(void) {
               modem_service_phonebook_entry(0u, &entry) && entry.index == 2u,
           "delete command removes the row and refreshes cache order");
 
-    uint16_t cached_count = modem_service_phonebook_count();
+    check(modem_service_phonebook_count() != 0u &&
+              modem_service_phonebook_cache_valid(),
+          "phonebook fixture has a published cache before SIM removal");
     mh_feed("#QSS: 2,0");
     s_fault = TELIT_FAULT_PHONEBOOK_CPBS_ERROR_ONCE;
     s_fault_consumed = false;
@@ -5868,8 +5870,9 @@ static void test_phonebook_list_and_crud_contract(void) {
               result.kind == MODEM_PHONEBOOK_OP_LIST &&
               result.outcome == MODEM_PHONEBOOK_OUTCOME_ERROR &&
               result.sim_not_ready &&
-              modem_service_phonebook_count() == cached_count,
-          "CPBS failure reports missing SIM without erasing prior cache");
+              modem_service_phonebook_count() == 0u &&
+              !modem_service_phonebook_cache_valid(),
+          "CPBS failure reports missing SIM and retires its stale cache");
 }
 
 static bool request_phonebook_operation(modem_phonebook_op_t operation,

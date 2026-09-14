@@ -23,6 +23,7 @@
  * timeouts arrive earlier as tokenized terminal results. */
 #define PHONEBOOK_OPERATION_TIMEOUT_MS 45000u
 #define PHONEBOOK_SEND_TIMEOUT_MS 45000u
+#define PHONEBOOK_SYNC_RETRY_MS 30000u
 
 static const char *const PHONEBOOK_ROOT_LABELS[] = {
     "Search",
@@ -127,6 +128,8 @@ static void phonebook_clear_request(app_t *app);
 static void phonebook_claim_request_display(app_t *app);
 static bool phonebook_expected_operation(const app_t *app,
                                          modem_phonebook_op_t *out);
+static void phonebook_sync_start_if_needed(app_t *app, uint32_t now,
+                                           const modem_status_t *status);
 
 void render_phonebook_menu(const app_t *app, framebuffer_t *fb) {
     char breadcrumb[14];
@@ -799,10 +802,31 @@ bool poll_phonebook(app_t *app, uint32_t now) {
         phonebook_clear_request(app);
     }
 
+    modem_status_t status;
+    modem_service_get_status(&status);
+    if (!status.at_ready || !status.sim_ready) {
+        app->phonebook_sync_retry_ms = 0u;
+    }
+
     modem_phonebook_result_t result;
     bool matching_result = false;
+    bool sync_changed = false;
     modem_phonebook_op_t expected = MODEM_PHONEBOOK_OP_NONE;
     while (modem_service_pop_phonebook_result(&result)) {
+        if (app->phonebook_sync_request_id != 0u &&
+            result.request_id == app->phonebook_sync_request_id) {
+            app->phonebook_sync_request_id = 0u;
+            if (result.kind == MODEM_PHONEBOOK_OP_LIST &&
+                result.outcome == MODEM_PHONEBOOK_OUTCOME_OK &&
+                modem_service_phonebook_cache_valid()) {
+                app->phonebook_sync_retry_ms = 0u;
+                app->dirty = true;
+                sync_changed = true;
+            } else {
+                app->phonebook_sync_retry_ms = now + PHONEBOOK_SYNC_RETRY_MS;
+            }
+            continue;
+        }
         if (!phonebook_expected_operation(app, &expected) ||
             result.request_id != app->phonebook_request_id) {
             continue;
@@ -824,7 +848,8 @@ bool poll_phonebook(app_t *app, uint32_t now) {
                              back, now);
             return true;
         }
-        return false;
+        phonebook_sync_start_if_needed(app, now, &status);
+        return sync_changed;
     }
 
     /* A matching id with the wrong operation is an internal contract fault,
@@ -939,6 +964,26 @@ bool poll_phonebook(app_t *app, uint32_t now) {
     }
     phonebook_clear_request(app);
     return true;
+}
+
+static void phonebook_sync_start_if_needed(app_t *app, uint32_t now,
+                                           const modem_status_t *status) {
+    if (app == NULL || status == NULL || !status->at_ready ||
+        !status->sim_ready || app->route == APP_ROUTE_POWER_OFF ||
+        app->phonebook_pending_kind != PHONEBOOK_PENDING_NONE ||
+        app->phonebook_sync_request_id != 0u ||
+        modem_service_phonebook_cache_valid() ||
+        (app->phonebook_sync_retry_ms != 0u &&
+         time_diff_ms(now, app->phonebook_sync_retry_ms) < 0)) {
+        return;
+    }
+
+    uint32_t request_id = 0u;
+    if (modem_service_request_phonebook_list(&request_id)) {
+        app->phonebook_sync_request_id = request_id;
+    } else {
+        app->phonebook_sync_retry_ms = now + PHONEBOOK_SYNC_RETRY_MS;
+    }
 }
 
 bool tick_phonebook_erase_all(app_t *app, uint32_t now) {

@@ -10,6 +10,7 @@ static modem_phonebook_entry_t s_cache[MODEM_PHONEBOOK_MAX_RECORDS];
 static uint16_t s_count;
 static uint16_t s_staging_count;
 static bool s_refresh_active;
+static bool s_cache_valid;
 static uint32_t s_next_request_id;
 static uint32_t s_reserved_request_ids[MODEM_PHONEBOOK_RESULT_CAPACITY];
 static uint8_t s_reserved_count;
@@ -256,6 +257,7 @@ void modem_phonebook_state_init(void) {
     s_count = 0u;
     s_staging_count = 0u;
     s_refresh_active = false;
+    s_cache_valid = false;
     memset(&s_read, 0, sizeof(s_read));
     s_next_request_id = 0u;
     memset(s_reserved_request_ids, 0, sizeof(s_reserved_request_ids));
@@ -269,12 +271,15 @@ void modem_phonebook_state_clear(void) {
     s_count = 0u;
     s_staging_count = 0u;
     s_refresh_active = false;
+    s_cache_valid = false;
+    memset(&s_read, 0, sizeof(s_read));
 }
 
 void modem_phonebook_state_refresh_begin(void) {
     s_count = 0u;
     s_staging_count = 0u;
     s_refresh_active = true;
+    s_cache_valid = false;
 }
 
 bool modem_phonebook_state_refresh_finish(bool publish) {
@@ -284,6 +289,7 @@ bool modem_phonebook_state_refresh_finish(bool publish) {
     s_count = publish ? s_staging_count : 0u;
     s_staging_count = 0u;
     s_refresh_active = false;
+    s_cache_valid = publish;
     return true;
 }
 
@@ -294,6 +300,10 @@ bool modem_phonebook_state_append(const modem_phonebook_entry_t *entry) {
     }
     s_cache[(*count)++] = *entry;
     return true;
+}
+
+bool modem_phonebook_state_cache_valid(void) {
+    return s_cache_valid;
 }
 
 uint16_t modem_phonebook_state_count(void) {

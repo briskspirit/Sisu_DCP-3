@@ -15,6 +15,9 @@ void modem_phonebook_state_clear(void);
 void modem_phonebook_state_refresh_begin(void);
 bool modem_phonebook_state_refresh_finish(bool publish);
 bool modem_phonebook_state_append(const modem_phonebook_entry_t *entry);
+/* Valid is separate from count: a successfully read empty phonebook is valid
+ * and must not trigger another refresh on every app tick. */
+bool modem_phonebook_state_cache_valid(void);
 uint16_t modem_phonebook_state_count(void);
 bool modem_phonebook_state_entry(uint16_t position,
                                  modem_phonebook_entry_t *out);

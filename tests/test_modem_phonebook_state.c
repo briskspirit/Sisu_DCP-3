@@ -26,6 +26,8 @@ static modem_phonebook_entry_t make_entry(uint16_t index) {
 
 static void test_cache_capacity_and_order(void) {
     modem_phonebook_state_init();
+    check(!modem_phonebook_state_cache_valid(),
+          "unread phonebook does not masquerade as an empty valid cache");
     for (uint16_t i = 0u; i < MODEM_PHONEBOOK_MAX_RECORDS; i++) {
         modem_phonebook_entry_t entry = make_entry((uint16_t)(i + 1u));
         check(modem_phonebook_state_append(&entry),
@@ -51,7 +53,8 @@ static void test_cache_capacity_and_order(void) {
 
     modem_phonebook_state_clear();
     check(modem_phonebook_state_count() == 0u &&
-              !modem_phonebook_state_entry(0u, &first),
+              !modem_phonebook_state_entry(0u, &first) &&
+              !modem_phonebook_state_cache_valid(),
           "refresh clear atomically retires the visible row count");
 }
 
@@ -132,7 +135,8 @@ static void test_refresh_publication_is_atomic(void) {
               modem_phonebook_state_count() == 0u,
           "staged rows remain invisible until a clean final");
     check(modem_phonebook_state_refresh_finish(true) &&
-              modem_phonebook_state_count() == 1u,
+              modem_phonebook_state_count() == 1u &&
+              modem_phonebook_state_cache_valid(),
           "clean final atomically publishes the staged count");
     modem_phonebook_entry_t visible;
     check(modem_phonebook_state_entry(0u, &visible) &&
@@ -143,10 +147,17 @@ static void test_refresh_publication_is_atomic(void) {
     check(modem_phonebook_state_append(&old) &&
               modem_phonebook_state_refresh_finish(false) &&
               modem_phonebook_state_count() == 0u &&
-              !modem_phonebook_state_entry(0u, &visible),
+              !modem_phonebook_state_entry(0u, &visible) &&
+              !modem_phonebook_state_cache_valid(),
           "failed final discards every staged row");
     check(!modem_phonebook_state_refresh_finish(true),
           "a refresh cannot be finalized twice");
+
+    modem_phonebook_state_refresh_begin();
+    check(modem_phonebook_state_refresh_finish(true) &&
+              modem_phonebook_state_count() == 0u &&
+              modem_phonebook_state_cache_valid(),
+          "a clean empty phonebook is valid and needs no repeated refresh");
 }
 
 int main(void) {
