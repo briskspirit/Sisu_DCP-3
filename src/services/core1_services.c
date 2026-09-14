@@ -142,6 +142,7 @@ static bool cmd_starts_audio(core1_cmd_t cmd) {
     case CORE1_CMD_AUDIO_RINGTONE_LOOP:
     case CORE1_CMD_AUDIO_SYSTEM_TONE_LOOP:
     case CORE1_CMD_AUDIO_PACMAN_TONE:
+    case CORE1_CMD_AUDIO_GAME_LEVEL_TONE:
     case CORE1_CMD_AUDIO_COMPOSER_NOTE:
     case CORE1_CMD_AUDIO_COMPOSER_PACKED:
     case CORE1_CMD_AUDIO_COMPOSER_PACKED_LOOP:
@@ -784,6 +785,7 @@ static void core1_main(void) {
                 command.cmd == CORE1_CMD_AUDIO_RINGTONE_LOOP ||
                 command.cmd == CORE1_CMD_AUDIO_SYSTEM_TONE_LOOP ||
                 command.cmd == CORE1_CMD_AUDIO_PACMAN_TONE ||
+                command.cmd == CORE1_CMD_AUDIO_GAME_LEVEL_TONE ||
                 command.cmd == CORE1_CMD_AUDIO_RINGTONE_MENU_PREVIEW ||
                 command.cmd == CORE1_CMD_AUDIO_VIBRA_PULSE ||
                 command.cmd == CORE1_CMD_AUDIO_VIBRA_PULSE_LOOP ||

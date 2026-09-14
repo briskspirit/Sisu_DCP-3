@@ -139,6 +139,9 @@ static const audio_sequence_step_t PACMAN_POWER[] = {{392u, 42u}, {523u, 42u}, {
 static const audio_sequence_step_t PACMAN_GHOST[] = {{988u, 44u}, {1319u, 44u}, {1760u, 54u}};
 static const audio_sequence_step_t PACMAN_DEATH[] = {{740u, 55u}, {622u, 55u}, {523u, 70u}, {392u, 90u}};
 static const audio_sequence_step_t PACMAN_WIN[] = {{523u, 48u}, {659u, 48u}, {784u, 48u}, {1047u, 90u}};
+static const audio_sequence_step_t GAME_LEVEL_STEP[] = {{900u, 96u}};
+static const audio_sequence_step_t GAME_LEVEL_UPPER_LIMIT[] = {{1125u, 279u}};
+static const audio_sequence_step_t GAME_LEVEL_LOWER_LIMIT[] = {{675u, 279u}};
 
 static void audio_fill(void *ctx, int16_t *dst, uint32_t frame_count);
 static void start_click(uint8_t level);
@@ -150,6 +153,9 @@ static void start_ringtone(uint8_t index, uint8_t level, bool loop, bool to_buzz
                            bool dynamics, bool marker_vibra);
 static uint8_t audio_to_buzzer_level(uint8_t level);
 static void start_pacman_tone(uint8_t index, uint8_t level);
+static void start_game_level_tone(uint8_t feedback, uint8_t level);
+static void start_sequence(const audio_sequence_step_t *sequence, uint8_t len,
+                           uint8_t level, bool square);
 static void start_composer_note(uint8_t pitch, uint8_t level);
 static void start_composer_packed(const uint8_t *data, uint16_t len, uint8_t level, bool loop);
 static void start_tone_bytes(const uint8_t *data, uint16_t len, uint8_t level,
@@ -603,6 +609,9 @@ void audio_service_command(uint16_t command, uint16_t arg) {
     } else if (command == CORE1_CMD_AUDIO_PACMAN_TONE) {
         s_debug_buzzer_owned = false;
         start_pacman_tone(code, level);
+    } else if (command == CORE1_CMD_AUDIO_GAME_LEVEL_TONE) {
+        s_debug_buzzer_owned = false;
+        start_game_level_tone(code, level);
     } else if (command == CORE1_CMD_AUDIO_COMPOSER_NOTE) {
         s_debug_buzzer_owned = false;
         start_composer_note(code, level);
@@ -992,23 +1001,16 @@ static bool system_tone_uses_buzzer(uint8_t index) {
     case 29u: /* SMS Standard */
     case 30u: /* SMS Special */
     case 32u: /* SMS Ascending */
-    /* "Warning and game tones" (the category gated by the Warning/game-tones
-     * profile setting): the games' navigation / limit / win / lose beeps.
-     * Bench-confirmed on the ORIGINAL handset -- Snake's in-game and game-over
-     * sounds play on the buzzer -- overturning the RE trace's "cobba_earpiece"
-     * note (the same way rings/alarms/SMS turned out buzzer, not earpiece). None
-     * of these collide with an earpiece-only tone (keypad/service = 10, ringback
-     * = 28); index 8 is also note-dialog record 15's tone, itself a
-     * warning-category tone that correctly follows to the buzzer. The buzzer duty
-     * comes from start_tone_bytes seeding s_env_ceiling with the level. */
-    case 3u:  /* nav / step */
-    case 8u:  /* game upper-limit beep + "Battery empty" dialog (record 15) */
-    case 9u:  /* lower-limit beep */
+    /* Game-over/win/level resources use the buzzer path; Snake's game-over
+     * route is bench-confirmed. Game-level navigation and limit feedback use
+     * the separate codec-tone command because v6.00 changes their pitch with
+     * play modes 3/8/9 rather than selecting system-tone resources 3/8/9. */
     case 16u: /* game over */
     case 17u: /* Snake ordinary score */
     case 18u:
     case 19u:
     case 20u: /* win / level */
+    case 8u:  /* "Battery empty" dialog (record 15) */
     /* Battery LOW warning (dialog record 16, tone 7): owner bench = buzzer, like
      * Battery empty (8). Exclusive to that dialog, so the index flip is clean.
      * (Charger-insert tones 10/11 stay on the earpiece; "Battery full" would
@@ -1099,6 +1101,24 @@ static void start_pacman_tone(uint8_t index, uint8_t level) {
         sequence = PACMAN_WIN;
         len = (uint8_t)(sizeof(PACMAN_WIN) / sizeof(PACMAN_WIN[0]));
     }
+    start_sequence(sequence, len, level, true);
+}
+
+static void start_game_level_tone(uint8_t feedback, uint8_t level) {
+    const audio_sequence_step_t *sequence = GAME_LEVEL_STEP;
+    if (feedback == CORE1_AUDIO_GAME_LEVEL_UPPER_LIMIT) {
+        sequence = GAME_LEVEL_UPPER_LIMIT;
+    } else if (feedback == CORE1_AUDIO_GAME_LEVEL_LOWER_LIMIT) {
+        sequence = GAME_LEVEL_LOWER_LIMIT;
+    }
+    /* v6.00 calls tone 0 in mode 3 for an ordinary step, and tone 4 in
+     * pitch modes 8/9 at the upper/lower stops. Those modes resolve to these
+     * three sine frequencies; all three use the codec path, not the buzzer. */
+    start_sequence(sequence, 1u, level, false);
+}
+
+static void start_sequence(const audio_sequence_step_t *sequence, uint8_t len,
+                           uint8_t level, bool square) {
     int16_t amplitude = audio_level_amplitude(level);
     if (amplitude == 0 || sequence == 0 || len == 0u) {
         stop_all_audio();
@@ -1116,11 +1136,12 @@ static void start_pacman_tone(uint8_t index, uint8_t level) {
     s_audio.sequence = sequence;
     s_audio.sequence_len = len;
     s_audio.sequence_pos = 0u;
-    s_audio.sequence_square = true;
-    /* square role -> buzzer: seed the buzzer-duty ceiling from THIS tone's level.
-     * sequence_next_segment() drives buzzer_hal_set_level(audio_to_buzzer_level(
-     * s_env_ceiling)); without this it would inherit a stale global (0 at boot ->
-     * silent game tones on buzzer hardware). No crescendo for game blips. */
+    s_audio.sequence_square = square;
+    s_audio.loop = false;
+    s_audio.dynamics = false;
+    /* A square sequence uses the buzzer, so seed its duty ceiling from this
+     * tone's level. Sine sequences ignore the ceiling and remain on the codec.
+     * No sequence in this path uses a crescendo. */
     s_env_active = false;
     s_env_ceiling = level > AUDIO_LEVEL_MAX ? AUDIO_LEVEL_MAX : level;
     s_audio.tone_segment_total = 0u;

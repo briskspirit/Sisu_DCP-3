@@ -1438,8 +1438,8 @@ static void test_buzzer_command_routing_contract(void) {
     assert_true(audio_service_command_uses_buzzer(CORE1_CMD_AUDIO_COMPOSER_PACKED_LOOP, loud),
                 "looping own tone requests +3V8");
 
-    static const uint8_t buzzer_system[] = {3u, 5u, 7u, 8u, 9u, 12u, 16u,
-                                             17u, 18u, 19u, 20u, 29u, 30u, 32u};
+    static const uint8_t buzzer_system[] = {5u, 7u, 8u, 12u, 16u, 17u,
+                                             18u, 19u, 20u, 29u, 30u, 32u};
     for (size_t i = 0u; i < sizeof(buzzer_system); i++) {
         assert_true(audio_service_command_uses_buzzer(
                         CORE1_CMD_AUDIO_SYSTEM_TONE,
@@ -1472,6 +1472,38 @@ static void test_buzzer_command_routing_contract(void) {
                     CORE1_CMD_AUDIO_RINGTONE_LOOP,
                     test_audio_arg(1u, AUDIO_LEVEL_SILENT)),
                 "silent ringtone does not energize +3V8");
+}
+
+static void test_game_level_feedback_tones(void) {
+    static const struct {
+        core1_audio_game_level_tone_t feedback;
+        uint16_t hz;
+        uint16_t duration_ms;
+    } cases[] = {
+        {CORE1_AUDIO_GAME_LEVEL_STEP, 900u, 96u},
+        {CORE1_AUDIO_GAME_LEVEL_UPPER_LIMIT, 1125u, 279u},
+        {CORE1_AUDIO_GAME_LEVEL_LOWER_LIMIT, 675u, 279u},
+    };
+
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint16_t arg = test_audio_arg((uint8_t)cases[i].feedback, 4u);
+        assert_true(!audio_service_command_uses_buzzer(CORE1_CMD_AUDIO_GAME_LEVEL_TONE,
+                                                       arg),
+                    "game level feedback stays on the codec path");
+        audio_service_command(CORE1_CMD_AUDIO_GAME_LEVEL_TONE, arg);
+        assert_true(s_audio.kind == AUDIO_KIND_SEQUENCE,
+                    "game level feedback starts a bounded sequence");
+        assert_true(!s_audio.sequence_square,
+                    "game level feedback uses sine voicing");
+        assert_true(s_audio.sequence_len == 1u && s_audio.sequence != 0,
+                    "game level feedback contains one stock note");
+        if (s_audio.sequence != 0 && s_audio.sequence_len == 1u) {
+            assert_true(s_audio.sequence[0].hz == cases[i].hz,
+                        "game level feedback keeps the traced pitch");
+            assert_true(s_audio.sequence[0].duration_ms == cases[i].duration_ms,
+                        "game level feedback keeps the traced duration");
+        }
+    }
 }
 
 static void test_call_tones_have_isolated_quiet_gain(void) {
@@ -1812,6 +1844,7 @@ int main(void) {
     test_tone_start_offset_cases();
     test_decoder_empty_and_null();
     test_buzzer_command_routing_contract();
+    test_game_level_feedback_tones();
     test_call_tones_have_isolated_quiet_gain();
     test_debug_output_ownership();
     test_marker_vibra_is_owned_by_stream_start();

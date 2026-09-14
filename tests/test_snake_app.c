@@ -21,6 +21,18 @@ void play_game_system_tone(uint8_t tone_index) {
     s_last_tone = tone_index;
 }
 
+void adjust_game_level(uint8_t *draft_level, uint8_t level_count, int8_t direction) {
+    (void)draft_level;
+    (void)level_count;
+    (void)direction;
+}
+
+void draw_game_level_selector(framebuffer_t *fb, uint8_t draft_level, uint8_t level_count) {
+    (void)fb;
+    (void)draft_level;
+    (void)level_count;
+}
+
 int32_t time_diff_ms(uint32_t a, uint32_t b) {
     return (int32_t)(a - b);
 }

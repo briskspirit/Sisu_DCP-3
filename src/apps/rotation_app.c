@@ -225,25 +225,13 @@ bool handle_rotation_play_key(app_t *app, uint16_t key, uint32_t now) {
 }
 
 bool handle_rotation_level_key(app_t *app, uint16_t key, uint32_t now) {
-    uint8_t max_level = ROTATION_MAX_LEVELS - 1u;
     if (key == KEY_UP || key == KEY_2) {
-        /* Traced level-screen tones: move 0x03, boundary high 0x08 / low 0x09. */
-        if (app->rotation_level_draft_byte < max_level) {
-            app->rotation_level_draft_byte++;
-            play_game_system_tone(3u);
-        } else {
-            play_game_system_tone(8u);
-        }
+        adjust_game_level(&app->rotation_level_draft_byte, ROTATION_MAX_LEVELS, 1);
         app->dirty = true;
         return true;
     }
     if (key == KEY_DOWN || key == KEY_8) {
-        if (app->rotation_level_draft_byte > 0u) {
-            app->rotation_level_draft_byte--;
-            play_game_system_tone(3u);
-        } else {
-            play_game_system_tone(9u);
-        }
+        adjust_game_level(&app->rotation_level_draft_byte, ROTATION_MAX_LEVELS, -1);
         app->dirty = true;
         return true;
     }
@@ -347,25 +335,7 @@ void render_rotation_play(const app_t *app, framebuffer_t *fb) {
 }
 
 void render_rotation_level(const app_t *app, framebuffer_t *fb) {
-    fb_clear(fb, false);
-    const font_t *large = asset_font(FONT_FS0);
-    const font_t *small = asset_font(FONT_FS1);
-    const font_t *bold = asset_font(FONT_FS2);
-    char current[4];
-    char max[4];
-    snprintf(current, sizeof(current), "%u", (unsigned)(app->rotation_level_draft_byte + 1u));
-    snprintf(max, sizeof(max), "/%u", (unsigned)ROTATION_MAX_LEVELS);
-    int current_w = asset_text_width(large, current);
-    int max_w = asset_text_width(small, max);
-    int pair_w = current_w + 1 + max_w;
-    int x = 6 + (72 - pair_w) / 2;
-    if (x < 6) {
-        x = 6;
-    }
-    fb_text(fb, large, current, x, 15, true, current_w);
-    fb_text(fb, small, max, x + current_w + 1, 18, true, max_w);
-    fb_text(fb, bold, ts_or(0x159u, "Level:"), 3, 28, true, 81);
-    draw_softkey(fb, "OK");
+    draw_game_level_selector(fb, app->rotation_level_draft_byte, ROTATION_MAX_LEVELS);
 }
 
 void render_rotation_instructions(const app_t *app, framebuffer_t *fb) {

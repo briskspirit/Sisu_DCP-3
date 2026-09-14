@@ -797,6 +797,7 @@ run test_standby_sleep_logic src/services/standby_sleep_logic.c
 run test_critical_section_stub tests/test_critical_section_stub_peer.c
 run test_stack_monitor_logic src/services/stack_monitor_logic.c
 run test_audio_levels        src/audio/audio_levels.c
+run test_game_common         src/apps/game_common.c src/audio/audio_levels.c
 run test_framebuffer         src/ui/framebuffer.c
 run test_menu_visible        src/ui/menu_visible.c
 run test_status_chrome       src/ui/status_chrome.c src/ui/framebuffer.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c"

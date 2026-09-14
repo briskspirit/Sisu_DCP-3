@@ -7,6 +7,12 @@
 #define CORE1_AUDIO_COMPOSER_PACKED_MAX 256u
 
 typedef enum {
+    CORE1_AUDIO_GAME_LEVEL_STEP = 0,
+    CORE1_AUDIO_GAME_LEVEL_UPPER_LIMIT,
+    CORE1_AUDIO_GAME_LEVEL_LOWER_LIMIT,
+} core1_audio_game_level_tone_t;
+
+typedef enum {
     CORE1_CMD_NONE = 0,
     CORE1_CMD_AUDIO_CLICK = 1,
     CORE1_CMD_AUDIO_STOP = 2,
@@ -71,6 +77,9 @@ typedef enum {
     CORE1_CMD_AUDIO_TONES_SYSTEM_PREVIEW = 45,
     CORE1_CMD_AUDIO_TONES_CLICK_PREVIEW = 46,
     CORE1_CMD_AUDIO_TONES_PREVIEW_STOP = 47,
+    /* Stock game-level feedback. The low argument byte selects step / upper /
+     * lower; the high byte remains the active profile's warning-tone level. */
+    CORE1_CMD_AUDIO_GAME_LEVEL_TONE = 48,
 } core1_cmd_t;
 
 typedef struct {
