@@ -136,6 +136,13 @@ static void test_key_id_char(void) {
     uint16_t arg = audio_arg_for_key(KEY_5, 3u);
     assert_eq_u(audio_arg_code(arg), audio_key_id_from_key(KEY_5), "arg_for_key code");
     assert_eq_u(audio_arg_level(arg), 3u, "arg_for_key level");
+
+    uint16_t power_arg = audio_arg_for_key(KEY_POWER, 2u);
+    uint16_t clear_arg = audio_arg_for_key(KEY_C, 2u);
+    assert_eq_u(power_arg, clear_arg,
+                "power key uses the same ordinary click payload as C");
+    assert_eq_u(audio_arg_code(power_arg), 0u,
+                "power key cannot masquerade as an overlapping DTMF key");
 }
 
 int main(void) {

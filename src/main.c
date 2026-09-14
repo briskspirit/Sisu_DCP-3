@@ -281,26 +281,28 @@ int main(void) {
                 backlight_service_notify_activity(event.when_ms);
                 store_service_defer_commits_until(event.when_ms + STORE_AUDIO_GUARD_MS);
             }
-            /* The power key is a synthetic code (KEY_POWER) whose bits overlap
-             * real matrix keys, so it must never enter the keypad-audio/DTMF
-             * bitmask logic below; it is dispatched only through
-             * app_handle_event(). This also prevents a spurious click on power
-             * press. */
-            if (event.code != KEY_POWER) {
-                core1_cmd_t audio_cmd = CORE1_CMD_NONE;
-                uint16_t audio_arg_value = 0u;
-                if (keypad_audio_command_for_event(&s_app, &event, &audio_cmd, &audio_arg_value)) {
-                    core1_post_command(audio_cmd, audio_arg_value);
-                    if (audio_cmd == CORE1_CMD_AUDIO_DTMF) {
-                        s_active_dtmf_keys |= event.code;
-                    }
-                } else if (event.type == EVENT_KEY_UP) {
-                    if ((s_active_dtmf_keys & event.code) != 0u) {
-                        s_active_dtmf_keys &= (uint16_t)~event.code;
-                        core1_post_command(CORE1_CMD_AUDIO_STOP, audio_arg_for_key(event.code, AUDIO_LEVEL_SILENT));
-                    }
-                    store_service_defer_commits_until(event.when_ms + STORE_AUDIO_GUARD_MS);
+            /* KEY_POWER is synthetic and overlaps matrix-key bits. It still
+             * follows the ordinary key-down audio policy (v6.00 uses the same
+             * click payload as C), but it must never enter the held-DTMF mask. */
+            core1_cmd_t audio_cmd = CORE1_CMD_NONE;
+            uint16_t audio_arg_value = 0u;
+            if (keypad_audio_command_for_event(&s_app, &event, &audio_cmd,
+                                               &audio_arg_value)) {
+                core1_post_command(audio_cmd, audio_arg_value);
+                if (audio_cmd == CORE1_CMD_AUDIO_DTMF &&
+                    event.code != KEY_POWER) {
+                    s_active_dtmf_keys |= event.code;
                 }
+            } else if (event.type == EVENT_KEY_UP &&
+                       event.code != KEY_POWER) {
+                if ((s_active_dtmf_keys & event.code) != 0u) {
+                    s_active_dtmf_keys &= (uint16_t)~event.code;
+                    core1_post_command(
+                        CORE1_CMD_AUDIO_STOP,
+                        audio_arg_for_key(event.code, AUDIO_LEVEL_SILENT));
+                }
+                store_service_defer_commits_until(
+                    event.when_ms + STORE_AUDIO_GUARD_MS);
             }
             app_handle_event(&s_app, &event);
         }
