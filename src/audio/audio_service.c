@@ -1005,6 +1005,7 @@ static bool system_tone_uses_buzzer(uint8_t index) {
     case 8u:  /* game upper-limit beep + "Battery empty" dialog (record 15) */
     case 9u:  /* lower-limit beep */
     case 16u: /* game over */
+    case 17u: /* Snake ordinary score */
     case 18u:
     case 19u:
     case 20u: /* win / level */

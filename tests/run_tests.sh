@@ -819,6 +819,7 @@ run test_profiles_app       src/apps/profiles_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_settings_restore   src/apps/settings_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_power_app          src/apps/power_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_powerup_app        src/apps/powerup_app.c src/audio/audio_levels.c "${DEAD_CODE_FLAGS[@]}"
+run test_snake_app          src/apps/snake_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_display_wait        src/apps/dialogs_app.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c "$GENERATED_SRC_DIR/assets_data.c" "${DEAD_CODE_FLAGS[@]}"
 run test_calculator_app      src/apps/calculator_app.c src/services/key_utils.c "${DEAD_CODE_FLAGS[@]}"
 run test_net_monitor_logic   src/apps/net_monitor/logic.c

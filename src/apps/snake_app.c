@@ -438,13 +438,14 @@ static void finish_snake_game(app_t *app, uint32_t now) {
     if (app->snake_result_top_score) {
         app->snake_top_score = app->snake_score;
         snake_save_storage(app);
-        play_game_system_tone(20u);
     }
+    play_game_system_tone(app->snake_result_top_score ? 20u : 17u);
     app->dirty = true;
 }
 
 static void trigger_snake_crash(app_t *app, uint32_t now) {
-    /* v6.00 Snake plays only food (0x10) and top-score (0x14) tones; crash is silent. */
+    /* Leave the collision quiet during the settle; the result screen owns the
+     * game-over melody so audio and the dialog begin together. */
     app->snake_game_over = true;
     app->snake_next_tick_ms = 0u;
     app->snake_crash_deadline_ms = now + SNAKE_CRASH_SETTLE_MS;

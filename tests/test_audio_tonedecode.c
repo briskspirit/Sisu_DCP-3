@@ -1439,7 +1439,7 @@ static void test_buzzer_command_routing_contract(void) {
                 "looping own tone requests +3V8");
 
     static const uint8_t buzzer_system[] = {3u, 5u, 7u, 8u, 9u, 12u, 16u,
-                                             18u, 19u, 20u, 29u, 30u, 32u};
+                                             17u, 18u, 19u, 20u, 29u, 30u, 32u};
     for (size_t i = 0u; i < sizeof(buzzer_system); i++) {
         assert_true(audio_service_command_uses_buzzer(
                         CORE1_CMD_AUDIO_SYSTEM_TONE,
