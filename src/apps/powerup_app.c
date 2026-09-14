@@ -37,7 +37,7 @@ static const uint16_t POWERUP_BOOT_FRAMES[] = {265u, 266u, 267u, 268u, 269u, 270
 static void start_powerup_common(app_t *app, uint32_t now_ms, bool skip_boot_logo);
 static void enter_powerup_stage(app_t *app, app_powerup_stage_t stage, uint32_t now_ms);
 static void play_powerup_key_click(const app_t *app);
-static void finish_powerup(app_t *app);
+static void finish_powerup(app_t *app, uint32_t now_ms);
 static void render_powerup_welcome(const app_t *app, framebuffer_t *fb);
 
 void start_powerup(app_t *app, uint32_t now_ms) {
@@ -116,7 +116,7 @@ bool tick_powerup(app_t *app, uint32_t now_ms) {
         case APP_POWERUP_BATTERY_POST:
         case APP_POWERUP_DONE:
         default:
-            finish_powerup(app);
+            finish_powerup(app, now_ms);
             changed = true;
             break;
         }
@@ -169,7 +169,7 @@ static void enter_powerup_stage(app_t *app, app_powerup_stage_t stage, uint32_t 
         break;
     case APP_POWERUP_DONE:
     default:
-        finish_powerup(app);
+        finish_powerup(app, now_ms);
         break;
     }
 }
@@ -192,16 +192,21 @@ static void play_powerup_key_click(const app_t *app) {
     }
 }
 
-static void finish_powerup(app_t *app) {
+static void finish_powerup(app_t *app, uint32_t now_ms) {
     app->route = APP_ROUTE_STANDBY;
     app->powerup_stage = APP_POWERUP_DONE;
     app->powerup_skip_boot_logo = false;
     app->powerup_frame_index = 0u;
     app->powerup_deadline_ms = 0u;
     app->powerup_boot_started_ms = 0u;
+    /* The power-key activity deadline starts before the long boot animation.
+     * Start a fresh full lights interval when the first interactive screen
+     * appears, including the RTC-lost Time editor path. */
+    app->backlight_activity_pending = true;
+    app->backlight_activity_ms = now_ms;
     /* RTC-lost flow: with no valid stored clock, boot runs the Time:/Date:
      * editors before reaching standby (handset-modeled, see CHANGELOG). */
-    (void)start_clock_boot_setup_if_needed(app, time_ms());
+    (void)start_clock_boot_setup_if_needed(app, now_ms);
 }
 
 static void render_powerup_welcome(const app_t *app, framebuffer_t *fb) {

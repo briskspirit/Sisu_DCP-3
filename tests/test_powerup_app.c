@@ -13,6 +13,9 @@ static store_status_t s_keypad_status = STORE_STATUS_OK;
 static unsigned s_audio_posts;
 static core1_cmd_t s_audio_cmd;
 static uint16_t s_audio_arg;
+static bool s_clock_setup_opens_editor;
+static unsigned s_clock_setup_calls;
+static uint32_t s_clock_setup_now;
 
 static void check(bool condition, const char *message) {
     if (!condition) {
@@ -55,8 +58,12 @@ void copy_text(char *dst, size_t cap, const char *src) {
 }
 
 bool start_clock_boot_setup_if_needed(app_t *app, uint32_t now) {
-    (void)app;
-    (void)now;
+    s_clock_setup_calls++;
+    s_clock_setup_now = now;
+    if (s_clock_setup_opens_editor) {
+        app->route = APP_ROUTE_CLOCK_EDITOR;
+        return true;
+    }
     return false;
 }
 
@@ -72,6 +79,12 @@ static void reset_audio(void) {
     s_audio_posts = 0u;
     s_audio_cmd = CORE1_CMD_NONE;
     s_audio_arg = 0u;
+}
+
+static void reset_clock_setup(void) {
+    s_clock_setup_opens_editor = false;
+    s_clock_setup_calls = 0u;
+    s_clock_setup_now = 0u;
 }
 
 static void advance_to_blank(app_t *app) {
@@ -134,10 +147,40 @@ static void test_unreadable_setting_uses_default(void) {
           "unavailable storage uses the normal keypad-level default");
 }
 
+static void test_interactive_boot_restarts_backlight_timer(void) {
+    app_t app = {0};
+    reset_clock_setup();
+    app.route = APP_ROUTE_POWERUP;
+    app.powerup_stage = APP_POWERUP_BATTERY_POST;
+    app.powerup_deadline_ms = 12345u;
+
+    check(tick_powerup(&app, 12345u), "battery post-roll completes power-up");
+    check(app.route == APP_ROUTE_STANDBY && app.powerup_stage == APP_POWERUP_DONE,
+          "ordinary power-up hands control to standby");
+    check(app.backlight_activity_pending && app.backlight_activity_ms == 12345u,
+          "standby receives a fresh full backlight interval");
+    check(s_clock_setup_calls == 1u && s_clock_setup_now == 12345u,
+          "clock boot check uses the same handoff timestamp");
+
+    app = (app_t){0};
+    reset_clock_setup();
+    s_clock_setup_opens_editor = true;
+    app.route = APP_ROUTE_POWERUP;
+    app.powerup_stage = APP_POWERUP_BATTERY_POST;
+    app.powerup_deadline_ms = 23000u;
+
+    check(tick_powerup(&app, 23000u), "RTC-unset power-up completes its post-roll");
+    check(app.route == APP_ROUTE_CLOCK_EDITOR,
+          "RTC-unset power-up opens the first interactive clock editor");
+    check(app.backlight_activity_pending && app.backlight_activity_ms == 23000u,
+          "first-boot clock editor receives a fresh full backlight interval");
+}
+
 int main(void) {
     test_normal_powerup_click();
     test_silent_and_no_logo_paths();
     test_unreadable_setting_uses_default();
+    test_interactive_boot_restarts_backlight_timer();
 
     if (s_failures != 0) {
         fprintf(stderr, "%d power-up app test(s) failed\n", s_failures);
