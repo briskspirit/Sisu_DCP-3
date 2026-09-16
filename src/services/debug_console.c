@@ -129,6 +129,7 @@ static void command_lcd(char *args);
 static void command_ltc_window(char *args);
 static void command_battery_learning(char *args);
 static void command_charge(char *args);
+static void command_modem_rx(char *args) __attribute__((noinline));
 static void command_dormant(char *args);
 static void command_keycal(char *args);
 static void command_buzzcal(char *args);
@@ -278,6 +279,8 @@ static void handle_line(app_t *app, char *line) {
         command_battery_learning(cursor);
     } else if (strcmp(cmd, "charge") == 0) {
         command_charge(cursor);
+    } else if (strcmp(cmd, "modemrx") == 0) {
+        command_modem_rx(cursor);
     } else if (strcmp(cmd, "modempoll") == 0) {
         char *arg = next_token(&cursor);
         bool enabled;
@@ -589,6 +592,38 @@ static void handle_line(app_t *app, char *line) {
     }
 }
 
+static void command_modem_rx(char *args) {
+    char *arg = next_token(&args);
+    if (arg == NULL || next_token(&args) != NULL ||
+        (strcmp(arg, "on") != 0 && strcmp(arg, "off") != 0 &&
+         strcmp(arg, "dump") != 0)) {
+        printf("[modemrx] usage: modemrx <on|off|dump>\n");
+        return;
+    }
+    if (strcmp(arg, "on") == 0) {
+        printf("[modemrx] started=%u\n",
+               modem_service_rx_trace_start() ? 1u : 0u);
+        return;
+    }
+    modem_service_rx_trace_stop();
+    modem_rx_trace_status_t trace;
+    modem_service_rx_trace_status(&trace);
+    printf("[modemrx] stopped received=%lu retained=%u overwritten=%lu\n",
+           (unsigned long)trace.received, (unsigned)trace.retained,
+           (unsigned long)(trace.received - trace.retained));
+    if (strcmp(arg, "dump") == 0) {
+        uint8_t bytes[16];
+        for (size_t offset = 0u; offset < trace.retained; offset += sizeof(bytes)) {
+            size_t count = modem_service_rx_trace_read(offset, bytes, sizeof(bytes));
+            if (count == 0u) break;
+            printf("[modemrx] %04x:", (unsigned)offset);
+            for (size_t i = 0u; i < count; i++) printf(" %02x", bytes[i]);
+            printf("\n");
+        }
+        printf("[modemrx] end\n");
+    }
+}
+
 static void print_help(void) {
     printf("[debug] commands:\n");
     printf("[debug]   status\n");
@@ -605,6 +640,7 @@ static void print_help(void) {
     printf("[debug]   charge [status|trace <on|off>|csv|history]\n");
     printf("[debug]   charge configure <observe|anchored|bootstrap> <1000-2000> <candidate|trusted> confirm\n");
     printf("[debug]   modempoll <on|off>        ; periodic modem backstops (RAM only)\n");
+    printf("[debug]   modemrx <on|off|dump>    ; opt-in raw RX capture (RAM only)\n");
     printf("[debug]   railhold <on|off>         ; hold shared +3V8 without modem start\n");
     printf("[debug]   irqdrain                  ; bounded GP42 source drain + evidence\n");
     printf("[debug]   lcd [status|cal <0-31>|save|stock|set <vop> <tc> <bias>|contrast <0-127>|temp <0-3>|bias <0-7>|reinit]\n");

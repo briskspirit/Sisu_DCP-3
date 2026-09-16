@@ -29,11 +29,15 @@ static bool s_gpio2_state;
 static bool s_gpio3_state;
 static uint8_t s_cfun;
 static uint16_t s_scan_timer_s;
+static uint8_t s_auto_profile;
+static const char *s_startup_drop_command;
+static unsigned s_startup_drops_remaining;
 static uint8_t s_band_mode;
 static modem_band_config_t s_band_nvm;
 static modem_band_config_t s_band_ram;
 static uint64_t s_tune_masks[4];
 static uint8_t s_tune_zero_rows;
+static unsigned s_tune_query_errors;
 static bool s_qss_response_enabled;
 static bool s_inject_imei_on_qss_set;
 static bool s_factory_flow_blocked;
@@ -104,7 +108,17 @@ typedef enum {
     TELIT_FAULT_RXDIV_SET_ERROR,
     TELIT_FAULT_RXDIV_VERIFY_MISMATCH,
     TELIT_FAULT_RXDIV_SET_TIMEOUT_ONCE,
+    TELIT_FAULT_SCAN_READBACK_MALFORMED,
+    TELIT_FAULT_SCAN_SET_ERROR,
+    TELIT_FAULT_SCAN_VERIFY_MISMATCH,
+    TELIT_FAULT_SCAN_SET_TIMEOUT_ONCE,
+    TELIT_FAULT_AUTO_PROFILE_READBACK_MALFORMED,
+    TELIT_FAULT_AUTO_PROFILE_SET_ERROR,
+    TELIT_FAULT_AUTO_PROFILE_VERIFY_MISMATCH,
+    TELIT_FAULT_AUTO_PROFILE_SET_TIMEOUT_ONCE,
     TELIT_FAULT_REBOOT_TIMEOUT_ONCE,
+    TELIT_FAULT_REBOOT_RI_BEFORE_DROP,
+    TELIT_FAULT_REBOOT_RI_LOST_FINAL,
     TELIT_FAULT_CPMS_SET_ERROR,
     TELIT_FAULT_SMS_WAKE_PROFILE_SET_TIMEOUT_ONCE,
     TELIT_FAULT_SMS_WAKE_PROFILE_SET_ERROR,
@@ -563,6 +577,23 @@ static void telit_sms_raw_write(const uint8_t *data, size_t len) {
 }
 
 static void telit_response(const char *command) {
+    if (strcmp(command, "AT") == 0 &&
+        (s_fault == TELIT_FAULT_REBOOT_RI_BEFORE_DROP ||
+         s_fault == TELIT_FAULT_REBOOT_RI_LOST_FINAL) &&
+        !s_mh_status_drop_pending && !s_mh_status_restore_pending) {
+        s_mh_dtr_wake_works = true;
+        s_mh_cts_asserted = true;
+        s_mh_ri_asserted = false;
+    }
+    if (s_startup_drops_remaining != 0u &&
+        strcmp(command, s_startup_drop_command) == 0) {
+        s_startup_drops_remaining--;
+        s_mh_status_drop_pending = true;
+        s_mh_status_drop_ms = s_mh_now;
+        s_mh_status_drop_duration_ms = 1500u;
+        s_mh_final = MH_FINAL_NONE;
+        return;
+    }
     if (telit_sms_response(command)) {
         return;
     }
@@ -627,12 +658,34 @@ static void telit_response(const char *command) {
         mh_rx_push("+CEREG: 2,1,\"00AF\",\"ABCDEF01\",7");
     } else if (strcmp(command, "AT+CIREG?") == 0) {
         mh_rx_push("+CIREG: 2,1");
+    } else if (strcmp(command, "AT#FWAUTOSIM?") == 0) {
+        char line[32];
+        snprintf(line, sizeof(line), "#FWAUTOSIM: %u",
+                 (unsigned)s_auto_profile);
+        mh_rx_push(s_fault == TELIT_FAULT_AUTO_PROFILE_READBACK_MALFORMED
+                       ? "#FWAUTOSIM: bad" : line);
+    } else if (strcmp(command, "AT#FWAUTOSIM=1") == 0) {
+        if (s_fault == TELIT_FAULT_AUTO_PROFILE_SET_ERROR) {
+            s_mh_final = MH_FINAL_ERROR;
+        } else {
+            if (s_fault != TELIT_FAULT_AUTO_PROFILE_VERIFY_MISMATCH) {
+                s_auto_profile = 1u;
+            }
+            if (s_fault == TELIT_FAULT_AUTO_PROFILE_SET_TIMEOUT_ONCE &&
+                !s_fault_consumed) {
+                s_fault_consumed = true;
+                s_mh_final = MH_FINAL_NONE;
+            }
+        }
     } else if (strcmp(command, "AT#STUNEANT=?") == 0) {
         mh_rx_push("#STUNEANT: (0,1),(7FD9FFFF),(0,1),(0,1)");
     } else if (strcmp(command, "AT#STUNEANT?") == 0) {
         mh_rx_push(s_stune_enabled ? "#STUNEANT: 1" : "#STUNEANT: 0");
     } else if (strcmp(command, "AT#GTUNEANT?") == 0) {
-        if (s_stune_enabled) {
+        if (s_tune_query_errors > 0u) {
+            s_tune_query_errors--;
+            mh_rx_push("+CME ERROR: operation not supported");
+        } else if (s_stune_enabled) {
             telit_push_tune_table();
         } else {
             s_mh_final = MH_FINAL_ERROR;
@@ -677,16 +730,25 @@ static void telit_response(const char *command) {
         char line[32];
         snprintf(line, sizeof(line), "#NWSCANTMR: %u",
                  (unsigned)s_scan_timer_s);
-        mh_rx_push(line);
+        mh_rx_push(s_fault == TELIT_FAULT_SCAN_READBACK_MALFORMED
+                       ? "#NWSCANTMR: bad" : line);
     } else if (strncmp(command, "AT#NWSCANTMR=",
                        sizeof("AT#NWSCANTMR=") - 1u) == 0) {
         unsigned seconds = 0u;
         int consumed = 0;
-        if (sscanf(command, "AT#NWSCANTMR=%u%n", &seconds, &consumed) != 1 ||
+        if (s_fault == TELIT_FAULT_SCAN_SET_ERROR ||
+            sscanf(command, "AT#NWSCANTMR=%u%n", &seconds, &consumed) != 1 ||
             command[consumed] != '\0' || seconds < 5u || seconds > 3600u) {
             s_mh_final = MH_FINAL_ERROR;
         } else {
-            s_scan_timer_s = (uint16_t)seconds;
+            if (s_fault != TELIT_FAULT_SCAN_VERIFY_MISMATCH) {
+                s_scan_timer_s = (uint16_t)seconds;
+            }
+            if (s_fault == TELIT_FAULT_SCAN_SET_TIMEOUT_ONCE &&
+                !s_fault_consumed) {
+                s_fault_consumed = true;
+                s_mh_final = MH_FINAL_NONE;
+            }
         }
     } else if (strcmp(command, "AT#SELBNDMODE?") == 0) {
         char line[32];
@@ -1086,6 +1148,19 @@ static void telit_response(const char *command) {
         s_mh_status_drop_pending = true;
         s_mh_status_drop_ms = s_mh_now + 500u;
         s_mh_status_drop_duration_ms = 1000u;
+        if (s_fault == TELIT_FAULT_REBOOT_RI_BEFORE_DROP ||
+            s_fault == TELIT_FAULT_REBOOT_RI_LOST_FINAL) {
+            /* Bench ordering: RI/CTS change before the PWRMON reset edge,
+             * with more than a normal DTR-wake budget until that edge. */
+            s_mh_ri_wake_pending = true;
+            s_mh_ri_asserted = true;
+            s_mh_cts_asserted = false;
+            s_mh_dtr_wake_works = false;
+            s_mh_status_drop_ms = s_mh_now + 3000u;
+            if (s_fault == TELIT_FAULT_REBOOT_RI_LOST_FINAL) {
+                s_mh_final = MH_FINAL_NONE;
+            }
+        }
         if (s_fault == TELIT_FAULT_REBOOT_TIMEOUT_ONCE &&
             !s_fault_consumed) {
             s_fault_consumed = true;
@@ -1130,6 +1205,9 @@ static void begin_telit(bool rxdiv_configured) {
     s_gpio3_state = false;
     s_cfun = 5u;
     s_scan_timer_s = 60u;
+    s_auto_profile = 1u;
+    s_startup_drop_command = NULL;
+    s_startup_drops_remaining = 0u;
     s_band_mode = 0u;
     s_band_nvm = (modem_band_config_t){
         .gsm = 3u,
@@ -1142,6 +1220,7 @@ static void begin_telit(bool rxdiv_configured) {
     s_tune_masks[2] = UINT64_C(0x1F80BC50);
     s_tune_masks[3] = UINT64_C(0x00400008);
     s_tune_zero_rows = 0u;
+    s_tune_query_errors = 0u;
     s_qss_response_enabled = true;
     s_inject_imei_on_qss_set = false;
     s_factory_flow_blocked = false;
@@ -1442,11 +1521,15 @@ static void test_cold_boot_matching_provision(void) {
     check(status.sim_checked && status.sim_present,
           "ready SIM publishes checked and physically present");
     check(status.provisioning_verified &&
-              status.provisioning_schema_version == 9u,
+              status.provisioning_schema_version == 11u,
           "complete readback pass publishes versioned provisioning result");
     check(s_mh_rail_enabled && s_mh_status_raw >= 1024u,
           "READY retains the modem rail with high PWRMON evidence");
     check(mh_tx_count_exact("AT#RXDIV?") == 1u &&
+              mh_tx_count_exact("AT#FWAUTOSIM?") == 1u &&
+              mh_tx_count_exact("AT#FWAUTOSIM=1") == 0u &&
+              mh_tx_count_exact("AT#NWSCANTMR?") == 1u &&
+              mh_tx_count_exact("AT#NWSCANTMR=60") == 0u &&
               mh_tx_count_exact("AT#RXDIV=0,1") == 0u &&
               mh_tx_count_exact("AT#SLED?") == 1u &&
               mh_tx_count_exact("AT#SLED=5;#SLEDSAV") == 0u &&
@@ -1564,6 +1647,61 @@ static void test_board_imei_capture_is_scoped_and_write_once(void) {
           "invalid CGSN retries are bounded and a valid line during QSS cannot leak into identity");
 }
 
+static void test_raw_rx_capture_preserves_wire_bytes(void) {
+    begin_telit(true);
+    check(boot_until_ready(30000u), "raw RX fixture boots");
+    settle_dtr_sleep();
+    modem_rx_trace_status_t trace;
+    modem_service_rx_trace_status(&trace);
+    check(!trace.enabled && trace.received == 0u && trace.retained == 0u,
+          "raw RX capture is disabled during normal startup");
+    check(modem_service_rx_trace_start(), "raw RX capture can be armed");
+    const uint8_t raw[] = {'$', 'Q', 'C', 'M', 'T', 'I', ':', 0u, 0x80u,
+                           'M', 'E', ',', '7', '\r', '\n'};
+    mh_rx_push_raw(raw, sizeof(raw));
+    mh_settle();
+    uint8_t actual[MODEM_RX_TRACE_CAPACITY];
+    check(modem_service_rx_trace_read(0u, actual, sizeof(actual)) == 0u,
+          "an active capture cannot be read as a stable snapshot");
+    modem_service_rx_trace_stop();
+    modem_service_rx_trace_status(&trace);
+    check(!trace.enabled && trace.received == sizeof(raw) &&
+              trace.retained == sizeof(raw) &&
+              modem_service_rx_trace_read(0u, actual, sizeof(actual)) == sizeof(raw) &&
+              memcmp(actual, raw, sizeof(raw)) == 0,
+          "capture preserves NUL, high bytes and line terminators before framing");
+    mh_feed("ignored after stop");
+    modem_service_rx_trace_status(&trace);
+    check(trace.received == sizeof(raw), "stopping freezes the evidence");
+    check(modem_service_rx_trace_read(sizeof(raw), actual, 1u) == 0u &&
+              modem_service_rx_trace_read(0u, NULL, 1u) == 0u &&
+              modem_service_rx_trace_read(SIZE_MAX, actual, sizeof(actual)) == 0u,
+          "capture reads reject invalid ranges and destinations");
+
+    modem_service_rx_trace_start();
+    uint8_t overflow[MODEM_RX_TRACE_CAPACITY + 37u];
+    for (size_t i = 0u; i < sizeof(overflow); i++) {
+        overflow[i] = (uint8_t)(0x80u + i % 127u);
+    }
+    mh_rx_push_raw(overflow, sizeof(overflow));
+    mh_settle();
+    modem_service_rx_trace_stop();
+    modem_service_rx_trace_status(&trace);
+    check(trace.received == sizeof(overflow) &&
+              trace.retained == MODEM_RX_TRACE_CAPACITY &&
+              modem_service_rx_trace_read(0u, actual, sizeof(actual)) == sizeof(actual) &&
+              memcmp(actual, overflow + 37u, sizeof(actual)) == 0,
+          "full capture retains the newest bytes in chronological order");
+    check(modem_service_rx_trace_read(4090u, actual, 16u) == 6u &&
+              memcmp(actual, overflow + sizeof(overflow) - 6u, 6u) == 0,
+          "partial capture reads stop at the retained end");
+    modem_service_rx_trace_start();
+    modem_service_rx_trace_status(&trace);
+    check(trace.enabled && trace.received == 0u && trace.retained == 0u,
+          "rearming explicitly clears only capture metadata");
+    modem_service_rx_trace_stop();
+}
+
 static void test_background_polling_bench_gate_is_narrow(void) {
     begin_telit(true);
     check(boot_until_ready(30000u), "background-poll fixture boots");
@@ -1659,7 +1797,7 @@ static void test_cold_boot_repairs_dvi_and_restores_runtime_mode(void) {
           "fresh DVI profile converges through one controlled reboot");
     modem_status_t status = mh_status();
     check(status.provisioning_verified && status.audio_init_ok &&
-              status.provisioning_schema_version == 9u,
+              status.provisioning_schema_version == 11u,
           "repaired DVI profile reaches READY with audio qualified");
     check(s_dviext_configured && s_dvi_configured &&
               mh_tx_count_exact("AT#DVIEXT=1,1") == 1u &&
@@ -1712,8 +1850,187 @@ static void test_cold_boot_provisions_antenna_before_rf_online(void) {
               final_verify < rf_online,
           "RF stays off through GPIO setup and final table verification");
     check(mh_status().provisioning_verified &&
-              mh_status().provisioning_schema_version == 9u,
+              mh_status().provisioning_schema_version == 11u,
           "antenna provisioning participates in the versioned contract");
+}
+
+static void test_carrier_reset_tuner_read_error(void) {
+    begin_telit(true);
+    s_tune_query_errors = 1u;
+    s_gpio2_direction = 0u;
+    s_gpio3_direction = 0u;
+    memset(s_tune_masks, 0, sizeof(s_tune_masks));
+
+    check(boot_until_ready(30000u),
+          "enabled but unreadable reset tuner converges through repair");
+    check(mh_status().provisioning_verified && s_stune_enabled &&
+              s_gpio2_direction == 17u && s_gpio3_direction == 18u &&
+              s_tune_masks[0] == UINT64_C(0x601840A7) &&
+              s_tune_masks[1] == UINT64_C(0x00010300) &&
+              s_tune_masks[2] == UINT64_C(0x1F80BC50) &&
+              s_tune_masks[3] == UINT64_C(0x00400008),
+          "reset recovery verifies both GPIOs and every WWX tuner band");
+    check(tx_first_index("AT+CFUN=4") <
+              tx_first_index("AT#STUNEANT=0") &&
+              tx_first_index("AT#STUNEANT=0") <
+                  tx_first_index("AT#GPIO=2,0,17") &&
+              tx_last_index("AT#GTUNEANT?") <
+                  tx_first_index("AT+CFUN=5"),
+          "reset recovery keeps RF off until exact final tuner readback");
+
+    begin_telit(true);
+    s_tune_query_errors = 1000u;
+    check(!boot_until_ready(30000u) && !mh_status().provisioning_verified &&
+              s_cfun == 4u && mh_tx_count_exact("AT+CFUN=5") == 0u,
+          "persistent tuner read failure cannot enable RF after repair");
+}
+
+static void test_scan_timer_provisioning(void) {
+    begin_telit(true);
+    s_scan_timer_s = 5u;
+    check(boot_until_ready(30000u) && s_scan_timer_s == 60u &&
+              mh_status().provisioning_verified,
+          "factory scan pause is repaired and verified at startup");
+    check(mh_tx_count_exact("AT#NWSCANTMR=60") == 1u &&
+              mh_tx_count_exact("AT#NWSCANTMR?") == 2u &&
+              mh_tx_count_exact("AT#REBOOT") == 0u &&
+              tx_first_index("AT#NWSCANTMR?") <
+                  tx_first_index("AT#NWSCANTMR=60") &&
+              tx_first_index("AT#NWSCANTMR=60") <
+                  tx_last_index("AT#NWSCANTMR?") &&
+              tx_last_index("AT#NWSCANTMR?") <
+                  tx_first_index("AT+CFUN=5"),
+          "scan pause follows query/write/verify before RF without reboot");
+
+    graceful_power_off();
+    check(modem_service_is_powered_off(),
+          "scan fixture powers off before testing the saved setting");
+    mh_clear_tx_capture();
+    check(boot_until_ready(30000u) &&
+              mh_tx_count_exact("AT#NWSCANTMR?") == 1u &&
+              mh_tx_count_exact("AT#NWSCANTMR=60") == 0u &&
+              mh_status().provisioning_verified,
+          "next boot verifies the retained scan pause without NVM wear");
+
+    begin_telit(true);
+    s_scan_timer_s = 5u;
+    s_mh_sim_present = false;
+    s_mh_sim_ready = false;
+    check(boot_until_ready(30000u) && s_scan_timer_s == 60u &&
+              mh_tx_count_exact("AT#NWSCANTMR=60") == 1u,
+          "scan pause provisioning does not depend on an inserted SIM");
+
+    begin_telit(true);
+    s_scan_timer_s = 5u;
+    s_fault = TELIT_FAULT_SCAN_SET_TIMEOUT_ONCE;
+    check(boot_until_ready(45000u) && mh_status().provisioning_verified &&
+              s_fault_consumed && s_scan_timer_s == 60u &&
+              mh_tx_count_exact("AT#NWSCANTMR=60") == 1u &&
+              mh_tx_count_exact("AT#NWSCANTMR?") == 2u &&
+              mh_tx_count_exact("AT#REBOOT") == 0u,
+          "lost scan-set final is resolved by readback, not a duplicate write");
+
+    static const telit_fault_t faults[] = {
+        TELIT_FAULT_SCAN_READBACK_MALFORMED,
+        TELIT_FAULT_SCAN_SET_ERROR,
+        TELIT_FAULT_SCAN_VERIFY_MISMATCH,
+    };
+    for (size_t i = 0u; i < sizeof(faults) / sizeof(faults[0]); i++) {
+        begin_telit(true);
+        s_scan_timer_s = 5u;
+        s_fault = faults[i];
+        check(boot_until_ready(45000u),
+              "scan-setting failure still completes startup");
+        settle_dtr_sleep();
+        check(!mh_status().provisioning_verified,
+              "failed scan-setting verification remains visible after SIM completion");
+        check(mh_status().sms_init_ok,
+              "scan-setting failure does not disable SMS setup");
+        check(mh_status().audio_init_ok,
+              "scan-setting failure does not disable audio setup");
+        check(mh_tx_count_exact("AT#REBOOT") == 0u,
+              "scan-setting failure cannot request a reboot");
+        if (faults[i] == TELIT_FAULT_SCAN_READBACK_MALFORMED) {
+            check(mh_tx_count_exact("AT#NWSCANTMR?") == 3u &&
+                      mh_tx_count_exact("AT#NWSCANTMR=60") == 0u,
+                  "malformed scan queries exhaust bounded retries without writing");
+        } else {
+            check(mh_tx_count_exact("AT#NWSCANTMR=60") == 3u &&
+                      mh_tx_count_exact("AT#NWSCANTMR?") ==
+                          (faults[i] == TELIT_FAULT_SCAN_SET_ERROR ? 1u : 4u),
+                  "failed scan repair is bounded and never accepted without readback");
+        }
+    }
+}
+
+static void test_auto_profile_provisioning(void) {
+    for (uint8_t mode = 0u; mode <= 3u; mode++) {
+        begin_telit(true);
+        s_auto_profile = mode;
+        check(boot_until_ready(30000u) && s_auto_profile == 1u &&
+                  mh_status().provisioning_verified,
+              "disabled and one-shot carrier modes converge to persistent auto");
+        check(mh_tx_count_exact("AT#FWAUTOSIM=1") == (mode == 1u ? 0u : 1u) &&
+                  mh_tx_count_exact("AT#FWAUTOSIM?") == (mode == 1u ? 1u : 2u) &&
+                  mh_tx_count_exact("AT#REBOOT") == 0u &&
+                  tx_first_index("AT+CFUN=4") <
+                      tx_first_index("AT#FWAUTOSIM?") &&
+                  tx_last_index("AT#FWAUTOSIM?") <
+                      tx_first_index("AT#STUNEANT?"),
+              "auto selection is queried and verified before board provisioning");
+    }
+
+    graceful_power_off();
+    mh_clear_tx_capture();
+    check(boot_until_ready(30000u) &&
+              mh_tx_count_exact("AT#FWAUTOSIM?") == 1u &&
+              mh_tx_count_exact("AT#FWAUTOSIM=1") == 0u &&
+              mh_status().provisioning_verified,
+          "saved auto selection is verified without another NVM write");
+
+    begin_telit(true);
+    s_auto_profile = 0u;
+    s_mh_sim_present = false;
+    s_mh_sim_ready = false;
+    check(boot_until_ready(30000u) && s_auto_profile == 1u &&
+              mh_tx_count_exact("AT#FWAUTOSIM=1") == 1u,
+          "persistent auto selection is configured even with no SIM");
+
+    begin_telit(true);
+    s_auto_profile = 0u;
+    s_fault = TELIT_FAULT_AUTO_PROFILE_SET_TIMEOUT_ONCE;
+    check(boot_until_ready(45000u) && mh_status().provisioning_verified &&
+              s_fault_consumed && s_auto_profile == 1u &&
+              mh_tx_count_exact("AT#FWAUTOSIM=1") == 1u &&
+              mh_tx_count_exact("AT#FWAUTOSIM?") == 2u,
+          "lost auto-selection final is resolved by readback without duplicate write");
+
+    static const telit_fault_t faults[] = {
+        TELIT_FAULT_AUTO_PROFILE_READBACK_MALFORMED,
+        TELIT_FAULT_AUTO_PROFILE_SET_ERROR,
+        TELIT_FAULT_AUTO_PROFILE_VERIFY_MISMATCH,
+    };
+    for (size_t i = 0u; i < sizeof(faults) / sizeof(faults[0]); i++) {
+        begin_telit(true);
+        s_auto_profile = 0u;
+        s_fault = faults[i];
+        check(boot_until_ready(45000u),
+              "auto-selection failure preserves otherwise working service");
+        settle_dtr_sleep();
+        check(!mh_status().provisioning_verified &&
+                  mh_status().sms_init_ok && mh_status().audio_init_ok,
+              "failed auto selection remains unverified without disabling SMS or audio");
+        if (faults[i] == TELIT_FAULT_AUTO_PROFILE_READBACK_MALFORMED) {
+            check(mh_tx_count_exact("AT#FWAUTOSIM?") == 3u &&
+                      mh_tx_count_exact("AT#FWAUTOSIM=1") == 0u,
+                  "malformed auto-selection readbacks cannot trigger blind writes");
+        } else {
+            check(mh_tx_count_exact("AT#FWAUTOSIM=1") == 3u &&
+                      mh_tx_count_exact("AT#FWAUTOSIM?") ==
+                          (faults[i] == TELIT_FAULT_AUTO_PROFILE_SET_ERROR ? 1u : 4u),
+                  "auto-selection repair and verification have bounded retries");
+        }
+    }
 }
 
 static void test_pending_power_on_is_not_quiescent_off(void) {
@@ -1725,6 +2042,118 @@ static void test_pending_power_on_is_not_quiescent_off(void) {
           "fresh power-on first enforces the real rail-down dwell");
     check(!modem_service_is_powered_off(),
           "queued power-on cannot let the phone enter dormant during its dwell");
+}
+
+static void test_autonomous_startup_restart_reinitializes_once(void) {
+    static const char *const commands[] = {"AT", "ATE0", "AT#FWAUTOSIM?"};
+    for (size_t i = 0u; i < sizeof(commands) / sizeof(commands[0]); i++) {
+        begin_telit(false);
+        s_startup_drop_command = commands[i];
+        s_startup_drops_remaining = 1u;
+        check(boot_until_ready(70000u),
+              "autonomous restart during probe/init/provision recovers without user action");
+        check(s_startup_drops_remaining == 0u &&
+                  mh_status().provisioning_verified &&
+                  service_probe().sms_wake_armed,
+              "restart discards interrupted exchange and completes full provisioning/SMS wake");
+        check(s_mh_rail_transition_count == 1u &&
+                  mh_tx_count_exact("AT#REBOOT") == 1u &&
+                  mh_tx_count_exact("AT#RXDIV=0,1") == 1u,
+              "autonomous restart retains rail and leaves the controlled repair reboot available");
+        modem_diag_snapshot_t diag;
+        modem_service_get_diag_snapshot(&diag);
+        check(diag.runtime.automatic_recoveries == 1u &&
+                  diag.runtime.power_failures == 0u,
+              "a single startup restart is recorded as recovery, not a power fault");
+    }
+
+    begin_telit(true);
+    s_startup_drop_command = "AT";
+    s_startup_drops_remaining = 2u;
+    check(!boot_until_ready(70000u) &&
+              service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+              s_startup_drops_remaining == 0u && s_mh_rail_enabled,
+          "a second autonomous startup drop is bounded and retains the uncertain rail");
+}
+
+static void begin_startup_restart_wait(void) {
+    begin_telit(true);
+    s_startup_drop_command = "AT";
+    s_startup_drops_remaining = 1u;
+    modem_service_power_on();
+    for (unsigned i = 0u; i < 300u; i++) {
+        mh_advance(100u);
+        if (s_startup_drops_remaining == 0u &&
+            service_probe().state == MODEM_SERVICE_TEST_STATE_MODULE_WAIT) {
+            break;
+        }
+    }
+    check(service_probe().state == MODEM_SERVICE_TEST_STATE_MODULE_WAIT &&
+              service_probe().uart_parked && s_mh_rail_enabled,
+          "observed startup drop enters a parked, powered restart wait");
+}
+
+static void test_startup_restart_preserves_wait_and_shutdown_guards(void) {
+    begin_startup_restart_wait();
+    s_mh_status_restore_pending = false;
+    size_t writes_before = s_mh_uart_write_count;
+    s_mh_status_raw = 2214u;
+    s_mh_status_mv = 1784u;
+    s_mh_rx_idle_high = false;
+    s_mh_ri_asserted = true;
+    s_mh_ri_wake_pending = true;
+    mh_advance(2000u);
+    check(service_probe().state == MODEM_SERVICE_TEST_STATE_MODULE_WAIT &&
+              service_probe().uart_parked &&
+              s_mh_uart_write_count == writes_before,
+          "returning PWRMON and RI cannot bypass RX-idle or transmit during restart");
+    s_mh_status_valid = false;
+    mh_advance(g_modem_vendor.power.ready_budget_ms + 1u);
+    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+              s_mh_rail_enabled,
+          "indeterminate restart has a finite startup budget and cannot authorize a rail cut");
+
+    begin_startup_restart_wait();
+    modem_service_power_on();
+    modem_service_power_off();
+    check(service_probe().power_off_pending,
+          "explicit OFF remains pending across the autonomous restart wait");
+    for (unsigned i = 0u; i < 400u && !modem_service_is_powered_off(); i++) {
+        mh_advance(100u);
+    }
+    check(modem_service_is_powered_off() && !s_mh_rail_enabled &&
+              mh_tx_count_exact("AT#SHDN") == 1u &&
+              mh_tx_count_exact("ATE0") == 0u,
+          "restart honors OFF through a proven AT channel without starting provisioning");
+
+    begin_startup_restart_wait();
+    s_mh_supply_pg = false;
+    mh_advance(2000u); /* Include the restart waiter's initial settle gate. */
+    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+              modem_service_take_supply_power_failure() && s_mh_rail_enabled,
+          "real PG loss during restart remains a supply fault, not another recovery");
+}
+
+static void test_controlled_reboot_ignores_sleep_wake_signals(void) {
+    static const telit_fault_t faults[] = {
+        TELIT_FAULT_REBOOT_RI_BEFORE_DROP,
+        TELIT_FAULT_REBOOT_RI_LOST_FINAL,
+    };
+    for (size_t i = 0u; i < sizeof(faults) / sizeof(faults[0]); i++) {
+        begin_telit(false);
+        s_fault = faults[i];
+        check(boot_until_ready(80000u),
+              "RI/CTS reset activity cannot turn a controlled reboot into a wake failure");
+        modem_diag_snapshot_t diag;
+        modem_service_get_diag_snapshot(&diag);
+        check(mh_status().provisioning_verified &&
+                  mh_tx_count_exact("AT#REBOOT") == 1u &&
+                  diag.runtime.power_failures == 0u &&
+                  diag.transport.wake_timeouts == 0u,
+              "both acknowledged and lost-final reboot paths converge without a power fault");
+        s_mh_ri_asserted = false;
+        s_mh_dtr_wake_works = true;
+    }
 }
 
 static void test_uart_waits_for_module_power_evidence(void) {
@@ -2120,20 +2549,14 @@ static void test_mismatch_writes_verifies_and_reboots_once(void) {
           "post-reboot focused lifecycle qualifies generic SMS wake");
 
     graceful_power_off();
-    size_t writes_before = mh_tx_count_exact("AT#RXDIV=0,1");
-    size_t reboots_before = mh_tx_count_exact("AT#REBOOT");
-    size_t profile_writes_before = mh_tx_count_exact(
-        "AT#WKIO=0;#E2SMSRI=0;\\R2&W0");
-    size_t psmri_sets_before = mh_tx_count_exact("AT#PSMRI=1000");
+    mh_clear_tx_capture();
     check(boot_until_ready(30000u), "second cold boot reaches READY");
     settle_dtr_sleep();
-    check(mh_tx_count_exact("AT#RXDIV=0,1") == writes_before &&
-              mh_tx_count_exact("AT#REBOOT") == reboots_before &&
+    check(mh_tx_count_exact("AT#RXDIV=0,1") == 0u &&
+              mh_tx_count_exact("AT#REBOOT") == 0u &&
               mh_tx_count_exact(
-                  "AT#WKIO=0;#E2SMSRI=0;\\R2&W0") ==
-                  profile_writes_before &&
-              mh_tx_count_exact("AT#PSMRI=1000") ==
-                  psmri_sets_before + 1u &&
+                  "AT#WKIO=0;#E2SMSRI=0;\\R2&W0") == 0u &&
+              mh_tx_count_exact("AT#PSMRI=1000") == 1u &&
               s_psmri_live_armed,
           "normal second boot avoids NVM and reapplies runtime PSMRI once");
 }
@@ -4313,6 +4736,7 @@ static void test_guarded_scan_and_band_maintenance(void) {
     check(boot_until_ready(30000u), "maintenance fixture boots");
     check(modem_service_maintenance_supported(),
           "Telit advertises guarded maintenance through the neutral service");
+    mh_clear_tx_capture();
 
     check(modem_service_maintenance_request_scan_timer(300u),
           "scan timer write is admitted while idle");
@@ -4357,6 +4781,7 @@ static void test_guarded_scan_and_band_maintenance(void) {
 static void test_scan_maintenance_yields_to_call(void) {
     begin_telit(true);
     check(boot_until_ready(30000u), "scan-preemption fixture boots");
+    mh_clear_tx_capture();
     check(modem_service_maintenance_request_scan_timer(900u),
           "scan write is admitted before a call");
 
@@ -6030,6 +6455,9 @@ static void test_phonebook_queue_eviction_and_recovery_are_terminal(void) {
 }
 
 int main(void) {
+    test_autonomous_startup_restart_reinitializes_once();
+    test_startup_restart_preserves_wait_and_shutdown_guards();
+    test_controlled_reboot_ignores_sleep_wake_signals();
     test_pending_power_on_is_not_quiescent_off();
     test_uart_waits_for_module_power_evidence();
     test_continuously_readable_uart_is_tick_bounded();
@@ -6042,12 +6470,16 @@ int main(void) {
     test_power_observation_deadline_rebases_on_restart();
     test_indeterminate_module_status_never_authorizes_rail_cut();
     test_cold_boot_matching_provision();
+    test_scan_timer_provisioning();
+    test_auto_profile_provisioning();
     test_board_imei_capture_is_scoped_and_write_once();
     test_runtime_serving_signal_sampling();
+    test_raw_rx_capture_preserves_wire_bytes();
     test_background_polling_bench_gate_is_narrow();
     test_transport_sleep_confirmation_is_strict();
     test_cold_boot_repairs_dvi_and_restores_runtime_mode();
     test_cold_boot_provisions_antenna_before_rf_online();
+    test_carrier_reset_tuner_read_error();
     test_sim_absent_locked_and_cme_fallback();
     test_mismatch_writes_verifies_and_reboots_once();
     test_sled_mismatch_is_saved_without_reboot();

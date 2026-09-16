@@ -164,7 +164,7 @@ static void test_production_descriptor(void) {
           "manual-supported call operations exposed at protocol layer");
     check(g_modem_vendor.call.progress_finals_may_complete_command,
           "usual Telit finals can complete call commands");
-    check(g_modem_vendor.provision_schema_version == 9u,
+    check(g_modem_vendor.provision_schema_version == 11u,
           "Telit provisioning contract has an explicit schema version");
     check(g_modem_vendor.supplementary.supported &&
               g_modem_vendor.supplementary.call_forward_step_count != NULL &&
@@ -316,6 +316,10 @@ static void test_production_descriptor(void) {
         find_provision_step("AT$GPSPSAV?");
     const modem_provision_step_t *gps_runtime =
         find_provision_step("AT$GPSP?");
+    const modem_provision_step_t *scan_timer =
+        find_provision_step("AT#NWSCANTMR?");
+    const modem_provision_step_t *auto_profile =
+        find_provision_step("AT#FWAUTOSIM?");
     const modem_provision_step_t *cpms = find_provision_step("AT+CPMS?");
     const modem_provision_step_t *wkio = find_provision_step("AT#WKIO?");
     const modem_provision_step_t *ring_profile =
@@ -341,13 +345,48 @@ static void test_production_descriptor(void) {
     const modem_provision_step_t *cfun_completion =
         find_provision_step_nth("AT+CFUN?", 1u);
     check(rxdiv != NULL && sled != NULL && gps_start != NULL &&
-              gps_runtime != NULL &&
+              gps_runtime != NULL && scan_timer != NULL && auto_profile != NULL &&
               cpms != NULL && wkio != NULL && ring_profile != NULL &&
               e2smsri != NULL && psmri != NULL && ecamurc != NULL &&
               dviext != NULL && dvi != NULL &&
               stune != NULL && gpio2 != NULL && gpio3 != NULL && cfun != NULL &&
               cfun_completion != NULL,
           "all approved safety/SIM/event settings use provisioning descriptors");
+    for (size_t i = 0u; i < g_modem_vendor.provision_step_count; i++) {
+        const char *set = g_modem_vendor.provision_steps[i].set_cmd;
+        check(set == NULL || (strstr(set, "#FWSWITCH=") == NULL &&
+                                 strstr(set, "&F") == NULL),
+              "provisioning never forces a carrier or issues factory restore");
+    }
+    if (auto_profile != NULL) {
+        check(auto_profile == &g_modem_vendor.provision_steps[0] &&
+                  auto_profile->prerequisites == MODEM_INIT_PREREQ_NONE &&
+                  auto_profile->persistence == MODEM_SETTING_NVM &&
+                  auto_profile->recoverable && !auto_profile->set_each_pass &&
+                  strcmp(auto_profile->set_cmd, "AT#FWAUTOSIM=1") == 0 &&
+                  auto_profile->parse_readback("#FWAUTOSIM: 1") ==
+                      MODEM_PROVISION_LINE_MATCH &&
+                  auto_profile->parse_readback("#FWAUTOSIM: 0") ==
+                      MODEM_PROVISION_LINE_MISMATCH &&
+                  auto_profile->parse_readback("#FWAUTOSIM: 2") ==
+                      MODEM_PROVISION_LINE_MISMATCH &&
+                  auto_profile->parse_readback("#FWAUTOSIM: 3") ==
+                      MODEM_PROVISION_LINE_MISMATCH &&
+                  auto_profile->parse_readback("#FWAUTOSIMEXP: 1") ==
+                      MODEM_PROVISION_LINE_IGNORE,
+              "persistent automatic carrier selection is verified before board setup");
+        static const char *const invalid_auto_profiles[] = {
+            "#FWAUTOSIM:", "#FWAUTOSIM: bad", "#FWAUTOSIM: -1",
+            "#FWAUTOSIM: 4", "#FWAUTOSIM: 1,0", "#FWAUTOSIM: 1junk",
+        };
+        for (size_t i = 0u;
+             i < sizeof(invalid_auto_profiles) / sizeof(invalid_auto_profiles[0]);
+             i++) {
+            check(auto_profile->parse_readback(invalid_auto_profiles[i]) ==
+                      MODEM_PROVISION_LINE_INVALID,
+                  "auto-selection provisioning rejects malformed readbacks");
+        }
+    }
     if (rxdiv != NULL) {
         check(rxdiv->persistence == MODEM_SETTING_NVM_REBOOT &&
                   rxdiv->parse_readback("#RXDIV: 0,1") ==
@@ -374,6 +413,35 @@ static void test_production_descriptor(void) {
                   sled->parse_readback("#SLED: 5,10,10,1") ==
                       MODEM_PROVISION_LINE_INVALID,
               "STAT_LED is strictly disabled and saved for documented idle current");
+    }
+    if (scan_timer != NULL) {
+        check(scan_timer->persistence == MODEM_SETTING_NVM &&
+                  scan_timer->prerequisites == MODEM_INIT_PREREQ_NONE &&
+                  scan_timer->recoverable &&
+                  scan_timer->degrade == MODEM_DEGRADE_NONE &&
+                  !scan_timer->set_each_pass &&
+                  strcmp(scan_timer->set_cmd, "AT#NWSCANTMR=60") == 0 &&
+                  scan_timer->parse_readback("#NWSCANTMR: 60") ==
+                      MODEM_PROVISION_LINE_MATCH &&
+                  scan_timer->parse_readback("#NWSCANTMR: 5") ==
+                      MODEM_PROVISION_LINE_MISMATCH &&
+                  scan_timer->parse_readback("#NWSCANTMR: 3600") ==
+                      MODEM_PROVISION_LINE_MISMATCH &&
+                  scan_timer->parse_readback("#NWSCANTMREXP: 60") ==
+                      MODEM_PROVISION_LINE_IGNORE,
+              "no-coverage scan pause is verified without blind NVM writes");
+        static const char *const invalid_scan_timers[] = {
+            "#NWSCANTMR:", "#NWSCANTMR: x", "#NWSCANTMR: -60",
+            "#NWSCANTMR: 4", "#NWSCANTMR: 3601", "#NWSCANTMR: 60,5",
+            "#NWSCANTMR: 60junk",
+        };
+        for (size_t i = 0u;
+             i < sizeof(invalid_scan_timers) / sizeof(invalid_scan_timers[0]);
+             i++) {
+            check(scan_timer->parse_readback(invalid_scan_timers[i]) ==
+                      MODEM_PROVISION_LINE_INVALID,
+                  "scan pause rejects malformed and out-of-range readbacks");
+        }
     }
     if (ecamurc != NULL) {
         check(ecamurc->prerequisites == MODEM_INIT_PREREQ_SIM_READY &&
@@ -652,7 +720,22 @@ static void test_antenna_tuner_policy(void) {
           "strict readback rejects a band assigned to the wrong throw");
 
     telit_tune_readback_begin();
+    check(telit_tune_discovery_finish(false, false) ==
+              MODEM_PROVISION_LINE_MATCH &&
+              telit_tune_repair_required(),
+          "factory-reset tuner query error schedules bounded repair");
+    check(telit_tune_final_finish(false, false) ==
+              MODEM_PROVISION_LINE_INVALID,
+          "unreadable tuner table never passes final verification");
+    check(telit_tune_discovery_finish(false, true) ==
+              MODEM_PROVISION_LINE_INVALID,
+          "tuner discovery timeout is not treated as a reset table");
+
+    telit_tune_readback_begin();
     (void)telit_provision_gtune_line("#GTUNEANT: 100002,0,0");
+    check(telit_tune_discovery_finish(false, false) ==
+              MODEM_PROVISION_LINE_INVALID,
+          "partial tuner reply followed by error remains invalid");
     check(telit_tune_discovery_finish(true, false) ==
               MODEM_PROVISION_LINE_MATCH &&
               telit_tune_repair_required(),

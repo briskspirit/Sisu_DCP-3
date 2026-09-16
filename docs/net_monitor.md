@@ -269,6 +269,14 @@ restore/readback failure forces `CFUN=4`, reports `RF LOCKED`, and keeps the
 record for the next boot rather than returning to transmit-capable service with
 unknown RF state.
 
+Startup provisioning verifies a 60-second no-coverage scan pause and repairs
+`NWSCANTMR` only on mismatch. Page 97 presets last until changed or the next
+modem startup; they do not replace that startup default.
+
+Startup also verifies persistent SIM-based carrier selection (`FWAUTOSIM=1`).
+Page 07 reports the module's selected profile; firmware does not force a
+particular carrier with `FWSWITCH`.
+
 Page 98 labels the lifecycle explicitly: `TEST Bx` while applying, `BAND Bx`
 only while that verified preset is active, `RESTORE Bx` during rollback, and
 `BAND BASE` after the exact entry policy has been restored. Leaving the page is

@@ -244,6 +244,18 @@ bool modem_service_request_debug_at(const char *command);
 /* RAM-only bench control. Disabling suppresses periodic radio/storage
  * backstops, but never event-driven work, RI wake, calls, or SMS handling. */
 bool modem_service_request_debug_background_polling(bool enabled);
+/* Opt-in RAM-only capture before AT line framing. Reading requires a stopped
+ * capture; bytes are returned oldest first, including NUL and non-ASCII. */
+#define MODEM_RX_TRACE_CAPACITY 4096u
+typedef struct {
+    bool enabled;
+    uint32_t received;
+    uint16_t retained;
+} modem_rx_trace_status_t;
+bool modem_service_rx_trace_start(void);
+void modem_service_rx_trace_stop(void);
+void modem_service_rx_trace_status(modem_rx_trace_status_t *out);
+size_t modem_service_rx_trace_read(size_t offset, uint8_t *out, size_t capacity);
 /* Guarded Net Monitor maintenance. These APIs are semantic: modem command
  * syntax and readback grammar remain owned by the selected vendor adapter.
  * Every mutation is verified, and cancel converges toward production state. */

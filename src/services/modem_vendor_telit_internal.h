@@ -13,7 +13,7 @@
 #define TELIT_TUNE_COMMAND_DOMAIN_MASK ((UINT64_C(1) << 35u) - 1u)
 #define TELIT_DIAG_QUERY_COUNT 43u
 #define TELIT_INIT_STEP_COUNT 22u
-#define TELIT_PROVISION_STEP_COUNT 26u
+#define TELIT_PROVISION_STEP_COUNT 28u
 
 typedef struct {
     const char *text;

@@ -269,6 +269,8 @@ static void provision_advance(uint32_t now_ms);
 static void provision_handle_final(bool ok, bool timeout, uint32_t now_ms);
 static void provision_begin_reboot_wait(uint32_t now_ms);
 static void provision_note_reboot_drop(uint32_t now_ms);
+static void modem_begin_reinit_wait(uint32_t now_ms);
+static void modem_recover_startup_restart(uint32_t now_ms);
 static uint8_t init_retry_limit(void);
 static bool init_step_is_sim_dependent(const modem_init_step_t *step);
 static bool init_step_capture_satisfied(const modem_init_step_t *step);
@@ -573,6 +575,8 @@ static bool s_provision_reboot_required;
 static bool s_provision_rebooted;
 static bool s_provision_reboot_cycle_active;
 static bool s_provision_reboot_drop_seen;
+static bool s_startup_restart_recovered;
+static bool s_startup_complete;
 static bool s_provision_all_verified;
 static bool s_provision_non_sim_verified;
 static bool s_sim_completion_needed;
@@ -610,6 +614,9 @@ static modem_debug_result_t s_debug_result;
 static bool s_debug_result_pending;
 static char s_debug_last_command[48];
 static char s_debug_last_line[48];
+static uint8_t s_rx_trace[MODEM_RX_TRACE_CAPACITY];
+static modem_rx_trace_status_t s_rx_trace_status;
+static uint16_t s_rx_trace_write;
 
 static bool model_request_kind(modem_request_type_t type, call_txn_kind_t *kind) {
     switch (type) {
@@ -1012,6 +1019,8 @@ void modem_service_init(void) {
     critical_section_init(&s_sms_lock);
     critical_section_init(&s_phonebook_lock);
     memset(&s_status, 0, sizeof(s_status));
+    memset(&s_rx_trace_status, 0, sizeof(s_rx_trace_status));
+    s_rx_trace_write = 0u;
     s_status.available = g_modem_vendor.available;
     s_status.rssi = 99u;
     s_status.ber = 99u;
@@ -1064,6 +1073,8 @@ void modem_service_init(void) {
     s_provision_rebooted = false;
     s_provision_reboot_cycle_active = false;
     s_provision_reboot_drop_seen = false;
+    s_startup_restart_recovered = false;
+    s_startup_complete = false;
     s_provision_all_verified = false;
     s_provision_non_sim_verified = false;
     s_sim_completion_needed = false;
@@ -1194,8 +1205,8 @@ void modem_service_tick(uint32_t now_ms) {
      * since the previous tick, before this tick can change DTR or CTS state. */
     modem_transport_account_residency(now_ms);
     call_model_set_now(&s_call_model, now_ms);
-    modem_transport_tick(now_ms);
     modem_runtime_power_tick(now_ms);
+    modem_transport_tick(now_ms);
     drain_rx();
     sim_maintenance_guard_tick(now_ms);
     process_timeout(now_ms);
@@ -1347,6 +1358,8 @@ void modem_service_power_on(void) {
      * the already-consumed one-reboot allowance. */
     if (s_state == MODEM_STATE_OFF || s_state == MODEM_STATE_FAILED) {
         s_startup_recycled = false;
+        s_startup_restart_recovered = false;
+        s_startup_complete = false;
         s_provision_rebooted = false;
         s_provision_reboot_required = false;
         s_provision_reboot_cycle_active = false;
@@ -2677,6 +2690,50 @@ bool modem_service_phonebook_entry(uint16_t position, modem_phonebook_entry_t *o
     return ok;
 }
 
+bool modem_service_rx_trace_start(void) {
+    if (!s_status_lock_ready) return false;
+    critical_section_enter_blocking(&s_status_lock);
+    memset(&s_rx_trace_status, 0, sizeof(s_rx_trace_status));
+    s_rx_trace_write = 0u;
+    s_rx_trace_status.enabled = true;
+    critical_section_exit(&s_status_lock);
+    return true;
+}
+
+void modem_service_rx_trace_stop(void) {
+    if (!s_status_lock_ready) return;
+    critical_section_enter_blocking(&s_status_lock);
+    s_rx_trace_status.enabled = false;
+    critical_section_exit(&s_status_lock);
+}
+
+void modem_service_rx_trace_status(modem_rx_trace_status_t *out) {
+    if (out == NULL) return;
+    memset(out, 0, sizeof(*out));
+    if (!s_status_lock_ready) return;
+    critical_section_enter_blocking(&s_status_lock);
+    *out = s_rx_trace_status;
+    critical_section_exit(&s_status_lock);
+}
+
+size_t modem_service_rx_trace_read(size_t offset, uint8_t *out, size_t capacity) {
+    if (!s_status_lock_ready || out == NULL || capacity == 0u) return 0u;
+    critical_section_enter_blocking(&s_status_lock);
+    size_t count = 0u;
+    if (!s_rx_trace_status.enabled && offset < s_rx_trace_status.retained) {
+        count = s_rx_trace_status.retained - offset;
+        if (count > capacity) count = capacity;
+        size_t start = (s_rx_trace_write + MODEM_RX_TRACE_CAPACITY -
+                        s_rx_trace_status.retained + offset) %
+                       MODEM_RX_TRACE_CAPACITY;
+        for (size_t i = 0u; i < count; i++) {
+            out[i] = s_rx_trace[(start + i) % MODEM_RX_TRACE_CAPACITY];
+        }
+    }
+    critical_section_exit(&s_status_lock);
+    return count;
+}
+
 static void drain_rx(void) {
     uint8_t buf[MODEM_RX_CHUNK];
     uint32_t remaining = MODEM_RX_TICK_BUDGET;
@@ -2690,6 +2747,20 @@ static void drain_rx(void) {
         remaining -= count;
         critical_section_enter_blocking(&s_status_lock);
         s_status.rx_bytes += count;
+        if (s_rx_trace_status.enabled) {
+            for (uint32_t i = 0u; i < count; i++) {
+                s_rx_trace[s_rx_trace_write] = buf[i];
+                s_rx_trace_write = (s_rx_trace_write + 1u) % MODEM_RX_TRACE_CAPACITY;
+            }
+            uint32_t retained = s_rx_trace_status.retained + count;
+            s_rx_trace_status.retained = retained < MODEM_RX_TRACE_CAPACITY
+                ? (uint16_t)retained : MODEM_RX_TRACE_CAPACITY;
+            if (UINT32_MAX - s_rx_trace_status.received < count) {
+                s_rx_trace_status.received = UINT32_MAX;
+            } else {
+                s_rx_trace_status.received += count;
+            }
+        }
         critical_section_exit(&s_status_lock);
         for (uint32_t i = 0; i < count; i++) {
             feed_byte(buf[i]);
@@ -3943,7 +4014,11 @@ static void modem_transport_tick(uint32_t now_ms) {
     }
 
     bool ri_asserted = modem_uart_hal_ri_asserted();
-    bool ri_evidence = ri_wake || ri_asserted;
+    /* Boot/reset can toggle RI and CTS before the module accepts commands.
+     * Only READY may initiate an unsolicited sleep wake; an explicit command's
+     * pending DTR wake still runs during init/provisioning below. */
+    bool ri_evidence = s_state == MODEM_STATE_READY &&
+        (ri_wake || ri_asserted);
     bool ri_ready_to_wake = false;
 
     if (ri_evidence) {
@@ -4088,6 +4163,11 @@ static void modem_runtime_power_tick(uint32_t now_ms) {
     } else if (g_modem_vendor.power_is_on != NULL &&
                observation.module_status_valid && !module_on &&
                !module_drop_expected) {
+        if (!s_startup_complete && !s_startup_restart_recovered &&
+            !s_provision_reboot_cycle_active) {
+            modem_recover_startup_restart(now_ms);
+            return;
+        }
         /* One low sample is fault evidence, not safe rail-cut evidence. The
          * module may be rebooting; retain VCC until an explicit shutdown path
          * obtains the vendor's sustained-low qualification. */
@@ -4400,6 +4480,7 @@ static void finish_command_result(bool ok, const char *line) {
 }
 
 static void modem_enter_ready(uint32_t now_ms) {
+    s_startup_complete = true;
     bool completed_sim_pass = s_sim_completion_active;
     bool sim_ready = status_sim_ready_snapshot();
     if (s_sim_completion_active) {
@@ -4824,21 +4905,47 @@ static void provision_note_reboot_drop(uint32_t now_ms) {
 static void provision_begin_reboot_wait(uint32_t now_ms) {
     s_diag_controlled_restarts++;
     s_diag_last_recovery_reason = MODEM_DIAG_RECOVERY_PROVISION_REBOOT;
-    if (s_sim_completion_active) {
-        /* A real module reboot resets runtime/profile state, so the pass after
-         * it must be a complete init/provision traversal, not SIM-only. */
-        s_sim_completion_active = false;
-        s_sim_completion_pending = false;
-        s_sim_completion_needed = false;
-        s_sim_completion_failed = false;
-        s_sim_steps_skipped = false;
-    }
     s_provision_rebooted = true;
     s_provision_reboot_required = false;
     s_provision_reboot_cycle_active = true;
     if (g_modem_vendor.power_is_on == NULL) {
         s_provision_reboot_drop_seen = true;
     }
+    modem_begin_reinit_wait(now_ms);
+    LOGI("modem", "waiting for module after controlled provisioning reboot");
+}
+
+static void modem_recover_startup_restart(uint32_t now_ms) {
+    /* FWAUTOSIM may restart Telit during the first AT exchanges. Wait once for
+     * the observed drop with PG still good; do not pulse ON_OFF, cut VCC, or
+     * spend the separate provisioning-reboot allowance. */
+    s_startup_restart_recovered = true;
+    s_diag_automatic_recoveries++;
+    s_diag_last_recovery_reason = MODEM_DIAG_RECOVERY_STARTUP_RESTART;
+    s_diag_last_transition_ms = now_ms;
+    model_cancel_deferred_command();
+    cancel_request_session();
+    s_active = false;
+    s_active_kind = MODEM_AT_NONE;
+    s_active_call_token = 0u;
+    s_active_sms_wake_arm = false;
+    s_operation = MODEM_OP_NONE;
+    s_provision_reboot_required = false;
+    if (!s_uart_parked) {
+        modem_uart_hal_park();
+        s_uart_parked = true;
+    }
+    modem_begin_reinit_wait(now_ms);
+    LOGW("modem", "startup module status dropped; waiting once for restart");
+}
+
+static void modem_begin_reinit_wait(uint32_t now_ms) {
+    /* A reboot invalidates the interrupted pass, even if it was SIM-only. */
+    s_sim_completion_active = false;
+    s_sim_completion_pending = false;
+    s_sim_completion_needed = false;
+    s_sim_completion_failed = false;
+    s_sim_steps_skipped = false;
     s_provision_index = 0u;
     provision_reset_step_state();
     s_init_index = 0u;
@@ -4850,6 +4957,7 @@ static void provision_begin_reboot_wait(uint32_t now_ms) {
     s_ri_release_deadline_ms = 0u;
     sms_wake_reset_session();
     phonebook_clear_cache();
+    modem_line_framer_reset(&s_line_framer);
     s_power_pulsed = true;
     s_boot_deadline_ms = now_ms + g_modem_vendor.power.ready_budget_ms;
     modem_enter_module_wait(now_ms);
@@ -4857,6 +4965,7 @@ static void provision_begin_reboot_wait(uint32_t now_ms) {
 
     critical_section_enter_blocking(&s_status_lock);
     s_status.at_ready = false;
+    s_status.provisioning_verified = false;
     s_status.sim_checked = false;
     s_status.sim_present = false;
     s_status.sim_ready = false;
@@ -4865,7 +4974,6 @@ static void provision_begin_reboot_wait(uint32_t now_ms) {
     s_status.operator_name[0] = '\0';
     s_status.last_update_ms = now_ms;
     critical_section_exit(&s_status_lock);
-    LOGI("modem", "waiting for module after controlled provisioning reboot");
 }
 
 static void handle_ping_failed(uint32_t now_ms) {
@@ -7352,6 +7460,7 @@ static void modem_begin_power_on(uint32_t now_ms) {
         return;
     }
     s_diag_power_on_starts++;
+    s_startup_complete = false;
     s_diag_last_transition_ms = now_ms;
     s_failed_supply_power = false;
     s_supply_power_failure_pending = false;

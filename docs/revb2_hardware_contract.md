@@ -119,6 +119,15 @@ Normal startup is non-blocking:
 5. Require UART RX idle-high before enabling PL011 RX interrupts.
 6. Establish hardware flow control, initialize, provision, then permit service.
 
+Before the first READY state, one observed PWRMON drop with supply PG still
+good is allowed to be a module-initiated restart, such as automatic carrier
+selection after a SIM swap. Firmware retains the rail, parks UART, waits within
+the startup budget for PWRMON and RX-idle readiness, and reruns full AT init and
+provisioning. This does not consume the separate one-reboot provisioning budget.
+A second unexpected drop fails rather than looping. Once READY has been reached,
+an unexpected PWRMON drop still follows the runtime fault policy; a PG failure is
+never treated as a carrier restart. An explicit OFF request survives the wait.
+
 Normal shutdown uses `AT#SHDN`, parks PL011, and keeps the rail powered until
 PWRMON is continuously below the qualified off threshold. A bounded failure
 ladder then retries once through a 3 s GP38 graceful hardware-off pulse and,
@@ -133,6 +142,18 @@ is the transport-sleep evidence. RI wakes the RP for calls, SMS, and buffered
 unsolicited results. UART writes are bounded so a CTS fault cannot deadlock the
 UI core.
 
+Unsolicited RI-triggered DTR wake starts only in READY. Startup and controlled
+reboots can toggle RI/CTS without being asleep, so their readiness is handled by
+the startup waiter, not the short sleep-wake timeout. Explicit command wake-ups
+during initialization and provisioning remain CTS-gated as before.
+
+For UART diagnostics, `modemrx on` starts an opt-in 4096-byte RAM capture before
+line parsing; `modemrx dump` stops it and prints the retained bytes as hex.
+The capture is off at boot, overwrites its oldest bytes when full, and reports
+the overwritten count. `modemrx off` stops without dumping. Starting a new
+capture discards the previous snapshot. It does not change receive policy or
+store SMS, but its output can contain message bodies and subscriber identifiers.
+
 ## Telit Provisioning
 
 The Telit backend owns all module-specific commands and response grammar. The
@@ -143,6 +164,8 @@ The required provisioning includes:
 
 - command-mode hardware flow control
 - SIM observation and readiness
+- persistent SIM-based carrier selection (`#FWAUTOSIM=1`)
+- 60-second no-coverage scan pause (`#NWSCANTMR=60`)
 - LTE registration and signal indications
 - SMS delivery and RI wake behavior
 - `#ECAM` call events plus authoritative `+CLCC` reconciliation
@@ -152,6 +175,13 @@ The required provisioning includes:
 
 Persistent settings use query/compare/write/verify and a bounded reboot budget.
 Blind writes must not be added to the generic init path.
+
+Carrier selection is checked before board provisioning and repaired only on a
+valid mismatch. Firmware does not force an AT&T or Verizon profile with
+`#FWSWITCH`. Automatic selection is not a guarantee of reboot-free SIM swaps:
+a carrier change can restore module settings, which must be verified again.
+If carrier-selection or scan-pause verification fails, the modem can remain
+usable, but provisioning is reported as unverified.
 
 ## Dynamic Antenna Tuning
 

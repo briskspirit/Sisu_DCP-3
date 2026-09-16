@@ -245,9 +245,14 @@ bool telit_tune_readback_exact(void) {
 
 modem_provision_line_t telit_tune_discovery_finish(
     bool command_ok, bool timed_out) {
-    if (timed_out || !command_ok || s_telit_tune_readback.invalid) {
+    if (timed_out || !s_telit_tune_supported_valid ||
+        s_telit_tune_readback.invalid ||
+        (!command_ok && s_telit_tune_readback.saw_row)) {
         return MODEM_PROVISION_LINE_INVALID;
     }
+    /* A carrier factory restore can leave STUNEANT enabled while GTUNEANT
+     * returns an error without rows. Rebuild under CFUN=4; the final exact
+     * readback still gates RF, including when the error persists. */
     /* A syntactically valid but incomplete table can result from an
      * interrupted earlier write. Treat it as repairable policy mismatch;
      * overlapping/out-of-domain rows remain invalid and fail closed. */

@@ -234,6 +234,32 @@ static modem_provision_line_t telit_provision_gps_runtime(const char *line) {
                                   sizeof(expected));
 }
 
+static modem_provision_line_t telit_provision_scan_timer(const char *line) {
+    uint16_t seconds = 0u;
+    modem_diag_line_result_t result =
+        telit_parse_scan_timer_value(line, &seconds);
+    if (result == MODEM_DIAG_LINE_IGNORE) {
+        return MODEM_PROVISION_LINE_IGNORE;
+    }
+    if (result != MODEM_DIAG_LINE_ACCEPT) {
+        return MODEM_PROVISION_LINE_INVALID;
+    }
+    return seconds == 60u ? MODEM_PROVISION_LINE_MATCH
+                          : MODEM_PROVISION_LINE_MISMATCH;
+}
+
+static modem_provision_line_t telit_provision_auto_profile(const char *line) {
+    if (!telit_starts_with(line, "#FWAUTOSIM:")) {
+        return MODEM_PROVISION_LINE_IGNORE;
+    }
+    uint8_t mode = 0u;
+    if (!telit_parse_fwautosim(line, &mode)) {
+        return MODEM_PROVISION_LINE_INVALID;
+    }
+    return mode == 1u ? MODEM_PROVISION_LINE_MATCH
+                      : MODEM_PROVISION_LINE_MISMATCH;
+}
+
 static modem_provision_line_t telit_provision_ecamurc(const char *line) {
     static const uint8_t expected[] = {1u};
     return telit_provision_values(line, "#ECAMURC:", expected,
@@ -381,11 +407,16 @@ static modem_provision_line_t telit_provision_cpms(const char *line) {
         .applicable = (applicable_), \
     }
 
-/* Order matters: hardware safety first, then SIM storage and ECAM ordering.
+/* Order matters: carrier policy before hardware, then SIM storage and ECAM.
  * All mismatches are written once and read back; NVM_REBOOT rows share one
  * controlled reboot after the full pass. DVI remains a separately gated step:
  * ordinary boot must not change an unqualified voice transport. */
 const modem_provision_step_t TELIT_PROVISION_STEPS[] = {
+    /* Enable persistent SIM-based selection, not a fixed carrier or one-shot
+     * mode. Query/repair before board settings; never issue FWSWITCH here. */
+    TELIT_PROVISION("AT#FWAUTOSIM?", "AT#FWAUTOSIM=1", 5000u, 2u, true,
+                    MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_NONE,
+                    MODEM_SETTING_NVM, telit_provision_auto_profile),
     {
         .query_cmd = "AT#STUNEANT?",
         .timeout_ms = 5000u,
@@ -512,6 +543,11 @@ const modem_provision_step_t TELIT_PROVISION_STEPS[] = {
     TELIT_PROVISION("AT$GPSP?", "AT$GPSP=0", 5000u, 2u, false,
                     MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_NONE,
                     MODEM_SETTING_RUNTIME, telit_provision_gps_runtime),
+    /* Carrier-profile restores can return the no-coverage scan pause to 5 s.
+     * NWSCANTMR auto-saves and needs no reboot; verify before resuming RF. */
+    TELIT_PROVISION("AT#NWSCANTMR?", "AT#NWSCANTMR=60", 5000u, 2u, true,
+                    MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_NONE,
+                    MODEM_SETTING_NVM, telit_provision_scan_timer),
     TELIT_PROVISION("AT+CPMS?", "AT+CPMS=\"ME\",\"ME\",\"ME\"",
                     15000u, 2u, true, MODEM_DEGRADE_SMS_SETUP,
                     MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_NVM,
@@ -612,6 +648,4 @@ _Static_assert(sizeof(TELIT_PROVISION_STEPS) /
 
 #undef TELIT_PROVISION
 #undef TELIT_PROVISION_IF
-
-
 
