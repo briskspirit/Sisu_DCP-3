@@ -13,6 +13,16 @@
 #include "services/phonebook_types.h"
 #include "services/sms_types.h"
 
+/* EF-SPN has up to 16 characters; allow their UTF-8 representation. */
+#define MODEM_OPERATOR_NAME_CAPACITY 49u
+
+typedef enum {
+    MODEM_OPERATOR_NAME_NONE = 0,
+    MODEM_OPERATOR_NAME_DATABASE,
+    MODEM_OPERATOR_NAME_SIM,
+    MODEM_OPERATOR_NAME_PLMN,
+} modem_operator_name_source_t;
+
 typedef struct {
     bool available;
     bool at_ready;
@@ -75,7 +85,8 @@ typedef struct {
      * New-call gate reads this to revert to the surviving single call. NONE unless a
      * New-call's 2nd leg just failed; reset at the next dial / when it connects. */
     modem_call_result_t second_call_result;
-    char operator_name[17];
+    char operator_name[MODEM_OPERATOR_NAME_CAPACITY];
+    modem_operator_name_source_t operator_name_source;
     char incoming_number[MODEM_PHONE_MAX + 1u];
     uint32_t rx_bytes;
     /* UART health (from modem_uart_hal): bytes dropped on a full receive ring,

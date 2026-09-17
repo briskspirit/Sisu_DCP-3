@@ -1372,6 +1372,9 @@ static void test_typed_diagnostics(void) {
               signal.rat == MODEM_SIGNAL_RAT_LTE &&
               signal.rsrp_dbm == -107 && signal.rsrq_db_x2 == -34 &&
               signal.sinr_db_x10 == 12 && signal.channel == 5230u &&
+              strcmp(signal.mcc, "310") == 0 &&
+              strcmp(signal.mnc, "410") == 0 &&
+              (signal.valid_fields & MODEM_SIGNAL_VALID_PLMN) != 0u &&
               signal.cell_id == UINT32_C(0xabcdef01) &&
               (signal.valid_fields &
                (MODEM_SIGNAL_VALID_RSRP | MODEM_SIGNAL_VALID_RSRQ |

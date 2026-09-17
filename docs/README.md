@@ -49,6 +49,8 @@ claim is the current best understanding, not a measured fact.
 
 ## UI And Protocol Records
 
+- [Operator names](operator_names.md): serving-PLMN database, SIM-name fallback,
+  numeric fallback, and mapping provenance.
 - [LCD calibration](lcd_calibration.md): Nokia controller ground truth,
   aftermarket-panel tuning, persistence, and adjustment controls.
 - [Visual voicemail control SMS](visual_voicemail_sms.md): protocol

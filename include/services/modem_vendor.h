@@ -285,6 +285,14 @@ typedef struct {
     bool (*parse_response)(const char *line, modem_signal_sample_t *out);
 } modem_signal_query_t;
 
+typedef struct {
+    const char *query_cmd;
+    const char *response_prefix;
+    uint32_t timeout_ms;
+    /* True for a valid (possibly empty) SIM-owned name, decoded as UTF-8. */
+    bool (*parse_response)(const char *line, char *out, size_t out_cap);
+} modem_sim_provider_query_t;
+
 typedef struct modem_vendor {
     bool available;
     uint32_t capabilities;       /* modem_vendor_capability_t */
@@ -313,6 +321,7 @@ typedef struct modem_vendor {
     modem_call_control_t call;
     modem_supplementary_vendor_t supplementary;
     modem_signal_query_t signal_query;
+    modem_sim_provider_query_t sim_provider_query;
     /* Diagnostic parse/finalize callbacks run while the generic service holds
      * its status-publication lock. They must remain pure protocol functions:
      * no modem_service_* calls, lock acquisition, or AT transmission. */

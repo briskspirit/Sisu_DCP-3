@@ -17,6 +17,7 @@ enum {
     MODEM_SIGNAL_VALID_SINR = 1u << 3,
     MODEM_SIGNAL_VALID_CHANNEL = 1u << 4,
     MODEM_SIGNAL_VALID_CELL_ID = 1u << 5,
+    MODEM_SIGNAL_VALID_PLMN = 1u << 6,
 };
 
 /* Vendor-neutral serving-cell sample. Units are deliberately fixed point:
@@ -32,6 +33,9 @@ typedef struct {
     int16_t sinr_db_x10;
     uint16_t valid_fields;
     modem_signal_rat_t rat;
+    /* Decimal strings preserve leading zeros and two/three-digit MNCs. */
+    char mcc[4];
+    char mnc[4];
 } modem_signal_sample_t;
 
 #endif

@@ -175,7 +175,7 @@ typedef struct {
     uint32_t unlock_armed_until_ms;
     char standby_message[33];
     uint32_t standby_message_until_ms;
-    char operator_name[17];
+    char operator_name[MODEM_OPERATOR_NAME_CAPACITY];
     bool sim_missing;
     sim_presence_ui_state_t sim_presence_ui;
     uint16_t modem_provision_version_recorded;

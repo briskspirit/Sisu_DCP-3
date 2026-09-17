@@ -71,7 +71,7 @@ typedef struct {
     uint32_t rail_off_poll_ms;
     uint32_t rx_tick_budget;
     uint32_t signal_active_ms;
-    uint32_t cops_backstop_ms;
+    uint32_t sim_provider_retry_ms;
 } modem_service_test_snapshot_t;
 
 /* Host-only visibility for invariants that intentionally do not belong to the

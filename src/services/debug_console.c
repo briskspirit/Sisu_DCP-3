@@ -2163,6 +2163,14 @@ static void command_status(void) {
            (unsigned long)status.sms_sent_count,
            (unsigned long)status.sms_received_count,
            (unsigned long)status.command_errors);
+    const char *operator_source =
+        status.operator_name_source == MODEM_OPERATOR_NAME_DATABASE ? "db" :
+        status.operator_name_source == MODEM_OPERATOR_NAME_SIM ? "sim" :
+        status.operator_name_source == MODEM_OPERATOR_NAME_PLMN ? "plmn" : "none";
+    bool plmn_valid = (status.signal.valid_fields & MODEM_SIGNAL_VALID_PLMN) != 0u;
+    printf("[debug] operator source=%s plmn=%s/%s\n", operator_source,
+           plmn_valid ? status.signal.mcc : "--",
+           plmn_valid ? status.signal.mnc : "--");
     printf("[debug] signal seq=%lu rat=%u valid=%02x channel=%lu cell=%08lx rssi=%d rsrp=%d rsrq_x2=%d sinr_x10=%d age=%lums\n",
            (unsigned long)status.signal.sequence,
            (unsigned)status.signal.rat,

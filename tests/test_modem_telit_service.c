@@ -48,6 +48,9 @@ static bool s_diag_moni_hold_once;
 static bool s_diag_firmware_hold_once;
 static const char *s_rfsts_response;
 static const char *s_cops_response;
+static const char *s_sim_provider_response;
+static bool s_sim_provider_error;
+static char s_sim_provider_fixture[64];
 static const char *s_clcc_row;
 static bool s_sms_keep_unread;
 static bool s_sms_test_row_enabled;
@@ -690,6 +693,13 @@ static void telit_response(const char *command) {
         if (s_cops_response != NULL) {
             mh_rx_push(s_cops_response);
         }
+    } else if (strcmp(command, g_modem_vendor.sim_provider_query.query_cmd) == 0) {
+        if (s_sim_provider_response != NULL) {
+            mh_rx_push(s_sim_provider_response);
+        }
+        if (s_sim_provider_error) {
+            s_mh_final = MH_FINAL_ERROR;
+        }
     } else if (strcmp(command, "AT+CIREG?") == 0) {
         mh_rx_push("+CIREG: 2,1");
     } else if (strcmp(command, "AT#FWAUTOSIM?") == 0) {
@@ -1274,6 +1284,8 @@ static void begin_telit(bool rxdiv_configured) {
     s_diag_firmware_hold_once = false;
     s_rfsts_response = NULL;
     s_cops_response = NULL;
+    s_sim_provider_response = NULL;
+    s_sim_provider_error = false;
     s_clcc_row = NULL;
     s_sms_keep_unread = false;
     s_sms_test_row_enabled = false;
@@ -1777,7 +1789,7 @@ static void test_background_polling_bench_gate_is_narrow(void) {
     check(!diag.scheduler.background_polling_enabled,
           "diagnostics publish disabled background polling");
 
-    mh_advance(service_probe().cops_backstop_ms + 1u);
+    mh_advance(300001u);
     check(mh_tx_count_exact("AT#RFSTS") == signal_before &&
               mh_tx_count_exact("AT+CEREG?") == cereg_before &&
               mh_tx_count_exact("AT+COPS?") == cops_before &&
@@ -1794,7 +1806,7 @@ static void test_background_polling_bench_gate_is_narrow(void) {
     check(diag.scheduler.background_polling_enabled &&
               mh_tx_count_exact("AT#RFSTS") > signal_before &&
               mh_tx_count_exact("AT+CEREG?") > cereg_before &&
-              mh_tx_count_exact("AT+COPS?") > cops_before &&
+              mh_tx_count_exact("AT+COPS?") == cops_before &&
               mh_tx_count_exact("AT+CPMS?") > cpms_before,
           "re-enable immediately drains overdue production backstops");
 }
@@ -6083,20 +6095,43 @@ static void test_mwi_ambiguous_query_never_invents_voice_mail(void) {
           "solicited raw MWI response cannot masquerade as a production URC");
 }
 
+static const char *UNKNOWN_PLMN_RFSTS =
+    "#RFSTS: \"001 01\",5230,-101,-82,-11.5,00AF,,32,3,1,"
+    "ABCDEF01,\"310410123456789\",\"Network Alias\",2,12,100";
+
+static void set_sim_provider_fixture(const char *name) {
+    static const char HEX[] = "0123456789ABCDEF";
+    size_t length = strlen(name);
+    check(length <= 16u, "SIM provider fixture fits EF-SPN");
+    strcpy(s_sim_provider_fixture, "+CRSM: 144,0,\"00");
+    size_t offset = strlen(s_sim_provider_fixture);
+    for (size_t i = 0u; i < 16u; i++) {
+        uint8_t byte = i < length ? (uint8_t)name[i] : 0xffu;
+        s_sim_provider_fixture[offset++] = HEX[byte >> 4u];
+        s_sim_provider_fixture[offset++] = HEX[byte & 15u];
+    }
+    s_sim_provider_fixture[offset++] = '"';
+    s_sim_provider_fixture[offset] = '\0';
+    s_sim_provider_response = s_sim_provider_fixture;
+}
+
 static void test_carrier_refresh_priority(void) {
     const char *held_commands[] = {"AT#MBN"};
     for (size_t i = 0u; i < sizeof(held_commands) / sizeof(held_commands[0]); i++) {
         begin_telit(true);
-        s_cops_response = "+COPS: 0,0,\"Test Carrier\",7";
+        s_cops_response = "+COPS: 0,0,\"Misleading Brand\",7";
         s_hold_final_command = held_commands[i];
         check(boot_until_ready(30000u), "carrier-priority fixture boots");
         mh_feed("+CEREG: 1");
         mh_advance(1000u);
         modem_status_t status = mh_status();
         check(status.network_registered &&
-                  strcmp(status.operator_name, "Test Carrier") == 0,
+                  strcmp(status.operator_name, "AT&T") == 0 &&
+                  status.operator_name_source == MODEM_OPERATOR_NAME_DATABASE,
               "carrier is available while a supplementary query is stalled");
-        check(tx_first_index("AT+COPS?") < tx_first_index(held_commands[i]),
+        check(tx_first_index("AT#RFSTS") < tx_first_index(held_commands[i]) &&
+                  mh_tx_count_exact("AT+COPS?") == 0u &&
+                  mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 0u,
               "boot carrier lookup precedes slow supplementary work");
     }
 
@@ -6112,10 +6147,9 @@ static void test_carrier_refresh_priority(void) {
     mh_clear_tx_capture();
     check(modem_service_request_debug_at("AT+CGMM"),
           "ordinary request queues behind the active command");
-    s_cops_response = "+COPS: 0,0,\"New Carrier\",7";
     mh_feed("+CEREG: 0");
     mh_feed("+CEREG: 1");
-    check(mh_tx_count_exact("AT+COPS?") == 0u,
+    check(mh_tx_count_exact("AT#RFSTS") == 0u,
           "registration refresh never interrupts an on-wire command");
     modem_supplementary_refresh_arm(
         MODEM_SUPPLEMENTARY_REFRESH_VOICE_MAILBOX, s_mh_now);
@@ -6124,14 +6158,158 @@ static void test_carrier_refresh_priority(void) {
     s_hold_final_command = NULL;
     mh_feed("OK");
     mh_settle();
-    check(strcmp(mh_status().operator_name, "New Carrier") == 0 &&
-              tx_first_index("AT+COPS?") < tx_first_index("AT+CGMM") &&
-              tx_first_index("AT+COPS?") < tx_first_index("AT#RFSTS"),
-          "registration-edge carrier refresh precedes ordinary queued work and signal polling");
+    check(strcmp(mh_status().operator_name, "AT&T") == 0 &&
+              tx_first_index("AT#RFSTS") < tx_first_index("AT+CGMM") &&
+              mh_tx_count_exact("AT+COPS?") == 0u,
+          "registration-edge serving PLMN refresh precedes ordinary queued work");
     check(tx_first_index("AT#MBN") < tx_first_index("AT#MWI?") &&
               tx_first_index("AT#MWI?") < tx_first_index("AT#CFF?") &&
               mh_tx_count_exact("AT+CCFC=0,2,,,1") == 0u,
           "re-registration keeps voicemail ahead of local forwarding flags");
+}
+
+static void test_operator_name_fallbacks(void) {
+    const char *sim_names[] = {"US Mobile", "", "US Mobile", "US Mobile", "US Mobile", "US Mobile"};
+    const char *expected[] = {"US Mobile", "00101", "00101", "00101", "00101", "00101"};
+    char duplicate[128];
+    for (unsigned i = 0u; i < 6u; i++) {
+        begin_telit(true);
+        s_rfsts_response = UNKNOWN_PLMN_RFSTS;
+        set_sim_provider_fixture(sim_names[i]);
+        if (i == 2u) s_sim_provider_response = "+CRSM: 144,0,\"0055\"";
+        if (i == 3u) s_sim_provider_error = true;
+        if (i == 4u) s_sim_provider_response = NULL;
+        if (i == 5u) {
+            snprintf(duplicate, sizeof(duplicate), "%s\r\n%s",
+                     s_sim_provider_fixture, s_sim_provider_fixture);
+            s_sim_provider_response = duplicate;
+        }
+        check(boot_until_ready(30000u), "SIM-name fallback fixture boots");
+        mh_feed("+CEREG: 1");
+        mh_advance(1000u);
+        modem_status_t status = mh_status();
+        check(strcmp(status.operator_name, expected[i]) == 0 &&
+                  status.operator_name_source == (i == 0u
+                      ? MODEM_OPERATOR_NAME_SIM : MODEM_OPERATOR_NAME_PLMN) &&
+                  strcmp(status.signal.mcc, "001") == 0 &&
+                  strcmp(status.signal.mnc, "01") == 0 &&
+                  mh_tx_count_exact("AT+COPS?") == 0u &&
+                  mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 1u,
+              "unknown PLMN uses only validated SIM name or numeric digits");
+
+        modem_service_set_signal_sampling(true, s_mh_now);
+        mh_advance(1001u);
+        mh_advance(1001u);
+        check(mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 1u,
+              "foreground signal sampling cannot repeatedly read the SIM name");
+        if (i >= 2u) {
+            mh_advance(service_probe().sim_provider_retry_ms);
+            mh_advance(100u);
+            check(mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 2u,
+                  "failed SIM name gets one delayed retry");
+            mh_advance(service_probe().sim_provider_retry_ms * 2u);
+            check(mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 2u &&
+                      strcmp(mh_status().operator_name, "00101") == 0,
+                  "persistent SIM read failure keeps numeric name without a polling loop");
+        } else {
+            mh_advance(service_probe().sim_provider_retry_ms * 2u);
+            check(mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 1u &&
+                      strcmp(mh_status().operator_name, expected[i]) == 0,
+                  "valid SIM name or empty field stays cached across background refreshes");
+        }
+    }
+
+    begin_telit(true);
+    s_rfsts_response =
+        "#RFSTS: \"001 001\",5230,-101,-82,-11.5,00AF,,32,3,1,"
+        "ABCDEF01,\"310410123456789\",\"Network Alias\",2,12,100";
+    set_sim_provider_fixture("");
+    check(boot_until_ready(30000u), "three-digit MNC fallback fixture boots");
+    mh_feed("+CEREG: 1");
+    mh_advance(1000u);
+    check(strcmp(mh_status().operator_name, "001001") == 0,
+          "numeric fallback preserves a three-digit MNC and every leading zero");
+}
+
+static void test_operator_name_registration_and_sim_lifetimes(void) {
+    begin_telit(true);
+    s_rfsts_response = UNKNOWN_PLMN_RFSTS;
+    set_sim_provider_fixture("SIM Brand");
+    check(boot_until_ready(30000u), "operator lifetime fixture boots");
+    mh_feed("+CEREG: 1");
+    mh_advance(1000u);
+    check(strcmp(mh_status().operator_name, "SIM Brand") == 0,
+          "unknown network initially uses cached SIM provider");
+    s_rfsts_response = NULL;
+    modem_service_set_signal_sampling(true, s_mh_now);
+    mh_advance(1001u);
+    check(strcmp(mh_status().operator_name, "AT&T") == 0 &&
+              mh_status().operator_name_source == MODEM_OPERATOR_NAME_DATABASE &&
+              mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 1u,
+          "a new known serving PLMN immediately outranks the cached SIM brand");
+    mh_feed("+CEREG: 0");
+    check(mh_status().operator_name[0] == '\0' &&
+              mh_status().operator_name_source == MODEM_OPERATOR_NAME_NONE,
+          "loss of registration immediately clears the old operator name");
+
+    s_hold_final_command = "AT#RFSTS";
+    mh_feed("+CEREG: 1");
+    mh_advance(2u);
+    check(service_probe().command_active,
+          "serving-cell query can be held across a roaming edge");
+    mh_feed(UNKNOWN_PLMN_RFSTS);
+    mh_feed("+CEREG: 5");
+    mh_feed("OK");
+    check(mh_status().operator_name[0] == '\0',
+          "a late serving-cell final cannot resurrect a pre-roaming identity");
+    mh_feed(UNKNOWN_PLMN_RFSTS);
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    mh_advance(100u);
+    check(strcmp(mh_status().operator_name, "SIM Brand") == 0,
+          "the new registration can reuse this SIM provider after a fresh PLMN sample");
+
+    begin_telit(true);
+    s_rfsts_response = UNKNOWN_PLMN_RFSTS;
+    s_hold_final_command = g_modem_vendor.sim_provider_query.query_cmd;
+    check(boot_until_ready(30000u), "in-flight SIM replacement fixture boots");
+    mh_feed("+CEREG: 1");
+    mh_advance(100u);
+    check(mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 1u,
+          "unknown network has an in-flight SIM provider read");
+    mh_feed("#QSS: 0,0");
+    check(mh_status().operator_name[0] == '\0',
+          "removing the SIM clears both the name and registered identity");
+    set_sim_provider_fixture("Old SIM");
+    mh_feed(s_sim_provider_response);
+    mh_feed("OK");
+    check(mh_status().operator_name[0] == '\0',
+          "the removed SIM's delayed name response is discarded");
+    set_sim_provider_fixture("New SIM");
+    s_hold_final_command = NULL;
+    mh_feed("#QSS: 0,3");
+    for (unsigned i = 0u; i < 300u &&
+         strcmp(mh_status().operator_name, "New SIM") != 0; i++) {
+        mh_advance(100u);
+    }
+    check(strcmp(mh_status().operator_name, "New SIM") == 0 &&
+              mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 2u,
+          "SIM completion reads the new provider rather than retaining the old cache");
+
+    mh_clear_tx_capture();
+    s_mh_supply_pg = false;
+    mh_advance(250u);
+    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+              mh_status().operator_name[0] == '\0',
+          "a retained-module fault immediately retires the old network identity");
+    s_mh_supply_pg = true;
+    set_sim_provider_fixture("Recovered SIM");
+    check(boot_until_ready(30000u), "operator cache fixture recovers retained modem");
+    mh_feed("+CEREG: 1");
+    mh_advance(1000u);
+    check(strcmp(mh_status().operator_name, "Recovered SIM") == 0 &&
+              mh_tx_count_exact(g_modem_vendor.sim_provider_query.query_cmd) == 1u,
+          "recovery rereads the SIM name even without a not-ready SIM indication");
 }
 
 static void test_local_forwarding_flags_without_network_fallback(void) {
@@ -7632,7 +7810,96 @@ static void test_direct_delivery_plain_bodies_are_read_raw(void) {
           "a body past the raw cap is dropped and the line path resumes");
 }
 
+static void test_sim_provider_query_keeps_receiving(bool timeout) {
+    begin_telit(true);
+    s_rfsts_response = UNKNOWN_PLMN_RFSTS;
+    set_sim_provider_fixture("US Mobile");
+    s_hold_final_command = g_modem_vendor.sim_provider_query.query_cmd;
+    check(boot_until_ready(30000u), "SIM-name receive fixture boots");
+    mh_feed("+CEREG: 1");
+    mh_advance(100u);
+    check(service_probe().command_active &&
+              strcmp(mh_status().operator_name, "00101") == 0,
+          "pending SIM read leaves an honest numeric operator visible");
+    modem_status_t before = mh_status();
+    check(modem_service_request_debug_at("AT+CGMM"),
+          "ordinary request queues behind the SIM read");
+    feed_direct("+CMT: \"15551230000\",\"\",\"20260916210000\",129,4098,0,8,2", "OK");
+    mh_feed("RING");
+    mh_feed("+CLIP: \"+15557654321\",145,,,,0");
+    mh_feed("#ECAM: 0,6,1,,,");
+    check(mh_status().ring_active && service_probe().command_active &&
+              strcmp(mh_status().incoming_number, "+15557654321") == 0,
+          "SIM name collection continues routing incoming call and SMS indications");
+    check(modem_service_request_answer(), "incoming answer queues during the SIM read");
+    s_clcc_row = "+CLCC: 1,1,0,0,0,\"15557654321\",145";
+    if (timeout) {
+        mh_advance(g_modem_vendor.sim_provider_query.timeout_ms + 1u);
+        check(service_probe().command_active &&
+                  mh_tx_count_exact("ATA") == 0u &&
+                  mh_tx_count_exact("AT+CGMM") == 0u,
+              "expired SIM read retains final ownership before queued answer or SMS storage");
+        feed_direct("+CMT: \"15551230000\",\"\",\"20260916210001\",129,4098,0,8,2", "OK");
+        check(service_probe().command_active && mh_tx_count_exact("ATA") == 0u,
+              "an SMS body reading OK cannot release the late-response drain");
+    }
+    s_hold_final_command = NULL;
+    mh_feed(s_sim_provider_response);
+    mh_feed("OK");
+    for (unsigned i = 0u; i < 5u; i++) mh_advance(100u);
+    check(tx_first_index("ATA") < tx_first_index("AT+CGMM") &&
+              mh_status().call_state == MODEM_CALL_ACTIVE &&
+              mh_status().sms_received_count == before.sms_received_count + (timeout ? 2u : 1u) &&
+              strcmp(mh_status().operator_name, timeout ? "00101" : "US Mobile") == 0,
+          "answer takes priority after the SIM final and the incoming SMS is preserved");
+}
+
+static void test_sim_provider_unreleased_channel_and_shutdown(void) {
+    begin_telit(true);
+    s_rfsts_response = UNKNOWN_PLMN_RFSTS;
+    s_hold_final_command = g_modem_vendor.sim_provider_query.query_cmd;
+    check(boot_until_ready(30000u), "SIM drain failure fixture boots");
+    mh_feed("+CEREG: 1");
+    mh_advance(100u);
+    check(modem_service_request_debug_at("AT+CGMM"), "request queues before SIM timeout");
+    mh_advance(g_modem_vendor.sim_provider_query.timeout_ms + 1u);
+    mh_advance(5001u);
+    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+              service_probe().failed_module_may_be_live && s_mh_rail_enabled &&
+              mh_tx_count_exact("AT+CGMM") == 0u &&
+              service_probe().request_queue_depth == 0u,
+          "an unreleased SIM command fails the channel without dispatching queued work or cutting power");
+    mh_feed("OK");
+    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+              mh_tx_count_exact("AT+CGMM") == 0u,
+          "a final after drain exhaustion cannot revive cancelled requests");
+
+    for (unsigned timeout = 0u; timeout < 2u; timeout++) {
+        begin_telit(true);
+        s_rfsts_response = UNKNOWN_PLMN_RFSTS;
+        s_hold_final_command = g_modem_vendor.sim_provider_query.query_cmd;
+        check(boot_until_ready(30000u), "SIM read shutdown fixture boots");
+        mh_feed("+CEREG: 1");
+        mh_advance(100u);
+        if (timeout) mh_advance(g_modem_vendor.sim_provider_query.timeout_ms + 1u);
+        modem_service_power_off();
+        check(service_probe().power_off_pending && service_probe().command_active &&
+                  mh_tx_count_exact("AT#SHDN") == 0u,
+              "shutdown waits for the non-abortable SIM read to release the AT channel");
+        s_hold_final_command = NULL;
+        mh_feed("ERROR");
+        mh_advance(10u);
+        check(mh_tx_count_exact("AT#SHDN") == 1u,
+              "the SIM final releases exactly one deferred shutdown command");
+    }
+}
+
 int main(void) {
+    test_operator_name_fallbacks();
+    test_operator_name_registration_and_sim_lifetimes();
+    test_sim_provider_query_keeps_receiving(false);
+    test_sim_provider_query_keeps_receiving(true);
+    test_sim_provider_unreleased_channel_and_shutdown();
     test_autonomous_startup_restart_reinitializes_once();
     test_startup_restart_preserves_wait_and_shutdown_guards();
     test_controlled_reboot_ignores_sleep_wake_signals();

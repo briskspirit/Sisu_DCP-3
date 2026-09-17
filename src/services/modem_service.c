@@ -20,6 +20,7 @@
 #include "services/modem_line_parser.h"
 #include "services/modem_phonebook_state.h"
 #include "services/modem_sms_direct.h"
+#include "services/operator_name_db.h"
 #include "modem_phonebook_protocol_internal.h"
 #include "modem_sms_protocol_internal.h"
 #include "modem_sms_state_internal.h"
@@ -63,7 +64,9 @@
 
 /* The selected backend owns its transport wake strategy: either a tracked TX
  * poke after command-driven idle or a physical DTR/CTS handshake. */
-#define MODEM_COPS_BACKSTOP_MS 300000u
+#define MODEM_SIM_PROVIDER_RETRY_MS 60000u
+#define MODEM_SIM_PROVIDER_ATTEMPTS 2u
+#define MODEM_SIM_PROVIDER_DRAIN_MS 5000u
 #define MODEM_CPMS_POLL_PERIOD_MS 300000u /* receive-store fullness backstop; +CMTI re-checks now */
 #define MODEM_SMS_SETUP_RETRY_MS 3000u   /* deferred CSMP/CPMS retry cadence until they stick */
 #define MODEM_SMS_WAKE_RETRY_DELAY_MS 250u
@@ -128,7 +131,7 @@ typedef enum {
     MODEM_AT_SMS_SETUP_CPMS, /* deferred SMS setup retry (CPMS -> ME storage) */
     MODEM_AT_SMS_WAKE_ARM, /* transient vendor command proving SMS can wake DTR sleep via RI */
     MODEM_AT_CEREG,
-    MODEM_AT_COPS,
+    MODEM_AT_COPS, /* reserved diagnostic kind; standby uses serving PLMN */
     MODEM_AT_CLCC_MODEL,     /* typed all-leg reconcile for the id-authoritative model */
     MODEM_AT_CALL_DIAL,
     MODEM_AT_CALL_ANSWER,
@@ -158,6 +161,8 @@ typedef enum {
     MODEM_AT_POWER_OFF,
     MODEM_AT_DEBUG,
     MODEM_AT_CALL_FORWARD_FLAGS,
+    MODEM_AT_SIM_PROVIDER,
+    MODEM_AT_SIM_PROVIDER_DRAIN,
 } modem_at_kind_t;
 
 typedef enum {
@@ -395,7 +400,10 @@ static void signal_finish_query(bool command_ok, uint32_t now_ms);
 static void signal_invalidate_locked(uint32_t now_ms);
 static void parse_sms_cpms(const char *line);
 static void parse_cereg(const char *line);
-static void parse_cops(const char *line);
+static void operator_name_publish_locked(void);
+static void sim_provider_reset(void);
+static bool sim_provider_start_query(uint32_t now_ms);
+static void sim_provider_finish_query(bool ok);
 static bool parse_cpin(const char *line);
 static bool is_sim_absent_error(const char *line);
 static void apply_sim_observation(modem_sim_observation_t observation);
@@ -528,8 +536,20 @@ static uint32_t s_next_power_observation_ms;
 static uint32_t s_next_action_ms;
 static uint32_t s_next_signal_ms;
 static uint32_t s_next_cereg_ms;
-static uint32_t s_next_cops_ms;
-static bool s_cops_refresh_needed; /* registration changed: refresh the operator name now */
+static bool s_operator_refresh_needed;
+static uint32_t s_registration_generation;
+static uint32_t s_signal_registration_generation;
+static uint32_t s_signal_transport_counter;
+static uint32_t s_sim_generation;
+static uint32_t s_sim_provider_generation;
+static uint32_t s_sim_provider_transport_counter;
+static uint32_t s_next_sim_provider_ms;
+static uint8_t s_sim_provider_attempts;
+static bool s_sim_provider_cached;
+static bool s_sim_provider_line_seen;
+static bool s_sim_provider_line_invalid;
+static char s_sim_provider_name[MODEM_OPERATOR_NAME_CAPACITY];
+static char s_sim_provider_shadow[MODEM_OPERATOR_NAME_CAPACITY];
 static bool s_cfu_flags_row_seen;
 static bool s_signal_foreground_sampling;
 static bool s_signal_refresh_needed;
@@ -1050,6 +1070,11 @@ void modem_service_init(void) {
     s_signal_line_seen = false;
     s_signal_line_invalid = false;
     memset(&s_signal_shadow, 0, sizeof(s_signal_shadow));
+    s_operator_refresh_needed = false;
+    s_registration_generation = 0u;
+    s_signal_registration_generation = 0u;
+    s_sim_generation = 0u;
+    sim_provider_reset();
     modem_diag_engine_init(&s_diag_engine, g_modem_vendor.diag_queries,
                            g_modem_vendor.diag_query_count,
                            g_modem_vendor.diag_group_finish,
@@ -1529,10 +1554,95 @@ static uint32_t signal_next_sequence(uint32_t current) {
 }
 
 static void signal_invalidate_locked(uint32_t now_ms) {
+    s_registration_generation++;
     uint32_t sequence = signal_next_sequence(s_status.signal.sequence);
     memset(&s_status.signal, 0, sizeof(s_status.signal));
     s_status.signal.sequence = sequence;
     s_status.signal.updated_ms = now_ms;
+    s_status.operator_name[0] = '\0';
+    s_status.operator_name_source = MODEM_OPERATOR_NAME_NONE;
+}
+
+static void operator_name_publish_locked(void) {
+    s_status.operator_name[0] = '\0';
+    s_status.operator_name_source = MODEM_OPERATOR_NAME_NONE;
+    if (!s_status.network_registered || !s_status.sim_ready ||
+        (s_status.signal.valid_fields & MODEM_SIGNAL_VALID_PLMN) == 0u) {
+        return;
+    }
+    const char *name = operator_name_db_lookup(s_status.signal.mcc,
+                                               s_status.signal.mnc);
+    if (name != NULL) {
+        copy_bounded(s_status.operator_name, sizeof(s_status.operator_name), name);
+        s_status.operator_name_source = MODEM_OPERATOR_NAME_DATABASE;
+    } else if (s_sim_provider_cached && s_sim_provider_name[0] != '\0') {
+        copy_bounded(s_status.operator_name, sizeof(s_status.operator_name),
+                      s_sim_provider_name);
+        s_status.operator_name_source = MODEM_OPERATOR_NAME_SIM;
+    } else {
+        snprintf(s_status.operator_name, sizeof(s_status.operator_name), "%s%s",
+                 s_status.signal.mcc, s_status.signal.mnc);
+        s_status.operator_name_source = MODEM_OPERATOR_NAME_PLMN;
+    }
+}
+
+static void sim_provider_reset(void) {
+    s_sim_generation++;
+    s_sim_provider_cached = false;
+    s_sim_provider_attempts = 0u;
+    s_next_sim_provider_ms = 0u;
+    s_sim_provider_name[0] = '\0';
+}
+
+static bool sim_provider_start_query(uint32_t now_ms) {
+    const modem_sim_provider_query_t *query = &g_modem_vendor.sim_provider_query;
+    if (s_operation != MODEM_OP_NONE ||
+        query->query_cmd == NULL || query->response_prefix == NULL ||
+        query->parse_response == NULL || query->timeout_ms == 0u ||
+        s_sim_provider_cached ||
+        s_sim_provider_attempts >= MODEM_SIM_PROVIDER_ATTEMPTS ||
+        (s_sim_provider_attempts != 0u &&
+         time_diff_ms(now_ms, s_next_sim_provider_ms) < 0)) {
+        return false;
+    }
+    critical_section_enter_blocking(&s_status_lock);
+    bool needed = s_status.sim_ready && s_status.network_registered &&
+        (s_status.signal.valid_fields & MODEM_SIGNAL_VALID_PLMN) != 0u &&
+        operator_name_db_lookup(s_status.signal.mcc, s_status.signal.mnc) == NULL;
+    critical_section_exit(&s_status_lock);
+    if (!needed) {
+        return false;
+    }
+    s_sim_provider_generation = s_sim_generation;
+    s_sim_provider_transport_counter = model_transport_counter();
+    s_sim_provider_line_seen = false;
+    s_sim_provider_line_invalid = false;
+    s_sim_provider_shadow[0] = '\0';
+    if (!send_command_with_token(MODEM_AT_SIM_PROVIDER, query->query_cmd,
+                                 query->timeout_ms, 0u, now_ms)) {
+        return false;
+    }
+    s_sim_provider_attempts++;
+    s_next_sim_provider_ms = now_ms + MODEM_SIM_PROVIDER_RETRY_MS;
+    return true;
+}
+
+static void sim_provider_finish_query(bool ok) {
+    /* A name belongs to the SIM, not to whichever PLMN happened to be serving
+     * when the read began. Never accept a result across a SIM/reset boundary. */
+    if (s_sim_provider_generation != s_sim_generation || !ok ||
+        !s_sim_provider_line_seen ||
+        s_sim_provider_line_invalid ||
+        s_sim_provider_transport_counter != model_transport_counter()) {
+        return;
+    }
+    s_sim_provider_cached = true;
+    copy_bounded(s_sim_provider_name, sizeof(s_sim_provider_name),
+                  s_sim_provider_shadow);
+    critical_section_enter_blocking(&s_status_lock);
+    operator_name_publish_locked();
+    s_status.last_update_ms = s_now_ms;
+    critical_section_exit(&s_status_lock);
 }
 
 static bool signal_start_query(uint32_t now_ms) {
@@ -1541,6 +1651,7 @@ static bool signal_start_query(uint32_t now_ms) {
     }
     critical_section_enter_blocking(&s_status_lock);
     bool registered = s_status.network_registered;
+    s_signal_registration_generation = s_registration_generation;
     critical_section_exit(&s_status_lock);
     if (!registered) {
         return false;
@@ -1549,6 +1660,7 @@ static bool signal_start_query(uint32_t now_ms) {
     s_signal_line_seen = false;
     s_signal_line_invalid = false;
     memset(&s_signal_shadow, 0, sizeof(s_signal_shadow));
+    s_signal_transport_counter = model_transport_counter();
     if (!send_command_with_token(MODEM_AT_SIGNAL,
                                  g_modem_vendor.signal_query.query_cmd,
                                  g_modem_vendor.signal_query.timeout_ms,
@@ -1558,6 +1670,7 @@ static bool signal_start_query(uint32_t now_ms) {
     /* Clear only at admission. A registration edge racing the in-flight query
      * can set it again and therefore request a follow-up typed sample. */
     s_signal_refresh_needed = false;
+    s_operator_refresh_needed = false;
     s_next_signal_ms = now_ms +
         (s_signal_foreground_sampling
              ? MODEM_SIGNAL_ACTIVE_MS
@@ -1566,15 +1679,18 @@ static bool signal_start_query(uint32_t now_ms) {
 }
 
 static void signal_finish_query(bool command_ok, uint32_t now_ms) {
-    if (!command_ok || !s_signal_line_seen || s_signal_line_invalid) {
+    if (!command_ok || !s_signal_line_seen || s_signal_line_invalid ||
+        s_signal_transport_counter != model_transport_counter()) {
         return;
     }
     critical_section_enter_blocking(&s_status_lock);
-    if (s_status.network_registered) {
+    if (s_status.network_registered &&
+        s_signal_registration_generation == s_registration_generation) {
         s_signal_shadow.sequence =
             signal_next_sequence(s_status.signal.sequence);
         s_signal_shadow.updated_ms = now_ms;
         s_status.signal = s_signal_shadow;
+        operator_name_publish_locked();
         s_status.last_update_ms = now_ms;
     }
     critical_section_exit(&s_status_lock);
@@ -3410,6 +3526,22 @@ static void process_timeout(uint32_t now_ms) {
         return;
     }
 
+    if (kind == MODEM_AT_SIM_PROVIDER) {
+        sim_provider_finish_query(false);
+        /* CRSM is non-abortable. Retain its final-result ownership after the
+         * name deadline so a late OK cannot complete a queued call or SMS. */
+        s_active = true;
+        s_active_kind = MODEM_AT_SIM_PROVIDER_DRAIN;
+        s_command_deadline_ms = now_ms + MODEM_SIM_PROVIDER_DRAIN_MS;
+        return;
+    }
+
+    if (kind == MODEM_AT_SIM_PROVIDER_DRAIN) {
+        s_power_off_failure_pending = s_power_off_pending;
+        modem_fail_power_state("SIM read did not release the AT channel", true);
+        return;
+    }
+
     if (kind == MODEM_AT_MAINTENANCE) {
         maintenance_finish_command(false, true, now_ms);
         return;
@@ -3912,19 +4044,17 @@ static void advance_state(uint32_t now_ms) {
                          g_modem_vendor.call.clcc_timeout_ms, now_ms);
         } else if (s_operation == MODEM_OP_NONE &&
                    !call_model_background_work_blocked(&s_call_model) &&
-                   (s_cops_refresh_needed ||
-                    (s_debug_background_polling_enabled &&
-                     time_diff_ms(now_ms, s_next_cops_ms) >= 0))) {
-            /* Registration already makes standby show service. Resolve its
-             * name before mailbox scans or slow supplementary queries, while
-             * keeping calls and any in-flight operation authoritative. */
-            s_cops_refresh_needed = false;
-            s_next_cops_ms = now_ms + MODEM_COPS_BACKSTOP_MS;
-            send_command(MODEM_AT_COPS, "AT+COPS?", 5000u, now_ms);
+                   s_operator_refresh_needed && signal_query_due(now_ms)) {
+            /* The first serving-cell sample resolves both network identity and
+             * signal before mailbox/supplementary work. No extra COPS query. */
+            (void)signal_start_query(now_ms);
         } else if (s_operation == MODEM_OP_NONE && pop_request(&s_current_request)) {
             start_next_request(now_ms);
         } else if (call_model_background_work_blocked(&s_call_model)) {
             s_next_action_ms = now_ms + 50u;
+        } else if (sim_provider_start_query(now_ms)) {
+            /* Only unknown PLMNs need a local SIM read. Calls, SMS requests,
+             * and other foreground operations retain their normal priority. */
         } else if (diag_start_next_command(now_ms)) {
             /* A diagnostic group yields after this one command. */
         } else if (signal_query_due(now_ms)) {
@@ -4634,6 +4764,15 @@ static void finish_command_result(bool ok, const char *line) {
         return;
     }
 
+    if (kind == MODEM_AT_SIM_PROVIDER || kind == MODEM_AT_SIM_PROVIDER_DRAIN) {
+        sim_provider_finish_query(ok && kind == MODEM_AT_SIM_PROVIDER);
+        if (s_power_off_pending) {
+            s_power_off_pending = false;
+            modem_begin_power_off(s_now_ms);
+        }
+        return;
+    }
+
     if (kind == MODEM_AT_MAINTENANCE) {
         maintenance_finish_command(ok, false, s_now_ms);
         return;
@@ -4871,7 +5010,7 @@ static void modem_enter_ready(uint32_t now_ms) {
     s_last_tx_ms = now_ms;
     s_next_signal_ms = now_ms;
     s_next_cereg_ms = now_ms + 300u;
-    s_next_cops_ms = now_ms;
+    s_operator_refresh_needed = true;
     s_next_cpms_ms = now_ms + 900u;
     s_next_sms_setup_ms = now_ms + 1200u;
     s_sms_storage_full_latched = false;
@@ -5313,7 +5452,8 @@ static void modem_begin_reinit_wait(uint32_t now_ms) {
     s_status.sim_ready = false;
     s_status.network_registered = false;
     s_status.cereg = 0xffu;
-    s_status.operator_name[0] = '\0';
+    signal_invalidate_locked(now_ms);
+    sim_provider_reset();
     s_status.last_update_ms = now_ms;
     critical_section_exit(&s_status_lock);
 }
@@ -5618,9 +5758,19 @@ static bool parse_expected_line(const char *line) {
             return true;
         }
         break;
-    case MODEM_AT_COPS:
-        if (starts_with(line, "+COPS:")) {
-            parse_cops(line);
+    case MODEM_AT_SIM_PROVIDER:
+    case MODEM_AT_SIM_PROVIDER_DRAIN:
+        if (g_modem_vendor.sim_provider_query.response_prefix != NULL &&
+            starts_with(line, g_modem_vendor.sim_provider_query.response_prefix)) {
+            if (s_active_kind == MODEM_AT_SIM_PROVIDER_DRAIN) {
+                return true;
+            }
+            if (s_sim_provider_line_seen ||
+                !g_modem_vendor.sim_provider_query.parse_response(
+                    line, s_sim_provider_shadow, sizeof(s_sim_provider_shadow))) {
+                s_sim_provider_line_invalid = true;
+            }
+            s_sim_provider_line_seen = true;
             return true;
         }
         break;
@@ -7331,21 +7481,18 @@ static void parse_cereg(const char *line) {
     }
     critical_section_enter_blocking(&s_status_lock);
     bool was_registered = s_status.network_registered;
+    uint8_t previous_cereg = s_status.cereg;
     s_status.cereg = (uint8_t)stat;
     s_status.network_registered = (stat == 1u || stat == 5u);
-    bool registration_changed =
-        s_status.network_registered != was_registered;
+    bool registration_changed = s_status.network_registered != was_registered ||
+        (s_status.network_registered && previous_cereg != s_status.cereg);
     bool became_registered =
         registration_changed && s_status.network_registered;
     if (registration_changed) {
-        /* Operator name follows registration: refresh it on the
-         * transition instead of polling AT+COPS? every 5 s. */
-        s_cops_refresh_needed = true;
-        if (!s_status.network_registered) {
-            /* No-service is authoritative immediately. Retire the old cell
-             * sample so a later registration cannot briefly reuse stale bars. */
-            signal_invalidate_locked(s_now_ms);
-        }
+        /* Retire both identity and metrics before re-registration/roaming can
+         * display a name from the previous registration generation. */
+        s_operator_refresh_needed = s_status.network_registered;
+        signal_invalidate_locked(s_now_ms);
     }
     s_status.last_update_ms = s_now_ms;
     critical_section_exit(&s_status_lock);
@@ -7358,14 +7505,6 @@ static void parse_cereg(const char *line) {
         s_signal_refresh_needed = false;
         s_next_signal_ms = s_now_ms + MODEM_SIGNAL_BACKSTOP_MS;
     }
-}
-
-static void parse_cops(const char *line) {
-    critical_section_enter_blocking(&s_status_lock);
-    modem_line_parse_cops(line, s_status.operator_name,
-                          sizeof(s_status.operator_name));
-    s_status.last_update_ms = s_now_ms;
-    critical_section_exit(&s_status_lock);
 }
 
 static bool parse_cpin(const char *line) {
@@ -7459,10 +7598,12 @@ static void apply_sim_observation(modem_sim_observation_t observation) {
     s_status.sim_checked = true;
     s_status.sim_present = observation != MODEM_SIM_OBSERVATION_ABSENT;
     s_status.sim_ready = observation == MODEM_SIM_OBSERVATION_READY;
-    if (!s_status.sim_present) {
+    if (!s_status.sim_ready) {
         s_status.network_registered = false;
         s_status.cereg = 0xffu;
-        s_status.operator_name[0] = '\0';
+        signal_invalidate_locked(s_now_ms);
+        sim_provider_reset();
+        s_operator_refresh_needed = false;
     }
     modem_supplementary_cache_t supplementary_cache;
     modem_supplementary_get_cache(&supplementary_cache);
@@ -7568,9 +7709,9 @@ static void modem_enter_off(void) {
     s_next_action_ms = 0u;
     s_next_signal_ms = 0u;
     s_next_cereg_ms = 0u;
-    s_next_cops_ms = 0u;
     s_sms_setup_needed = false; /* re-evaluated by the next session's init */
-    s_cops_refresh_needed = false;
+    s_operator_refresh_needed = false;
+    sim_provider_reset();
     s_signal_refresh_needed = false;
     s_signal_line_seen = false;
     s_signal_line_invalid = false;
@@ -7807,6 +7948,10 @@ static void modem_fail_power_state(const char *reason,
     critical_section_exit(&s_request_lock);
     critical_section_enter_blocking(&s_status_lock);
     s_status.provisioning_verified = false;
+    s_status.network_registered = false;
+    s_status.cereg = 0xffu;
+    signal_invalidate_locked(s_now_ms);
+    sim_provider_reset();
     modem_supplementary_invalidate_cache();
     supplementary_project_status_locked();
     critical_section_exit(&s_status_lock);
@@ -7976,6 +8121,12 @@ static void modem_begin_power_off(uint32_t now_ms) {
         return;
     }
     cancel_request_session();
+    if (s_active && (s_active_kind == MODEM_AT_SIM_PROVIDER ||
+                     s_active_kind == MODEM_AT_SIM_PROVIDER_DRAIN)) {
+        s_power_off_pending = true;
+        LOGI("modem", "power-off waiting for the non-abortable SIM read");
+        return;
+    }
     if (s_active) {
         if (s_active_kind == MODEM_AT_SMS_CMGS_PROMPT || s_active_kind == MODEM_AT_SMS_CMGW_PROMPT) {
             /* An SMS '>' body prompt is open: cancel it with ESC BEFORE we send
@@ -8146,7 +8297,7 @@ void modem_service_test_get_snapshot(modem_service_test_snapshot_t *out) {
     out->rail_off_poll_ms = MODEM_RAIL_OFF_POLL_MS;
     out->rx_tick_budget = MODEM_RX_TICK_BUDGET;
     out->signal_active_ms = MODEM_SIGNAL_ACTIVE_MS;
-    out->cops_backstop_ms = MODEM_COPS_BACKSTOP_MS;
+    out->sim_provider_retry_ms = MODEM_SIM_PROVIDER_RETRY_MS;
 
     critical_section_enter_blocking(&s_request_lock);
     out->request_queue_depth = s_request_count;

@@ -44,6 +44,24 @@ typedef struct {
     uint8_t restore;
 } telit_fwswitch_t;
 
+#define TELIT_SIM_PROVIDER_NAME_ALPHA_BYTES 16u
+#define TELIT_SIM_PROVIDER_NAME_UTF8_CAP (3u * TELIT_SIM_PROVIDER_NAME_ALPHA_BYTES + 1u)
+
+/* Parse +CRSM for READ BINARY EFSPN: AT+CRSM=176,28486,0,0,17.
+ * Requires decimal SW1/SW2 = 144/0 or 159/xx and exactly 17 hex bytes,
+ * quoted or unquoted. Byte 0 is display policy, not name data. Decode the
+ * 16-byte alpha field as unpacked GSM or UCS2 80/81/82 with FF padding.
+ * True includes empty/blank names; false clears writable out. No truncation,
+ * replacement glyphs, decoded controls, surrogates or malformed padding.
+ * Bare OK, missing payload and absent-file statuses are false; the caller
+ * must require both a valid response and final OK before caching a result.
+ * Hex transport preserves GSM NUL/@ and ESC; decoded CR/LF are rejected.
+ * Pathless CRSM leaves application selection to the modem. Optional paths
+ * need known context: 7FFF is the active ADF, not a USIM selector; 7F20 is
+ * the classic GSM SIM DF. Never prepend 3F00 to a select-from-MF path.
+ * SPN names the SIM provider, not necessarily the roaming network. */
+bool telit_parse_sim_provider_name(const char *line, char *out, size_t cap);
+
 typedef enum {
     TELIT_TUNE_RF1 = 0,
     TELIT_TUNE_RF2,

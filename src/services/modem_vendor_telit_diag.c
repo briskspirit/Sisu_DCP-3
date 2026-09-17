@@ -341,6 +341,11 @@ bool telit_parse_signal_response(const char *line,
 
     modem_signal_sample_t next;
     memset(&next, 0, sizeof(next));
+    if ((present & MODEM_DIAG_SERVING_PLMN) != 0u) {
+        memcpy(next.mcc, serving.mcc, sizeof(next.mcc));
+        memcpy(next.mnc, serving.mnc, sizeof(next.mnc));
+        next.valid_fields |= MODEM_SIGNAL_VALID_PLMN;
+    }
     switch (serving.rat) {
     case MODEM_DIAG_RAT_GSM:   next.rat = MODEM_SIGNAL_RAT_GSM; break;
     case MODEM_DIAG_RAT_WCDMA: next.rat = MODEM_SIGNAL_RAT_WCDMA; break;

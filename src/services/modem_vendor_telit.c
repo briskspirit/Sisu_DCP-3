@@ -202,6 +202,12 @@ const modem_vendor_t g_modem_vendor = {
         .timeout_ms = 5000u,
         .parse_response = telit_parse_signal_response,
     },
+    .sim_provider_query = {
+        .query_cmd = "AT+CRSM=176,28486,0,0,17",
+        .response_prefix = "+CRSM:",
+        .timeout_ms = 2000u,
+        .parse_response = telit_parse_sim_provider_name,
+    },
     .diag_queries = TELIT_DIAG_QUERIES,
     .diag_query_count =
         (uint8_t)(sizeof(TELIT_DIAG_QUERIES) /

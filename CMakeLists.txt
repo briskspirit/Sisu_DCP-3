@@ -192,6 +192,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/modem_sms_state.c
     src/services/modem_supplementary_state.c
     src/services/modem_service.c
+    src/services/operator_name_db.c
     src/services/modem_call_model.c
     src/services/netmon_control_service.c
     src/services/netmon_diag_service.c
@@ -200,6 +201,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/modem_vendor_telit_diag.c
     src/services/modem_vendor_telit_maintenance.c
     src/services/modem_vendor_telit_parse.c
+    src/services/modem_vendor_telit_operator.c
     src/services/modem_vendor_telit_provision.c
     src/services/modem_vendor_telit_sms.c
     src/services/modem_vendor_telit_tune.c
