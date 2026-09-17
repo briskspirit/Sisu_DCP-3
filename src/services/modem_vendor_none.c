@@ -76,4 +76,5 @@ const modem_vendor_t g_modem_vendor = {
     .aux_urc_prefixes = NULL,
     .aux_urc_prefix_count = 0u,
     .parse_aux_urc = NULL,
+    .translate_direct_sms = NULL,
 };

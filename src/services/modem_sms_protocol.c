@@ -1,5 +1,6 @@
 #include "modem_sms_protocol_internal.h"
 
+#include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -28,6 +29,13 @@ typedef struct {
     bool delete_command_in_flight;
     uint8_t delete_commands_accepted;
     modem_sms_outcome_t binary_outcome;
+    uint16_t stored_index;
+    modem_sms_outcome_t delivered_outcome;
+    /* AT+CMGF=0 crossed the UART and no AT+CMGF=1 has completed since: a
+     * cancellation now may leave the module in PDU mode. */
+    bool pdu_mode_possible;
+    /* The final about to be handled by on_final() said the store is full. */
+    bool final_storage_full;
 } modem_sms_protocol_state_t;
 
 static modem_sms_protocol_state_t s_protocol;
@@ -65,6 +73,8 @@ static modem_sms_request_kind_t request_kind(
         return MODEM_SMS_REQUEST_READ;
     case MODEM_SMS_PROTOCOL_DELETE:
         return MODEM_SMS_REQUEST_DELETE;
+    case MODEM_SMS_PROTOCOL_STORE_DELIVERED:
+        return MODEM_SMS_REQUEST_DELIVERED;
     case MODEM_SMS_PROTOCOL_NONE:
     default:
         return MODEM_SMS_REQUEST_NONE;
@@ -91,6 +101,9 @@ static bool request_valid(const modem_sms_protocol_request_t *request) {
     case MODEM_SMS_PROTOCOL_DELETE:
         return request->indices != NULL && request->index_count != 0u &&
                request->index_count <= MODEM_SMS_SEGMENT_MAX;
+    case MODEM_SMS_PROTOCOL_STORE_DELIVERED:
+        return request->pdu_hex != NULL && request->pdu_hex[0] != '\0' &&
+               request->tpdu_len != 0u;
     case MODEM_SMS_PROTOCOL_NONE:
     default:
         return false;
@@ -530,6 +543,41 @@ static void binary_restore_text(const modem_sms_protocol_hooks_t *hooks,
                        5000u, now_ms, false, false);
 }
 
+static void emit_delivered(const modem_sms_protocol_hooks_t *hooks,
+                           modem_sms_outcome_t outcome) {
+    modem_sms_protocol_action_t action = {
+        .type = MODEM_SMS_ACTION_PUBLISH_DELIVERED,
+        .data.delivered = {
+            .index = s_protocol.stored_index,
+            .outcome = outcome,
+        },
+    };
+    (void)emit(hooks, &action);
+}
+
+/* STORE_DELIVERED leaves PDU mode only through this path: the outcome is
+ * latched here and published once the text-mode restore itself finishes
+ * (ok, error or timeout), so the resting mode is text on every exit. */
+static void delivered_restore_text(const modem_sms_protocol_hooks_t *hooks,
+                                   uint32_t now_ms,
+                                   modem_sms_outcome_t outcome) {
+    s_protocol.delivered_outcome = outcome;
+    (void)emit_command(hooks, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1",
+                       5000u, now_ms, false, false);
+}
+
+static void delivered_finish(const modem_sms_protocol_request_t *request,
+                             const modem_sms_protocol_hooks_t *hooks,
+                             bool restore_ok) {
+    modem_sms_outcome_t outcome = s_protocol.delivered_outcome;
+    if (outcome == MODEM_SMS_OUTCOME_NONE) {
+        outcome = MODEM_SMS_OUTCOME_ERROR;
+    }
+    emit_delivered(hooks, outcome);
+    emit_complete(request, hooks, outcome,
+                  outcome == MODEM_SMS_OUTCOME_OK && restore_ok);
+}
+
 static void binary_start(const modem_sms_protocol_request_t *request,
                          const modem_sms_protocol_hooks_t *hooks,
                          uint32_t now_ms) {
@@ -624,6 +672,10 @@ bool modem_sms_protocol_begin(const modem_sms_protocol_request_t *request,
     s_protocol.delete_command_in_flight = false;
     s_protocol.delete_commands_accepted = 0u;
     s_protocol.binary_outcome = MODEM_SMS_OUTCOME_NONE;
+    s_protocol.stored_index = 0u;
+    s_protocol.delivered_outcome = MODEM_SMS_OUTCOME_NONE;
+    s_protocol.pdu_mode_possible = false;
+    s_protocol.final_storage_full = false;
 
     modem_sms_protocol_action_t action;
     switch (request->operation) {
@@ -637,6 +689,7 @@ bool modem_sms_protocol_begin(const modem_sms_protocol_request_t *request,
         binary_start(request, hooks, now_ms);
         return true;
     case MODEM_SMS_PROTOCOL_SAVE:
+    case MODEM_SMS_PROTOCOL_STORE_DELIVERED:
         return emit_command(
             hooks, MODEM_SMS_COMMAND_CPMS,
             "AT+CPMS=\"" MODEM_SMS_STORAGE "\",\"" MODEM_SMS_STORAGE
@@ -706,6 +759,9 @@ void modem_sms_protocol_resume_after_wake(
                                        request->number, false);
         (void)emit_command(hooks, MODEM_SMS_COMMAND_CMGW_PROMPT, command,
                            5000u, now_ms, true, true);
+    } else if (request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+        (void)emit_command(hooks, MODEM_SMS_COMMAND_CMGF_PDU, "AT+CMGF=0",
+                           5000u, now_ms, false, false);
     } else if (request->operation == MODEM_SMS_PROTOCOL_MAILBOX ||
                request->operation == MODEM_SMS_PROTOCOL_READ) {
         start_status_safe_read(request, hooks, now_ms);
@@ -726,6 +782,9 @@ void modem_sms_protocol_resume_after_prompt_abort(
             outcome = MODEM_SMS_OUTCOME_TIMEOUT;
         }
         binary_restore_text(hooks, now_ms, outcome);
+    } else if (request != NULL &&
+               request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+        delivered_restore_text(hooks, now_ms, MODEM_SMS_OUTCOME_TIMEOUT);
     } else {
         emit_complete(request, hooks, MODEM_SMS_OUTCOME_ERROR, false);
     }
@@ -750,10 +809,18 @@ bool modem_sms_protocol_on_prompt(
             .timeout_ms = request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY
                 ? MODEM_SMS_BINARY_RESULT_TIMEOUT_MS : 30000u,
             .now_ms = now_ms,
-            .binary = request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY,
+            .binary = request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY ||
+                      request->operation ==
+                          MODEM_SMS_PROTOCOL_STORE_DELIVERED,
         },
     };
-    if (request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY) {
+    if (request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+        action.data.body.bytes = (const uint8_t *)request->pdu_hex;
+        action.data.body.length = strlen(request->pdu_hex);
+        action.data.body.segment = 1u;
+        action.data.body.segment_total = 1u;
+        action.data.body.tpdu_len = request->tpdu_len;
+    } else if (request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY) {
         modem_sms_binary_segment_view_t segment;
         modem_sms_state_binary_segment_view(&segment);
         action.data.body.bytes = (const uint8_t *)segment.pdu_hex;
@@ -776,6 +843,37 @@ void modem_sms_protocol_command_dispatched(modem_sms_command_kind_t kind) {
     if (kind == MODEM_SMS_COMMAND_CMGD) {
         s_protocol.delete_command_in_flight = true;
     }
+    if (kind == MODEM_SMS_COMMAND_CMGF_PDU) {
+        s_protocol.pdu_mode_possible = true;
+    }
+}
+
+bool modem_sms_protocol_pdu_mode_possible(void) {
+    return s_protocol.pdu_mode_possible;
+}
+
+static bool contains_ci(const char *haystack, const char *needle) {
+    size_t n = strlen(needle);
+    for (const char *p = haystack; *p != '\0'; p++) {
+        size_t i = 0u;
+        while (i < n && p[i] != '\0' &&
+               tolower((unsigned char)p[i]) == tolower((unsigned char)needle[i])) {
+            i++;
+        }
+        if (i == n) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void modem_sms_protocol_note_final_line(const char *line) {
+    /* 27.005 +CMS ERROR 322 "memory full"; Telit also reports "memory
+     * failure" for a store that cannot take the row. */
+    s_protocol.final_storage_full =
+        line != NULL &&
+        (strcmp(line, "+CMS ERROR: 322") == 0 ||
+         contains_ci(line, "memory full") || contains_ci(line, "memory failure"));
 }
 
 bool modem_sms_protocol_parse_line(
@@ -846,8 +944,16 @@ bool modem_sms_protocol_parse_line(
     }
     case MODEM_SMS_COMMAND_CMGS_FINAL:
         return modem_at_starts_with(line, "+CMGS:");
-    case MODEM_SMS_COMMAND_CMGW_FINAL:
-        return modem_at_starts_with(line, "+CMGW:");
+    case MODEM_SMS_COMMAND_CMGW_FINAL: {
+        if (!modem_at_starts_with(line, "+CMGW:")) {
+            return false;
+        }
+        unsigned index = 0u;
+        if (sscanf(line, "+CMGW: %u", &index) == 1 && index <= UINT16_MAX) {
+            s_protocol.stored_index = (uint16_t)index;
+        }
+        return true;
+    }
     case MODEM_SMS_COMMAND_STATUS_PRESERVE:
     case MODEM_SMS_COMMAND_STATUS_CONSUME:
     case MODEM_SMS_COMMAND_CMGD:
@@ -868,6 +974,13 @@ void modem_sms_protocol_on_final(
         emit_complete(request, hooks, MODEM_SMS_OUTCOME_ERROR, false);
         return;
     }
+    bool storage_full = s_protocol.final_storage_full;
+    s_protocol.final_storage_full = false; /* one final, one classification */
+    if (kind == MODEM_SMS_COMMAND_CMGF_PDU && !ok) {
+        s_protocol.pdu_mode_possible = false; /* rejected: mode unchanged */
+    } else if (kind == MODEM_SMS_COMMAND_CMGF_TEXT && ok) {
+        s_protocol.pdu_mode_possible = false; /* text mode confirmed */
+    }
     switch (kind) {
     case MODEM_SMS_COMMAND_CPMS:
         if (!ok) {
@@ -886,6 +999,9 @@ void modem_sms_protocol_on_final(
             } else if (request->operation == MODEM_SMS_PROTOCOL_DELETE) {
                 emit_delete_result(request, hooks, MODEM_SMS_OUTCOME_ERROR,
                                    not_ready);
+            } else if (request->operation ==
+                       MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+                emit_delivered(hooks, MODEM_SMS_OUTCOME_ERROR);
             }
             emit_complete(request, hooks, MODEM_SMS_OUTCOME_ERROR, false);
         } else {
@@ -1006,8 +1122,18 @@ void modem_sms_protocol_on_final(
             } else {
                 start_read_next(request, hooks, now_ms);
             }
+        } else if (ok &&
+                   request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+            char command[24];
+            snprintf(command, sizeof(command), "AT+CMGW=%u,0",
+                     (unsigned)request->tpdu_len);
+            (void)emit_command(hooks, MODEM_SMS_COMMAND_CMGW_PROMPT, command,
+                               5000u, now_ms, true, true);
         } else {
-            if (request->operation == MODEM_SMS_PROTOCOL_MAILBOX) {
+            if (request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+                /* PDU mode was never entered: nothing to restore. */
+                emit_delivered(hooks, MODEM_SMS_OUTCOME_ERROR);
+            } else if (request->operation == MODEM_SMS_PROTOCOL_MAILBOX) {
                 emit_mailbox_result(request, hooks, MODEM_SMS_OUTCOME_ERROR,
                                     false);
             } else if (request->operation == MODEM_SMS_PROTOCOL_READ) {
@@ -1020,6 +1146,10 @@ void modem_sms_protocol_on_final(
         }
         return;
     case MODEM_SMS_COMMAND_CMGF_TEXT:
+        if (request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+            delivered_finish(request, hooks, ok);
+            return;
+        }
         if (request->operation == MODEM_SMS_PROTOCOL_MAILBOX ||
             request->operation == MODEM_SMS_PROTOCOL_READ) {
             modem_sms_outcome_t outcome = s_protocol.restore_outcome;
@@ -1109,6 +1239,16 @@ void modem_sms_protocol_on_final(
         return;
     case MODEM_SMS_COMMAND_CMGW_PROMPT:
         s_protocol.payload_submitted = false;
+        if (request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+            /* Pre-prompt failure (ok is never true here): the write was
+             * refused before any body left, but PDU mode is still set. A
+             * full store is classified the same way as after the body. */
+            delivered_restore_text(hooks, now_ms,
+                                   ok ? MODEM_SMS_OUTCOME_OK
+                                   : storage_full ? MODEM_SMS_OUTCOME_STORAGE_FULL
+                                                  : MODEM_SMS_OUTCOME_ERROR);
+            return;
+        }
         if (request->operation == MODEM_SMS_PROTOCOL_SAVE) {
             emit_save_result(request, hooks, MODEM_SMS_OUTCOME_ERROR,
                              !sim_ready(hooks));
@@ -1120,6 +1260,13 @@ void modem_sms_protocol_on_final(
         return;
     case MODEM_SMS_COMMAND_CMGW_FINAL:
         s_protocol.payload_submitted = false;
+        if (request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+            delivered_restore_text(hooks, now_ms,
+                                   ok ? MODEM_SMS_OUTCOME_OK
+                                   : storage_full ? MODEM_SMS_OUTCOME_STORAGE_FULL
+                                                  : MODEM_SMS_OUTCOME_ERROR);
+            return;
+        }
         if (request->operation == MODEM_SMS_PROTOCOL_SAVE) {
             modem_sms_outcome_t outcome = ok ? MODEM_SMS_OUTCOME_OK
                                              : MODEM_SMS_OUTCOME_ERROR;
@@ -1156,16 +1303,53 @@ void modem_sms_protocol_on_timeout(
             .data.abort_prompt = {
                 .now_ms = now_ms,
                 .restore_after_settle =
-                    request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY &&
-                    kind == MODEM_SMS_COMMAND_CMGS_PROMPT,
+                    (request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY &&
+                     kind == MODEM_SMS_COMMAND_CMGS_PROMPT) ||
+                    (request->operation ==
+                         MODEM_SMS_PROTOCOL_STORE_DELIVERED &&
+                     kind == MODEM_SMS_COMMAND_CMGW_PROMPT),
             },
         };
         (void)emit(hooks, &action);
         if (action.data.abort_prompt.restore_after_settle) {
+            if (request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+                /* Published from resume_after_prompt_abort's text restore. */
+                s_protocol.delivered_outcome = MODEM_SMS_OUTCOME_TIMEOUT;
+                return;
+            }
             s_protocol.binary_outcome =
                 s_protocol.binary_segments_accepted != 0u
                     ? MODEM_SMS_OUTCOME_UNCERTAIN
                     : MODEM_SMS_OUTCOME_TIMEOUT;
+            return;
+        }
+    }
+
+    if (request->operation == MODEM_SMS_PROTOCOL_STORE_DELIVERED) {
+        switch (kind) {
+        case MODEM_SMS_COMMAND_CMGF_PDU:
+            /* The lost final may have followed a mode switch that took
+             * effect; restore text mode the way the binary send does. */
+            delivered_restore_text(hooks, now_ms, MODEM_SMS_OUTCOME_TIMEOUT);
+            return;
+        case MODEM_SMS_COMMAND_CMGW_FINAL:
+            /* The body was handed over; the row may or may not exist. */
+            delivered_restore_text(hooks, now_ms,
+                                   MODEM_SMS_OUTCOME_UNCERTAIN);
+            return;
+        case MODEM_SMS_COMMAND_CMGF_TEXT:
+            /* The store outcome is already decided; a lost cleanup final is
+             * a transport failure and must not be reported as a lost row. */
+            delivered_finish(request, hooks, false);
+            return;
+        case MODEM_SMS_COMMAND_CPMS:
+            emit_delivered(hooks, MODEM_SMS_OUTCOME_TIMEOUT);
+            emit_complete(request, hooks, MODEM_SMS_OUTCOME_TIMEOUT, false);
+            return;
+        default:
+            /* CMGW_PROMPT returned above; no other command is ever issued. */
+            emit_delivered(hooks, MODEM_SMS_OUTCOME_ERROR);
+            emit_complete(request, hooks, MODEM_SMS_OUTCOME_ERROR, false);
             return;
         }
     }
@@ -1335,6 +1519,7 @@ modem_sms_outcome_t modem_sms_protocol_cancel_outcome(
             ? MODEM_SMS_OUTCOME_UNCERTAIN
             : MODEM_SMS_OUTCOME_CANCELLED;
     case MODEM_SMS_PROTOCOL_SAVE:
+    case MODEM_SMS_PROTOCOL_STORE_DELIVERED:
         return s_protocol.payload_submitted
             ? MODEM_SMS_OUTCOME_UNCERTAIN
             : MODEM_SMS_OUTCOME_CANCELLED;

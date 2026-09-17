@@ -19,6 +19,7 @@
 #include "services/modem_diag.h"
 #include "services/modem_maintenance.h"
 #include "services/modem_signal.h"
+#include "services/modem_sms_direct.h"
 
 typedef enum {
     MODEM_DEGRADE_NONE = 0, MODEM_DEGRADE_AUDIO, MODEM_DEGRADE_SMS_SETUP,
@@ -255,6 +256,11 @@ typedef struct {
                                     char *out, size_t out_cap);
     bool (*parse_call_forward_row)(const char *line,
                                    call_forward_row_t *out);
+    /* Local flags only: automatic refresh must never start a network SS
+     * transaction. Rows use parse_aux_urc; NONE means flags are unavailable. */
+    const char *call_forward_flags_query_cmd;
+    const char *call_forward_flags_response_prefix;
+    uint32_t call_forward_flags_timeout_ms;
     const char *voice_mailbox_query_cmd;
     const char *voice_mailbox_response_prefix;
     uint32_t voice_mailbox_timeout_ms;
@@ -321,6 +327,9 @@ typedef struct modem_vendor {
     /* Validates and, when semantically relevant, normalizes a line matching
      * aux_urc_prefixes. A valid informational line returns kind NONE. */
     bool (*parse_aux_urc)(const char *line, modem_aux_event_t *out);
+    /* Optional: translate a module-specific +CMT header/payload pair into a
+     * neutral SMS-DELIVER. Return NOT_MINE for standard 3GPP forms. Pure. */
+    modem_sms_direct_translate_fn translate_direct_sms;
 } modem_vendor_t;
 
 extern const modem_vendor_t g_modem_vendor;

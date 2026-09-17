@@ -107,12 +107,22 @@ const modem_init_step_t TELIT_INIT_STEPS[] = {
                MODEM_INIT_PREREQ_NONE, MODEM_SETTING_RUNTIME, NULL),
     TELIT_INIT("AT+CMGF=1",            2500u, 3u, false, MODEM_DEGRADE_NONE,
                MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
+    /* Text-mode +CMT/+CMGR/+CMGL carry <tooa>,<fo>,<pid>,<dcs>,<length>
+     * (3GPP) or <tooa>,<tele_id>,<priority>,<enc>,<length> (Telit 3GPP2)
+     * only with +CSDH=1. Direct delivery needs them to rebuild a PDU. */
+    TELIT_INIT("AT+CSDH=1",            2500u, 3u, false, MODEM_DEGRADE_NONE,
+               MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT("AT+CSCS=\"GSM\"",      2500u, 3u, false, MODEM_DEGRADE_NONE,
                MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT("AT+CSMP=17,167,0,0",   15000u, 2u, true,
                MODEM_DEGRADE_SMS_SETUP, MODEM_INIT_PREREQ_SIM_READY,
                MODEM_SETTING_RUNTIME, NULL),
-    TELIT_INIT("AT+CNMI=1,1,0,0,0",    2500u, 3u, false, MODEM_DEGRADE_NONE,
+    /* Direct delivery (<mt>=2): Verizon 3GPP2 messages cannot be read back
+     * from the CDMA store on this image ($QCMTI rows fail in every mode), so
+     * every carrier's SMS-DELIVER is routed to the host as +CMT and re-stored
+     * as a 23.040 PDU by modem_service. Mode 2 buffers the URC while the
+     * TA-TE link is reserved and flushes it afterwards; DTR sleep unchanged. */
+    TELIT_INIT("AT+CNMI=2,2,0,0,0",    2500u, 3u, false, MODEM_DEGRADE_NONE,
                MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT("AT+CLIP=1",             2500u, 3u, false, MODEM_DEGRADE_NONE,
                MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
@@ -580,8 +590,11 @@ const modem_provision_step_t TELIT_PROVISION_STEPS[] = {
                     MODEM_INIT_PREREQ_SIM_READY |
                         MODEM_INIT_PREREQ_SIM_COMPLETION,
                     MODEM_SETTING_PROFILE, telit_provision_cff),
-    /* LE910Cx Software User Guide r17 section 5.2.10 requires CNMI=1,1 and
-     * nonzero PSMRI before entering CFUN=5. The AT guide says PSMRI is ignored
+    /* LE910Cx Software User Guide r17 section 5.2.10 requires an SMS
+     * indication via CNMI (its example is 1,1; the init table now applies
+     * 2,2 for direct delivery, bench-verified to arrive after DTR sleep, see
+     * docs/sms_direct_delivery_design.md) and nonzero PSMRI before entering
+     * CFUN=5. The AT guide says PSMRI is ignored
      * while an event-specific RING source is enabled, so WKIO and E2SMSRI must
      * both be disabled. Preserve \R2 for ordinary incoming-call RI behavior.
      *

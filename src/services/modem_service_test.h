@@ -52,6 +52,7 @@ typedef struct {
     bool power_off_pending;
     bool bridge_active_wanted;
     bool sms_wake_armed;
+    bool sms_mode_restore_pending;
     bool provision_reboot_cycle_active;
     bool provision_reboot_drop_seen;
     bool sim_completion_needed;

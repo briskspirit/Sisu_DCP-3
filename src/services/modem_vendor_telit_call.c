@@ -765,5 +765,18 @@ bool telit_parse_aux_urc(const char *line, modem_aux_event_t *out) {
         telit_temperature_t temperature;
         return telit_parse_temperature(line, &temperature);
     }
+    if (telit_starts_with(line, "$QCMTI:")) {
+        /* $QCMTI: "<mem>",<index>: the Qualcomm stack filed a message in its
+         * CDMA store, which this image cannot read in any mode (design doc,
+         * "Problem"). Only emitted when direct delivery is not in effect. */
+        telit_csv_view_t fields[2];
+        size_t count = 0u;
+        if (!telit_view_split_prefixed(line, "$QCMTI:", fields, 2u, &count) ||
+            count != 2u || !telit_view_digits_only(fields[1], 1u, 5u)) {
+            return false;
+        }
+        out->kind = MODEM_AUX_EVENT_MESSAGE_STORED_UNREADABLE;
+        return true;
+    }
     return false;
 }

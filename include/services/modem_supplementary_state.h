@@ -42,6 +42,7 @@ bool modem_supplementary_refresh_due(
     modem_supplementary_refresh_kind_t kind, uint32_t now_ms);
 void modem_supplementary_refresh_begin(
     modem_supplementary_refresh_kind_t kind);
+bool modem_supplementary_call_forward_flags_finish(bool ok, uint32_t now_ms);
 
 uint32_t modem_supplementary_call_forward_next_request_id(void);
 void modem_supplementary_call_forward_publish_result(

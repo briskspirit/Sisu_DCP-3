@@ -195,6 +195,53 @@ static void test_refresh_generation_and_retry(void) {
           "retry budget drains after the bounded second failure");
 }
 
+static void test_local_forwarding_flags(void) {
+    modem_supplementary_init();
+    modem_aux_event_t cfu = {
+        .kind = MODEM_AUX_EVENT_CFU_STATE,
+        .active = true,
+    };
+    (void)modem_supplementary_apply_aux_event(&cfu);
+    modem_supplementary_refresh_arm(MODEM_SUPPLEMENTARY_REFRESH_CFU, 10u);
+    modem_supplementary_refresh_begin(MODEM_SUPPLEMENTARY_REFRESH_CFU);
+    check(!modem_supplementary_call_forward_flags_finish(false, 20u) &&
+              cache_snapshot().call_forward_unconditional_known &&
+              cache_snapshot().call_forward_unconditional_active &&
+              !modem_supplementary_refresh_due(MODEM_SUPPLEMENTARY_REFRESH_CFU, 1019u) &&
+              modem_supplementary_refresh_due(MODEM_SUPPLEMENTARY_REFRESH_CFU, 1020u),
+          "failed flags read preserves evidence and schedules a bounded retry");
+    modem_supplementary_refresh_begin(MODEM_SUPPLEMENTARY_REFRESH_CFU);
+    (void)modem_supplementary_call_forward_flags_finish(false, 1030u);
+    check(!modem_supplementary_refresh_due(MODEM_SUPPLEMENTARY_REFRESH_CFU, 2030u),
+          "flags read stops retrying after the second failure");
+
+    modem_supplementary_refresh_arm(MODEM_SUPPLEMENTARY_REFRESH_CFU, 3000u);
+    modem_supplementary_refresh_begin(MODEM_SUPPLEMENTARY_REFRESH_CFU);
+    check(modem_supplementary_call_forward_flags_finish(true, 3010u) &&
+              !cache_snapshot().call_forward_unconditional_known &&
+              cache_snapshot().call_forward_unconditional_active &&
+              !modem_supplementary_refresh_due(MODEM_SUPPLEMENTARY_REFRESH_CFU, 4010u),
+          "valid flags-absent reply marks the old value unknown without retrying");
+
+    (void)modem_supplementary_apply_aux_event(&cfu);
+    modem_supplementary_refresh_arm(MODEM_SUPPLEMENTARY_REFRESH_CFU, 5000u);
+    modem_supplementary_refresh_begin(MODEM_SUPPLEMENTARY_REFRESH_CFU);
+    modem_supplementary_refresh_arm(MODEM_SUPPLEMENTARY_REFRESH_CFU, 5010u);
+    check(!modem_supplementary_call_forward_flags_finish(true, 5020u) &&
+              cache_snapshot().call_forward_unconditional_known &&
+              modem_supplementary_refresh_due(MODEM_SUPPLEMENTARY_REFRESH_CFU, 5020u),
+          "older flags-absent final cannot consume a newly armed refresh");
+
+    modem_supplementary_refresh_begin(MODEM_SUPPLEMENTARY_REFRESH_CFU);
+    cfu.active = false;
+    (void)modem_supplementary_apply_aux_event(&cfu);
+    check(!modem_supplementary_call_forward_flags_finish(true, 5030u) &&
+              cache_snapshot().call_forward_unconditional_known &&
+              !cache_snapshot().call_forward_unconditional_active &&
+              !modem_supplementary_refresh_due(MODEM_SUPPLEMENTARY_REFRESH_CFU, 5030u),
+          "newer explicit flags survive the older query final");
+}
+
 static void test_voice_mailbox_cache(void) {
     modem_supplementary_init();
     modem_supplementary_voice_mailbox_begin();
@@ -306,6 +353,7 @@ int main(void) {
     test_call_forward_query_and_conflict();
     test_call_forward_partial_mutation();
     test_refresh_generation_and_retry();
+    test_local_forwarding_flags();
     test_voice_mailbox_cache();
     test_message_waiting_authority();
     test_reset_ownership();

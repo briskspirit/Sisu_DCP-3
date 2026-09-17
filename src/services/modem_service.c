@@ -19,6 +19,7 @@
 #include "services/modem_line_framer.h"
 #include "services/modem_line_parser.h"
 #include "services/modem_phonebook_state.h"
+#include "services/modem_sms_direct.h"
 #include "modem_phonebook_protocol_internal.h"
 #include "modem_sms_protocol_internal.h"
 #include "modem_sms_state_internal.h"
@@ -122,6 +123,7 @@ typedef enum {
     MODEM_AT_CSQ,
     MODEM_AT_SIGNAL,
     MODEM_AT_SMS_CPMS_POLL, /* periodic AT+CPMS? to detect a full receive store */
+    MODEM_AT_SMS_MODE_RESTORE, /* idle AT+CMGF=1 after a cancelled op may have left PDU mode */
     MODEM_AT_SMS_SETUP_CSMP, /* deferred SMS setup retry (CSMP), init timing self-heal */
     MODEM_AT_SMS_SETUP_CPMS, /* deferred SMS setup retry (CPMS -> ME storage) */
     MODEM_AT_SMS_WAKE_ARM, /* transient vendor command proving SMS can wake DTR sleep via RI */
@@ -155,6 +157,7 @@ typedef enum {
     MODEM_AT_MAINTENANCE,
     MODEM_AT_POWER_OFF,
     MODEM_AT_DEBUG,
+    MODEM_AT_CALL_FORWARD_FLAGS,
 } modem_at_kind_t;
 
 typedef enum {
@@ -179,6 +182,7 @@ typedef enum {
     MODEM_OP_SMS_MAILBOX,
     MODEM_OP_SMS_READ,
     MODEM_OP_DELETE_SMS,
+    MODEM_OP_STORE_DELIVERED_SMS, /* internal: re-store a +CMT as a PDU */
     MODEM_OP_PHONEBOOK_LIST,
     MODEM_OP_PHONEBOOK_ADD,
     MODEM_OP_PHONEBOOK_UPDATE,
@@ -206,6 +210,7 @@ typedef enum {
     MODEM_REQ_SMS_MAILBOX,
     MODEM_REQ_SMS_READ,
     MODEM_REQ_DELETE_SMS,
+    MODEM_REQ_STORE_DELIVERED_SMS, /* internal: queued by the direct ring */
     MODEM_REQ_PHONEBOOK_LIST,
     MODEM_REQ_PHONEBOOK_ADD,
     MODEM_REQ_PHONEBOOK_UPDATE,
@@ -337,6 +342,13 @@ static bool sms_publish_terminal(
 static bool sms_publish_terminal_for_request(
     const modem_request_t *request, modem_sms_outcome_t outcome);
 static void sms_cancel_protocol(void);
+static void direct_feed_line(const char *line);
+static void direct_feed_raw(uint8_t byte);
+static bool direct_ring_start(uint32_t now_ms);
+static void direct_ring_reset(void);
+static void direct_store_unblock(const char *why);
+static void direct_body_deadline_tick(uint32_t now_ms);
+static bool sms_mode_restore_start(uint32_t now_ms);
 static bool phonebook_protocol_request_view(
     modem_phonebook_protocol_request_t *out);
 static bool phonebook_protocol_command_from_at(
@@ -518,6 +530,7 @@ static uint32_t s_next_signal_ms;
 static uint32_t s_next_cereg_ms;
 static uint32_t s_next_cops_ms;
 static bool s_cops_refresh_needed; /* registration changed: refresh the operator name now */
+static bool s_cfu_flags_row_seen;
 static bool s_signal_foreground_sampling;
 static bool s_signal_refresh_needed;
 static bool s_signal_line_seen;
@@ -557,6 +570,11 @@ static uint32_t s_sms_wake_activation_deadline_ms;
 static sms_wake_resume_t s_sms_wake_resume;
 static uint8_t s_sms_wake_retries;
 static bool s_cpms_check_needed;
+/* A cancelled SMS operation had issued AT+CMGF=0 without a completed
+ * AT+CMGF=1: the idle scheduler restores text mode, bounded like a store. */
+static bool s_sms_mode_restore_pending;
+static uint8_t s_sms_mode_restore_attempts;
+#define MODEM_SMS_MODE_RESTORE_ATTEMPTS 3u
 static bool s_sms_setup_needed;
 static bool s_sms_wake_armed;
 static bool s_active_sms_wake_arm;
@@ -1128,6 +1146,9 @@ void modem_service_init(void) {
     memset(&s_debug_result, 0, sizeof(s_debug_result));
     s_debug_result_pending = false;
     modem_sms_protocol_reset_pending_arrivals();
+    direct_ring_reset();
+    s_sms_mode_restore_pending = false;
+    s_sms_mode_restore_attempts = 0u;
     modem_phonebook_state_init();
     s_now_ms = time_ms();
     s_diag_transport_last_account_ms = s_now_ms;
@@ -1210,6 +1231,7 @@ void modem_service_tick(uint32_t now_ms) {
     drain_rx();
     sim_maintenance_guard_tick(now_ms);
     process_timeout(now_ms);
+    direct_body_deadline_tick(now_ms);
     call_model_tick(&s_call_model);
     advance_state(now_ms);
     modem_transport_idle(now_ms);
@@ -1232,6 +1254,7 @@ bool modem_service_transport_sleep_confirmed(void) {
         s_power_on_pending || s_power_off_pending ||
         modem_diag_engine_has_work(&s_diag_engine) ||
         modem_line_framer_pending(&s_line_framer) ||
+        modem_sms_direct_pending() || /* +CMT body in flight (raw or line mode) */
         !call_session_idle_snapshot() ||
         call_model_wants_clcc(&s_call_model) ||
         s_call_model.release_count != 0u ||
@@ -2268,6 +2291,9 @@ static bool sms_request_kind_from_request_type(
     case MODEM_REQ_DELETE_SMS:
         *out = MODEM_SMS_REQUEST_DELETE;
         return true;
+    case MODEM_REQ_STORE_DELIVERED_SMS:
+        *out = MODEM_SMS_REQUEST_DELIVERED;
+        return true;
     default:
         *out = MODEM_SMS_REQUEST_NONE;
         return false;
@@ -2772,6 +2798,15 @@ static void drain_rx(void) {
 }
 
 static void feed_byte(uint8_t byte) {
+    /* A +CMT body is read raw by <length>: the framer would drop CR, split
+     * on LF and end the C string at 0x00 (GSM '@'). The module emits header
+     * and body as one unit, so no prompt or line can interleave here. */
+    if (modem_sms_direct_raw_active()) {
+        direct_feed_raw(byte);
+        if (!modem_sms_direct_raw_take_unconsumed()) {
+            return;
+        }
+    }
     /* '>' is the SMS-send prompt only while we are actually waiting for it
      * (AT+CMGS / AT+CMGW). Otherwise it is an ordinary character -- intercepting
      * it globally silently strips '>' from echoes, URCs and message bodies.
@@ -2789,11 +2824,269 @@ static void feed_byte(uint8_t byte) {
     } else if (event == MODEM_LINE_FRAMER_DROPPED) {
         /* A line we were depending on is gone; abort any in-progress +CMGR
          * body collection so the next line is not mistaken for the body.
-         * A lost body then degrades to a graceful empty read. */
+         * A lost body then degrades to a graceful empty read. The same goes
+         * for a +CMT header waiting for its body line: the dropped line was
+         * that body, so the collector must not eat the next line instead.
+         * (A header with a <length> reads its body raw and is normally not
+         * pending here; the reset is unconditional either way.) */
         modem_sms_protocol_line_dropped();
         modem_phonebook_protocol_line_dropped();
+        modem_sms_direct_reset();
         s_line_drop_count++;
         LOGW("modem", "dropped overlong AT line");
+    }
+}
+
+/* --- direct delivery (+CMT) ring --------------------------------------------
+ * A +CMT arrives as header + payload; the collector (modem_sms_direct) turns
+ * the pair into an SMS-DELIVER PDU which is held here until the
+ * STORE_DELIVERED operation has written it back into ME as REC UNREAD. The
+ * stored row then follows the +CMTI bookkeeping (pending arrival, counters,
+ * receive-store check) so the mailbox scan, multipart and VVM paths are
+ * unchanged. Entries survive a failed or cancelled store and are retried from
+ * the idle scheduler, bounded to MODEM_DIRECT_STORE_ATTEMPTS. Stores run in
+ * arrival order (FIFO by sequence number), so a slot freed and refilled
+ * while older entries wait never overtakes them. */
+#define MODEM_DIRECT_RING_DEPTH 8u
+#define MODEM_DIRECT_STORE_ATTEMPTS 3u
+/* Internal request id: never handed to an app, never reserved in
+ * modem_sms_state (which owns only app-facing result channels). */
+#define MODEM_DIRECT_INTERNAL_REQUEST_ID 0xFFFFFFF0u
+
+typedef struct {
+    char pdu_hex[SMS_DELIVER_HEX_MAX];
+    uint32_t seq;     /* arrival order; monotonic, wrap-safe comparison */
+    uint8_t tpdu_len;
+    uint8_t attempts;
+    bool used;
+} modem_direct_entry_t;
+
+static modem_direct_entry_t s_direct_ring[MODEM_DIRECT_RING_DEPTH];
+static uint8_t s_direct_active; /* entry being stored, or UINT8_MAX */
+static uint32_t s_direct_seq;   /* last sequence number handed out */
+/* A header whose body stops arriving must not keep the collector (and the
+ * transport, which stays awake while a body is pending) waiting forever: the
+ * collector has no time source, so the service bounds the wait. Armed on the
+ * header, refreshed on every accepted body byte, cleared on completion. */
+#define MODEM_DIRECT_BODY_TIMEOUT_MS 5000u
+static bool s_direct_body_deadline_armed;
+static uint32_t s_direct_body_deadline_ms;
+/* A full ME store: the module already acknowledged the network, so a held
+ * entry must not burn its attempts on "memory full". The ring is blocked
+ * until a DELETE completes OK, a +CPMS? poll reports room in the receive
+ * store, or MODEM_DIRECT_STORAGE_FULL_RETRY_MS elapse, whichever first. */
+#define MODEM_DIRECT_STORAGE_FULL_RETRY_MS 60000u
+static bool s_direct_store_blocked;
+static uint32_t s_direct_store_blocked_ms;
+/* Build target while the ring is full: a real-size sink, so a valid body
+ * still parses (the RAW reader terminates on a parsed candidate) and is
+ * dropped as "ring full" at once instead of being held until the deadline. */
+static char s_direct_sink[SMS_DELIVER_HEX_MAX];
+
+static void direct_ring_reset(void) {
+    memset(s_direct_ring, 0, sizeof(s_direct_ring));
+    s_direct_active = UINT8_MAX;
+    s_direct_body_deadline_armed = false;
+    s_direct_store_blocked = false;
+    modem_sms_direct_reset();
+}
+
+static void direct_store_unblock(const char *why) {
+    if (s_direct_store_blocked) {
+        s_direct_store_blocked = false;
+        LOGI("modem", "direct SMS store unblocked: %s", why);
+    }
+}
+
+static void direct_body_deadline_tick(uint32_t now_ms) {
+    if (!s_direct_body_deadline_armed) {
+        return;
+    }
+    if (!modem_sms_direct_pending()) {
+        s_direct_body_deadline_armed = false;
+        return;
+    }
+    if (time_diff_ms(now_ms, s_direct_body_deadline_ms) < 0) {
+        return;
+    }
+    /* The body never completed: the delivery is lost (the module already
+     * acknowledged the network); later bytes go back to the line framer. */
+    s_direct_body_deadline_armed = false;
+    modem_sms_direct_reset();
+    critical_section_enter_blocking(&s_status_lock);
+    s_status.command_errors++;
+    critical_section_exit(&s_status_lock);
+    LOGW("modem", "direct SMS body did not complete; message lost");
+}
+
+static void direct_count_error_locked_free(void) {
+    critical_section_enter_blocking(&s_status_lock);
+    s_status.command_errors++;
+    critical_section_exit(&s_status_lock);
+}
+
+static uint8_t direct_free_slot(void) {
+    for (uint8_t i = 0u; i < MODEM_DIRECT_RING_DEPTH; i++) {
+        if (!s_direct_ring[i].used) {
+            return i;
+        }
+    }
+    return UINT8_MAX;
+}
+
+/* Apply one collector step. The PDU was built straight into the free ring
+ * slot (or the static sink when the ring is full): the collector's frames
+ * beneath this one already carry the core0 stack budget, so no hex buffer
+ * lives here. */
+static void direct_apply_step(modem_sms_direct_step_t step, uint8_t slot,
+                              uint8_t tpdu_len) {
+    switch (step) {
+    case MODEM_SMS_DIRECT_STEP_HEADER:
+        s_direct_body_deadline_armed = true;
+        s_direct_body_deadline_ms = s_now_ms + MODEM_DIRECT_BODY_TIMEOUT_MS;
+        break;
+    case MODEM_SMS_DIRECT_STEP_READY:
+        s_direct_body_deadline_armed = false;
+        if (slot >= MODEM_DIRECT_RING_DEPTH) {
+            /* Built into the sink: nowhere to hold it. */
+            LOGW("modem", "direct SMS dropped: ring full");
+            direct_count_error_locked_free();
+            break;
+        }
+        s_direct_ring[slot].tpdu_len = tpdu_len;
+        s_direct_ring[slot].attempts = 0u;
+        s_direct_ring[slot].seq = ++s_direct_seq;
+        s_direct_ring[slot].used = true;
+        LOGI("modem", "direct SMS rebuilt tpdu=%u slot=%u",
+             (unsigned)tpdu_len, (unsigned)slot);
+        break;
+    case MODEM_SMS_DIRECT_STEP_REJECTED:
+        s_direct_body_deadline_armed = false;
+        /* The module already acknowledged the network: the message is lost.
+         * Same loss class as a quarantined stored row. */
+        if (slot >= MODEM_DIRECT_RING_DEPTH) {
+            LOGW("modem", "direct SMS dropped: ring full");
+        } else {
+            LOGW("modem", "direct SMS not understood; message lost");
+        }
+        direct_count_error_locked_free();
+        break;
+    case MODEM_SMS_DIRECT_STEP_IGNORED:
+    default:
+        if (s_direct_body_deadline_armed) {
+            /* A body byte was accepted: the body is still arriving. */
+            s_direct_body_deadline_ms = s_now_ms + MODEM_DIRECT_BODY_TIMEOUT_MS;
+        }
+        break;
+    }
+}
+
+/* Feed one line to the collector: the +CMT header from route_urc, or (for a
+ * header without a <length> field) the payload line from process_line, which
+ * owns the line after such a header unconditionally. A header with <length>
+ * > 0 switches the collector to RAW mode (see feed_byte). */
+static void direct_feed_line(const char *line) {
+    uint8_t slot = direct_free_slot();
+    char *pdu_hex = slot < MODEM_DIRECT_RING_DEPTH
+        ? s_direct_ring[slot].pdu_hex : s_direct_sink;
+    size_t pdu_hex_cap = slot < MODEM_DIRECT_RING_DEPTH
+        ? sizeof(s_direct_ring[slot].pdu_hex) : sizeof(s_direct_sink);
+    uint8_t tpdu_len = 0u;
+    modem_sms_direct_step_t step = modem_sms_direct_feed(
+        line, g_modem_vendor.translate_direct_sms, pdu_hex, pdu_hex_cap,
+        &tpdu_len);
+    if (step == MODEM_SMS_DIRECT_STEP_HEADER) {
+        LOGI("modem", "%s", line);
+    }
+    direct_apply_step(step, slot, tpdu_len);
+}
+
+/* RAW mode: one wire byte of the +CMT body, bypassing the line framer. */
+static void direct_feed_raw(uint8_t byte) {
+    uint8_t slot = direct_free_slot();
+    char *pdu_hex = slot < MODEM_DIRECT_RING_DEPTH
+        ? s_direct_ring[slot].pdu_hex : s_direct_sink;
+    size_t pdu_hex_cap = slot < MODEM_DIRECT_RING_DEPTH
+        ? sizeof(s_direct_ring[slot].pdu_hex) : sizeof(s_direct_sink);
+    uint8_t tpdu_len = 0u;
+    /* Two statements: the call writes tpdu_len and the apply reads it, and C
+     * leaves the evaluation order of function arguments unspecified. */
+    modem_sms_direct_step_t step = modem_sms_direct_feed_raw(
+        byte, g_modem_vendor.translate_direct_sms, pdu_hex, pdu_hex_cap,
+        &tpdu_len);
+    direct_apply_step(step, slot, tpdu_len);
+}
+
+/* The oldest held entry (smallest sequence number), or UINT8_MAX. */
+static uint8_t direct_oldest_slot(void) {
+    uint8_t oldest = UINT8_MAX;
+    for (uint8_t i = 0u; i < MODEM_DIRECT_RING_DEPTH; i++) {
+        if (s_direct_ring[i].used &&
+            (oldest == UINT8_MAX ||
+             (int32_t)(s_direct_ring[i].seq - s_direct_ring[oldest].seq) < 0)) {
+            oldest = i;
+        }
+    }
+    return oldest;
+}
+
+/* Idle "SMS mode restore": AT+CMGF=1 when a cancelled SMS operation may have
+ * left the module in PDU mode (see sms_cancel_protocol). Same gate as the
+ * ring drain; cleared on OK, retried next idle tick on ERROR/timeout up to
+ * MODEM_SMS_MODE_RESTORE_ATTEMPTS. Returns true only when it sent the command. */
+static bool sms_mode_restore_start(uint32_t now_ms) {
+    if (!s_sms_mode_restore_pending || s_operation != MODEM_OP_NONE || s_active ||
+        s_dtr_wake_pending) {
+        return false;
+    }
+    if (s_sms_mode_restore_attempts >= MODEM_SMS_MODE_RESTORE_ATTEMPTS) {
+        LOGW("modem", "SMS text-mode restore gave up after %u attempts",
+             (unsigned)s_sms_mode_restore_attempts);
+        s_sms_mode_restore_pending = false;
+        return false;
+    }
+    send_command(MODEM_AT_SMS_MODE_RESTORE, "AT+CMGF=1", 5000u, now_ms);
+    return true;
+}
+
+/* Idle-scheduler drain: queue one STORE_DELIVERED request for the oldest
+ * held entry. Same gate as the neighbouring background branches; never
+ * touches DTR/RI. Returns true only when a request was queued. */
+static bool direct_ring_start(uint32_t now_ms) {
+    if (s_operation != MODEM_OP_NONE || s_active || s_dtr_wake_pending ||
+        !status_sim_ready_snapshot()) {
+        return false;
+    }
+    if (s_direct_store_blocked) {
+        if (time_diff_ms(now_ms, s_direct_store_blocked_ms +
+                                     MODEM_DIRECT_STORAGE_FULL_RETRY_MS) < 0) {
+            return false;
+        }
+        direct_store_unblock("retry interval elapsed");
+    }
+    for (;;) {
+        uint8_t i = direct_oldest_slot();
+        if (i == UINT8_MAX) {
+            return false;
+        }
+        if (s_direct_ring[i].attempts >= MODEM_DIRECT_STORE_ATTEMPTS) {
+            LOGW("modem", "direct SMS store gave up after %u attempts",
+                 (unsigned)s_direct_ring[i].attempts);
+            s_direct_ring[i].used = false;
+            direct_count_error_locked_free();
+            continue;
+        }
+        modem_request_t request;
+        memset(&request, 0, sizeof(request));
+        request.type = MODEM_REQ_STORE_DELIVERED_SMS;
+        request.request_id = MODEM_DIRECT_INTERNAL_REQUEST_ID;
+        if (!queue_request(&request)) {
+            return false;
+        }
+        /* attempts counts stores the modem answered (PUBLISH_DELIVERED),
+         * not queue admissions: an evicted request never asked the modem. */
+        s_direct_active = i;
+        return true;
     }
 }
 
@@ -2809,6 +3102,15 @@ static void process_line(char *line) {
         return;
     }
     copy_bounded(s_debug_last_line, sizeof(s_debug_last_line), line);
+
+    if (modem_sms_direct_pending()) {
+        /* The line after a +CMT header without a <length> field is its
+         * payload by protocol, even when it happens to read like a final or
+         * a URC. It must never complete an active command. (A header with a
+         * length reads its body raw; no line reaches here in that mode.) */
+        direct_feed_line(line);
+        return;
+    }
 
     if (g_modem_vendor.parse_sim_observation != NULL) {
         apply_sim_observation(g_modem_vendor.parse_sim_observation(line));
@@ -2942,6 +3244,11 @@ static void route_urc(const char *line) {
         critical_section_exit(&s_status_lock);
         s_cpms_check_needed = true; /* arrival may have filled the receive store */
         LOGI("modem", "%s", line);
+    } else if (starts_with(line, "+CMT:")) {
+        critical_section_enter_blocking(&s_status_lock);
+        s_status.urc_count++;
+        critical_section_exit(&s_status_lock);
+        direct_feed_line(line);
     } else if (starts_with(line, "+CPIN:")) {
         (void)parse_cpin(line);
         critical_section_enter_blocking(&s_status_lock);
@@ -3113,6 +3420,11 @@ static void process_timeout(uint32_t now_ms) {
         return;
     }
 
+    if (kind == MODEM_AT_SMS_MODE_RESTORE) {
+        s_sms_mode_restore_attempts++; /* retried from the next idle tick */
+        return;
+    }
+
     modem_sms_command_kind_t sms_kind;
     if (sms_protocol_command_from_at(kind, &sms_kind)) {
         modem_sms_protocol_request_t request;
@@ -3149,6 +3461,11 @@ static void process_timeout(uint32_t now_ms) {
 
     if (kind == MODEM_AT_CALL_FORWARD) {
         call_forward_finish_step(false, true);
+        return;
+    }
+
+    if (kind == MODEM_AT_CALL_FORWARD_FLAGS) {
+        modem_supplementary_call_forward_flags_finish(false, now_ms);
         return;
     }
 
@@ -3593,13 +3910,21 @@ static void advance_state(uint32_t now_ms) {
              * two-snapshot removal confirmation. */
             send_command(MODEM_AT_CLCC_MODEL, g_modem_vendor.call.clcc_cmd,
                          g_modem_vendor.call.clcc_timeout_ms, now_ms);
+        } else if (s_operation == MODEM_OP_NONE &&
+                   !call_model_background_work_blocked(&s_call_model) &&
+                   (s_cops_refresh_needed ||
+                    (s_debug_background_polling_enabled &&
+                     time_diff_ms(now_ms, s_next_cops_ms) >= 0))) {
+            /* Registration already makes standby show service. Resolve its
+             * name before mailbox scans or slow supplementary queries, while
+             * keeping calls and any in-flight operation authoritative. */
+            s_cops_refresh_needed = false;
+            s_next_cops_ms = now_ms + MODEM_COPS_BACKSTOP_MS;
+            send_command(MODEM_AT_COPS, "AT+COPS?", 5000u, now_ms);
         } else if (s_operation == MODEM_OP_NONE && pop_request(&s_current_request)) {
             start_next_request(now_ms);
         } else if (call_model_background_work_blocked(&s_call_model)) {
             s_next_action_ms = now_ms + 50u;
-        } else if (supplementary_start_background(now_ms)) {
-            /* Bounded SIM mailbox/MWI/CFU synchronization. User work and call
-             * convergence above always retain priority. */
         } else if (diag_start_next_command(now_ms)) {
             /* A diagnostic group yields after this one command. */
         } else if (signal_query_due(now_ms)) {
@@ -3608,12 +3933,6 @@ static void advance_state(uint32_t now_ms) {
                    time_diff_ms(now_ms, s_next_cereg_ms) >= 0) {
             s_next_cereg_ms = now_ms + MODEM_CEREG_BACKSTOP_MS;
             send_command(MODEM_AT_CEREG, "AT+CEREG?", 2000u, now_ms);
-        } else if (s_cops_refresh_needed ||
-                   (s_debug_background_polling_enabled &&
-                    time_diff_ms(now_ms, s_next_cops_ms) >= 0)) {
-            s_cops_refresh_needed = false;
-            s_next_cops_ms = now_ms + MODEM_COPS_BACKSTOP_MS;
-            send_command(MODEM_AT_COPS, "AT+COPS?", 5000u, now_ms);
         } else if (s_sms_setup_needed && time_diff_ms(now_ms, s_next_sms_setup_ms) >= 0) {
             /* Deferred SMS setup: CSMP + CPMS failed at cold init (SIM SMS
              * subsystem not ready) and were skipped, leaving storage at the SM
@@ -3625,12 +3944,19 @@ static void advance_state(uint32_t now_ms) {
             /* No operation continuation owns this attempt. A failure leaves
              * DTR asserted and schedules another bounded background cycle. */
             sms_wake_send_arm(now_ms);
+        } else if (sms_mode_restore_start(now_ms)) {
+            /* AT+CMGF=1 after a cancelled operation left PDU mode possible. */
+        } else if (direct_ring_start(now_ms)) {
+            /* Queued a STORE_DELIVERED operation for a held +CMT. */
         } else if (s_cpms_check_needed ||
                    (s_debug_background_polling_enabled &&
                     time_diff_ms(now_ms, s_next_cpms_ms) >= 0)) {
             s_cpms_check_needed = false;
             s_next_cpms_ms = now_ms + MODEM_CPMS_POLL_PERIOD_MS;
             send_command(MODEM_AT_SMS_CPMS_POLL, "AT+CPMS?", 5000u, now_ms);
+        } else if (supplementary_start_background(now_ms)) {
+            /* Lowest-priority background work: voicemail number, message
+             * waiting, then local call-forwarding flags. */
         }
     }
 }
@@ -3815,6 +4141,7 @@ static void start_next_request(uint32_t now_ms) {
     case MODEM_REQ_SMS_MAILBOX:
     case MODEM_REQ_SMS_READ:
     case MODEM_REQ_DELETE_SMS:
+    case MODEM_REQ_STORE_DELIVERED_SMS:
         (void)sms_start_current_request(now_ms);
         break;
     case MODEM_REQ_PHONEBOOK_LIST:
@@ -3896,16 +4223,14 @@ static bool supplementary_start_background(uint32_t now_ms) {
     }
     if (modem_supplementary_refresh_due(
             MODEM_SUPPLEMENTARY_REFRESH_CFU, now_ms) && sim_ready &&
-        registered) {
-        modem_request_t request;
-        memset(&request, 0, sizeof(request));
+        registered &&
+        g_modem_vendor.supplementary.call_forward_flags_query_cmd != NULL) {
         modem_supplementary_refresh_begin(MODEM_SUPPLEMENTARY_REFRESH_CFU);
-        request.type = MODEM_REQ_CALL_FORWARD;
-        request.call_forward.reason =
-            CALL_FORWARD_REASON_UNCONDITIONAL;
-        request.call_forward.action = CALL_FORWARD_ACTION_QUERY;
-        s_current_request = request;
-        start_next_request(now_ms);
+        s_cfu_flags_row_seen = false;
+        send_command(MODEM_AT_CALL_FORWARD_FLAGS,
+                     g_modem_vendor.supplementary.call_forward_flags_query_cmd,
+                     g_modem_vendor.supplementary.call_forward_flags_timeout_ms,
+                     now_ms);
         return true;
     }
     return false;
@@ -4323,6 +4648,7 @@ static void finish_command_result(bool ok, const char *line) {
     if (sms_protocol_command_from_at(kind, &sms_kind)) {
         modem_sms_protocol_request_t request;
         if (sms_protocol_request_view(&request)) {
+            modem_sms_protocol_note_final_line(line);
             modem_sms_protocol_on_final(
                 sms_kind, ok, &request, &s_sms_protocol_hooks, s_now_ms);
         } else {
@@ -4441,6 +4767,14 @@ static void finish_command_result(bool ok, const char *line) {
         }
     } else if (kind == MODEM_AT_CALL_FORWARD) {
         call_forward_finish_step(ok, false);
+    } else if (kind == MODEM_AT_CALL_FORWARD_FLAGS) {
+        critical_section_enter_blocking(&s_status_lock);
+        if (modem_supplementary_call_forward_flags_finish(
+                ok && s_cfu_flags_row_seen, s_now_ms)) {
+            supplementary_project_status_locked();
+            s_status.last_update_ms = s_now_ms;
+        }
+        critical_section_exit(&s_status_lock);
     } else if (kind == MODEM_AT_VOICE_MAILBOX) {
         voice_mailbox_finish(ok);
     } else if (kind == MODEM_AT_MESSAGE_WAITING) {
@@ -4471,6 +4805,14 @@ static void finish_command_result(bool ok, const char *line) {
         if (ok) {
             sms_request_wake_qualified_continuation(
                 SMS_WAKE_RESUME_DEFERRED_SETUP, s_now_ms);
+        }
+    } else if (kind == MODEM_AT_SMS_MODE_RESTORE) {
+        if (ok) {
+            s_sms_mode_restore_pending = false;
+            s_sms_mode_restore_attempts = 0u;
+            LOGI("modem", "SMS text mode restored after a cancelled operation");
+        } else {
+            s_sms_mode_restore_attempts++; /* retried from the next idle tick */
         }
     } else if (kind == MODEM_AT_DEBUG) {
         LOGI("modem", "debug AT final ok=%u", ok ? 1u : 0u);
@@ -4529,7 +4871,7 @@ static void modem_enter_ready(uint32_t now_ms) {
     s_last_tx_ms = now_ms;
     s_next_signal_ms = now_ms;
     s_next_cereg_ms = now_ms + 300u;
-    s_next_cops_ms = now_ms + 600u;
+    s_next_cops_ms = now_ms;
     s_next_cpms_ms = now_ms + 900u;
     s_next_sms_setup_ms = now_ms + 1200u;
     s_sms_storage_full_latched = false;
@@ -5291,6 +5633,21 @@ static bool parse_expected_line(const char *line) {
             return true;
         }
         break;
+    case MODEM_AT_CALL_FORWARD_FLAGS:
+        if (g_modem_vendor.supplementary.call_forward_flags_response_prefix != NULL &&
+            starts_with(line,
+                g_modem_vendor.supplementary.call_forward_flags_response_prefix)) {
+            modem_aux_event_t event = {0};
+            if (g_modem_vendor.parse_aux_urc != NULL &&
+                g_modem_vendor.parse_aux_urc(line, &event) &&
+                (event.kind == MODEM_AUX_EVENT_NONE ||
+                 event.kind == MODEM_AUX_EVENT_CFU_STATE)) {
+                s_cfu_flags_row_seen = true;
+                apply_aux_event(&event);
+            }
+            return true;
+        }
+        break;
     case MODEM_AT_VOICE_MAILBOX:
         if (g_modem_vendor.supplementary.voice_mailbox_response_prefix != NULL &&
             starts_with(
@@ -5443,6 +5800,15 @@ static void apply_aux_event(const modem_aux_event_t *event) {
     }
     if (event->kind == MODEM_AUX_EVENT_INCOMING_DIVERTED) {
         call_model_on_incoming_diverted(&s_call_model);
+        return;
+    }
+    if (event->kind == MODEM_AUX_EVENT_MESSAGE_STORED_UNREADABLE) {
+        /* The module filed a message where this backend cannot read it: the
+         * message is lost to us. Same error class as an unparseable +CMT. */
+        critical_section_enter_blocking(&s_status_lock);
+        s_status.command_errors++;
+        critical_section_exit(&s_status_lock);
+        LOGW("modem", "message stored in an unreadable store; not retrievable");
         return;
     }
     critical_section_enter_blocking(&s_status_lock);
@@ -6141,6 +6507,9 @@ static bool sms_protocol_request_view(modem_sms_protocol_request_t *out) {
     case MODEM_OP_DELETE_SMS:
         out->operation = MODEM_SMS_PROTOCOL_DELETE;
         break;
+    case MODEM_OP_STORE_DELIVERED_SMS:
+        out->operation = MODEM_SMS_PROTOCOL_STORE_DELIVERED;
+        break;
     default:
         return false;
     }
@@ -6166,6 +6535,11 @@ static bool sms_protocol_request_view(modem_sms_protocol_request_t *out) {
             g_modem_vendor.sms_read_status.consume_unread_cmd,
         .timeout_ms = g_modem_vendor.sms_read_status.timeout_ms,
     };
+    if (s_operation == MODEM_OP_STORE_DELIVERED_SMS &&
+        s_direct_active < MODEM_DIRECT_RING_DEPTH) {
+        out->pdu_hex = s_direct_ring[s_direct_active].pdu_hex;
+        out->tpdu_len = s_direct_ring[s_direct_active].tpdu_len;
+    }
     return true;
 }
 
@@ -6215,6 +6589,9 @@ static bool sms_publish_terminal(
         published = modem_sms_state_publish_delete_result(
             request_id, kind, outcome, sim_not_ready);
         break;
+    case MODEM_SMS_REQUEST_DELIVERED:
+        published = true; /* internal operation: no app-facing result */
+        break;
     case MODEM_SMS_REQUEST_NONE:
     default:
         break;
@@ -6244,8 +6621,19 @@ static bool sms_publish_terminal_for_request(
 }
 
 static void sms_cancel_protocol(void) {
+    if (modem_sms_protocol_pdu_mode_possible()) {
+        /* AT+CMGF=0 crossed the wire and no AT+CMGF=1 completed: the module
+         * may rest in PDU mode. Restore text mode from the idle scheduler. */
+        s_sms_mode_restore_pending = true;
+        s_sms_mode_restore_attempts = 0u;
+    }
     modem_sms_protocol_cancel();
     s_sms_terminal_published = false;
+    /* The ring entry keeps used=true: a cancelled store is retried once the
+     * session is back. A half-collected +CMT (header without payload) is
+     * dead with the transport; it must not eat the next session's line. */
+    s_direct_active = UINT8_MAX;
+    modem_sms_direct_reset();
 }
 
 static bool sms_protocol_emit(const modem_sms_protocol_action_t *action) {
@@ -6435,6 +6823,45 @@ static bool sms_protocol_emit(const modem_sms_protocol_action_t *action) {
         s_status.command_errors++;
         critical_section_exit(&s_status_lock);
         return true;
+    case MODEM_SMS_ACTION_PUBLISH_DELIVERED: {
+        /* A pre-prompt final can latch OK with no +CMGW row: index 0 is a
+         * failure regardless of the outcome. */
+        bool ok = action->data.delivered.outcome == MODEM_SMS_OUTCOME_OK &&
+                  action->data.delivered.index != 0u;
+        if (ok) {
+            uint16_t index = action->data.delivered.index;
+            bool tracked = modem_sms_protocol_track_pending_arrival(index);
+            critical_section_enter_blocking(&s_status_lock);
+            s_status.sms_received_count++;
+            if (!tracked) {
+                /* Fail open like +CMTI: never leave a real SMS silent. */
+                s_status.sms_user_received_count++;
+            }
+            critical_section_exit(&s_status_lock);
+            s_cpms_check_needed = true;
+            if (s_direct_active < MODEM_DIRECT_RING_DEPTH) {
+                s_direct_ring[s_direct_active].used = false;
+            }
+            LOGI("modem", "direct SMS stored at index %u", (unsigned)index);
+        } else if (action->data.delivered.outcome ==
+                   MODEM_SMS_OUTCOME_STORAGE_FULL) {
+            /* No attempt burned: the entry waits for room in the store. */
+            if (!s_direct_store_blocked) {
+                LOGW("modem", "direct SMS store blocked: message store full");
+            }
+            s_direct_store_blocked = true;
+            s_direct_store_blocked_ms = s_now_ms;
+        } else {
+            if (s_direct_active < MODEM_DIRECT_RING_DEPTH) {
+                s_direct_ring[s_direct_active].attempts++;
+            }
+            LOGW("modem", "direct SMS store failed outcome=%u",
+                 (unsigned)action->data.delivered.outcome);
+        }
+        s_direct_active = UINT8_MAX;
+        s_sms_terminal_published = true; /* internal op: nothing for the app */
+        return true;
+    }
     case MODEM_SMS_ACTION_COMPLETE: {
         bool owner_matches = sms_current_matches(
             action->data.complete.request_id,
@@ -6455,6 +6882,17 @@ static bool sms_protocol_emit(const modem_sms_protocol_action_t *action) {
                                                    fallback);
         }
         s_sms_terminal_published = false;
+        if (action->data.complete.kind == MODEM_SMS_REQUEST_DELETE &&
+            action->data.complete.outcome == MODEM_SMS_OUTCOME_OK) {
+            direct_store_unblock("a delete completed");
+        }
+        if (modem_sms_protocol_pdu_mode_possible()) {
+            /* The operation completed (its result is already published) but
+             * its AT+CMGF=1 never succeeded: the module may rest in PDU mode.
+             * Every SMS operation, not only STORE_DELIVERED. */
+            s_sms_mode_restore_pending = true;
+            s_sms_mode_restore_attempts = 0u;
+        }
         finish_operation(action->data.complete.command_ok);
         return true;
     }
@@ -6477,6 +6915,9 @@ static bool sms_start_current_request(uint32_t now_ms) {
     case MODEM_REQ_SMS_MAILBOX:     s_operation = MODEM_OP_SMS_MAILBOX; break;
     case MODEM_REQ_SMS_READ:        s_operation = MODEM_OP_SMS_READ; break;
     case MODEM_REQ_DELETE_SMS:      s_operation = MODEM_OP_DELETE_SMS; break;
+    case MODEM_REQ_STORE_DELIVERED_SMS:
+        s_operation = MODEM_OP_STORE_DELIVERED_SMS;
+        break;
     default: return false;
     }
 
@@ -6869,6 +7310,9 @@ static void parse_sms_cpms(const char *line) {
         return; /* need the mem3 triple */
     }
     bool full = total != 0u && used >= total;
+    if (!full) {
+        direct_store_unblock("receive store has room");
+    }
     critical_section_enter_blocking(&s_status_lock);
     s_status.sms_storage_used = used;
     s_status.sms_storage_total = total;
@@ -7154,6 +7598,7 @@ static void modem_enter_off(void) {
     model_reset_call_session(s_now_ms);
     modem_supplementary_reset_transient();
     modem_sms_protocol_reset_pending_arrivals();
+    direct_ring_reset();
     modem_sms_protocol_operation_finished();
     phonebook_clear_cache();
     modem_uart_hal_set_power_pin(false);
@@ -7685,6 +8130,7 @@ void modem_service_test_get_snapshot(modem_service_test_snapshot_t *out) {
     out->power_off_pending = s_power_off_pending;
     out->bridge_active_wanted = s_bridge_active_wanted;
     out->sms_wake_armed = s_sms_wake_armed;
+    out->sms_mode_restore_pending = s_sms_mode_restore_pending;
     out->provision_reboot_cycle_active = s_provision_reboot_cycle_active;
     out->provision_reboot_drop_seen = s_provision_reboot_drop_seen;
     out->sim_completion_needed = s_sim_completion_needed;

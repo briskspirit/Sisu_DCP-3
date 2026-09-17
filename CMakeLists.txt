@@ -187,6 +187,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/modem_line_parser.c
     src/services/modem_maintenance.c
     src/services/modem_phonebook_state.c
+    src/services/modem_sms_direct.c
     src/services/modem_sms_protocol.c
     src/services/modem_sms_state.c
     src/services/modem_supplementary_state.c
@@ -200,6 +201,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/modem_vendor_telit_maintenance.c
     src/services/modem_vendor_telit_parse.c
     src/services/modem_vendor_telit_provision.c
+    src/services/modem_vendor_telit_sms.c
     src/services/modem_vendor_telit_tune.c
     src/services/phone_match.c
     src/services/power_sleep.c
@@ -215,6 +217,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/power_sleep_logic.c
     src/services/sms_identity.c
     src/services/sms_picture_codec.c
+    src/services/sms_deliver_codec.c
     src/services/sms_submit_codec.c
     src/services/sms_vvm_filter.c
     src/services/t9_service.c

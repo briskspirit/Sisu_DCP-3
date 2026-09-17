@@ -13,6 +13,7 @@ static bool s_cpms_configured;
 static bool s_ecamurc_configured;
 static bool s_cssn_configured;
 static bool s_cff_configured;
+static bool s_cff_flags_absent;
 static bool s_dviext_configured;
 static bool s_dvi_configured;
 static bool s_wkio_configured;
@@ -46,6 +47,7 @@ static bool s_diag_rfsts_hold_once;
 static bool s_diag_moni_hold_once;
 static bool s_diag_firmware_hold_once;
 static const char *s_rfsts_response;
+static const char *s_cops_response;
 static const char *s_clcc_row;
 static bool s_sms_keep_unread;
 static bool s_sms_test_row_enabled;
@@ -66,6 +68,8 @@ typedef enum {
     SMS_FLOW_FAULT_CMGW_PROMPT_TIMEOUT,
     SMS_FLOW_FAULT_CMGW_FINAL_ERROR,
     SMS_FLOW_FAULT_CMGW_FINAL_TIMEOUT,
+    SMS_FLOW_FAULT_CMGW_FINAL_MEMORY_FULL, /* +CMS ERROR: memory full after the body */
+    SMS_FLOW_FAULT_CMGW_PROMPT_MEMORY_FULL, /* refused at AT+CMGW=, no prompt */
     SMS_FLOW_FAULT_CMGF_TEXT_ERROR,
     SMS_FLOW_FAULT_CMGF_TEXT_TIMEOUT,
     SMS_FLOW_FAULT_DELETE_SECOND_ERROR,
@@ -79,6 +83,15 @@ typedef enum {
 static sms_flow_fault_t s_sms_flow_fault;
 static sms_prompt_t s_sms_prompt;
 static bool s_sms_esc_returns_final;
+/* Answer ERROR to AT+CMGF=1 only once the service is READY (init's own
+ * AT+CMGF=1 must succeed), to fault the idle-scheduler mode restore. */
+static bool s_sms_fail_cmgf_text_when_ready;
+/* Answer ERROR to the next N AT+CMGF=1 commands, then OK again. */
+static unsigned s_sms_cmgf_text_error_budget;
+static modem_service_test_snapshot_t service_probe(void);
+/* Exact command whose final is withheld (MH_FINAL_NONE) so a test can observe
+ * the service with that command still on the wire. */
+static const char *s_hold_final_command;
 static bool s_sms_inject_crossed_urcs;
 static uint8_t s_sms_delete_command_count;
 static modem_message_waiting_status_t s_message_waiting;
@@ -138,7 +151,7 @@ typedef enum {
     TELIT_FAULT_MWI_FAX_URC_THEN_AMBIGUOUS_QUERY_ONCE,
     TELIT_FAULT_MBN_ERROR_ALWAYS,
     TELIT_FAULT_MWI_ERROR_ONCE,
-    TELIT_FAULT_CFU_QUERY_ERROR_ONCE,
+    TELIT_FAULT_CFU_FLAGS_ERROR_ONCE,
     TELIT_FAULT_PHONEBOOK_CPBS_ERROR_ONCE,
     TELIT_FAULT_PHONEBOOK_CPBS_TIMEOUT_ONCE,
     TELIT_FAULT_PHONEBOOK_CPBR_ERROR_ONCE,
@@ -489,7 +502,12 @@ static bool telit_sms_response(const char *command) {
         return true;
     }
     if (strcmp(command, "AT+CMGF=1") == 0) {
-        if (s_sms_flow_fault == SMS_FLOW_FAULT_CMGF_TEXT_ERROR) {
+        if (s_sms_cmgf_text_error_budget != 0u) {
+            s_sms_cmgf_text_error_budget--;
+            s_mh_final = MH_FINAL_ERROR;
+        } else if (s_sms_flow_fault == SMS_FLOW_FAULT_CMGF_TEXT_ERROR ||
+            (s_sms_fail_cmgf_text_when_ready &&
+             service_probe().state == MODEM_SERVICE_TEST_STATE_READY)) {
             s_mh_final = MH_FINAL_ERROR;
         } else if (s_sms_flow_fault == SMS_FLOW_FAULT_CMGF_TEXT_TIMEOUT) {
             s_mh_final = MH_FINAL_NONE;
@@ -516,6 +534,9 @@ static bool telit_sms_response(const char *command) {
         telit_sms_inject_crossed_urcs();
         if (s_sms_flow_fault == SMS_FLOW_FAULT_CMGW_PROMPT_ERROR) {
             s_mh_final = MH_FINAL_ERROR;
+        } else if (s_sms_flow_fault == SMS_FLOW_FAULT_CMGW_PROMPT_MEMORY_FULL) {
+            s_mh_final = MH_FINAL_NONE;
+            mh_rx_push("+CMS ERROR: 322");
         } else {
             s_mh_final = MH_FINAL_NONE;
             if (s_sms_flow_fault != SMS_FLOW_FAULT_CMGW_PROMPT_TIMEOUT) {
@@ -572,6 +593,10 @@ static void telit_sms_raw_write(const uint8_t *data, size_t len) {
         mh_rx_push("ERROR");
         return;
     }
+    if (cmgw && s_sms_flow_fault == SMS_FLOW_FAULT_CMGW_FINAL_MEMORY_FULL) {
+        mh_rx_push("+CMS ERROR: memory full");
+        return;
+    }
     mh_rx_push(cmgw ? "+CMGW: 23" : "+CMGS: 23");
     mh_rx_push("OK");
 }
@@ -591,6 +616,11 @@ static void telit_response(const char *command) {
         s_mh_status_drop_pending = true;
         s_mh_status_drop_ms = s_mh_now;
         s_mh_status_drop_duration_ms = 1500u;
+        s_mh_final = MH_FINAL_NONE;
+        return;
+    }
+    if (s_hold_final_command != NULL &&
+        strcmp(command, s_hold_final_command) == 0) {
         s_mh_final = MH_FINAL_NONE;
         return;
     }
@@ -656,6 +686,10 @@ static void telit_response(const char *command) {
         mh_rx_push("+CGREG: 2,1,\"00AF\",\"ABCDEF01\",7");
     } else if (strcmp(command, "AT+CEREG?") == 0) {
         mh_rx_push("+CEREG: 2,1,\"00AF\",\"ABCDEF01\",7");
+    } else if (strcmp(command, "AT+COPS?") == 0) {
+        if (s_cops_response != NULL) {
+            mh_rx_push(s_cops_response);
+        }
     } else if (strcmp(command, "AT+CIREG?") == 0) {
         mh_rx_push("+CIREG: 2,1");
     } else if (strcmp(command, "AT#FWAUTOSIM?") == 0) {
@@ -800,7 +834,7 @@ static void telit_response(const char *command) {
         s_mh_sim_interface_active = true;
         s_psmri_live_armed = crossed_from_full_functionality &&
             !s_wkio_configured && s_e2smsri_ms == 0u &&
-            s_psmri_ms == 1000u && s_cnmi_mode == 1u;
+            s_psmri_ms == 1000u && s_cnmi_mode == 2u;
         if (s_qss_response_enabled) {
             if (!s_mh_sim_present) {
                 mh_rx_push("#QSS: 2,0");
@@ -821,12 +855,17 @@ static void telit_response(const char *command) {
         if (s_inject_imei_on_qss_set) {
             mh_rx_push("490154203237518");
         }
-    } else if (strcmp(command, "AT+CNMI=1,1,0,0,0") == 0) {
+    } else if (strcmp(command, "AT+CSDH=1") == 0) {
+        if (!s_mh_sim_interface_active || !s_mh_sim_present) {
+            mh_rx_push("+CMS ERROR: SIM not inserted");
+            s_mh_final = MH_FINAL_NONE;
+        }
+    } else if (strcmp(command, "AT+CNMI=2,2,0,0,0") == 0) {
         if (!s_mh_sim_interface_active || !s_mh_sim_present) {
             mh_rx_push("+CMS ERROR: SIM not inserted");
             s_mh_final = MH_FINAL_NONE;
         } else {
-            s_cnmi_mode = 1u;
+            s_cnmi_mode = 2u;
         }
     } else if (strcmp(command, "AT#QSS?") == 0) {
         if (s_qss_response_enabled) {
@@ -916,6 +955,15 @@ static void telit_response(const char *command) {
     } else if (strcmp(command, "AT+CSSN=1,1") == 0) {
         s_cssn_configured = true;
     } else if (strcmp(command, "AT#CFF?") == 0) {
+        if (s_fault == TELIT_FAULT_CFU_FLAGS_ERROR_ONCE && !s_fault_consumed) {
+            s_fault_consumed = true;
+            s_mh_final = MH_FINAL_ERROR;
+            return;
+        }
+        if (s_cff_flags_absent) {
+            mh_rx_push(s_cff_configured ? "#CFF: 1" : "#CFF: 0");
+            return;
+        }
         char line[64];
         snprintf(line, sizeof(line), "#CFF: %u,%u,%s",
                  s_cff_configured ? 1u : 0u,
@@ -988,12 +1036,7 @@ static void telit_response(const char *command) {
         }
         mh_rx_push(line);
     } else if (strncmp(command, "AT+CCFC=", sizeof("AT+CCFC=") - 1u) == 0) {
-        if (s_fault == TELIT_FAULT_CFU_QUERY_ERROR_ONCE &&
-            !s_fault_consumed &&
-            strcmp(command, "AT+CCFC=0,2,,,1") == 0) {
-            s_fault_consumed = true;
-            s_mh_final = MH_FINAL_ERROR;
-        } else if (s_fault == TELIT_FAULT_CALL_FORWARD_ERROR_ONCE &&
+        if (s_fault == TELIT_FAULT_CALL_FORWARD_ERROR_ONCE &&
             !s_fault_consumed) {
             s_fault_consumed = true;
             s_mh_final = MH_FINAL_ERROR;
@@ -1189,6 +1232,7 @@ static void begin_telit(bool rxdiv_configured) {
     s_ecamurc_configured = true;
     s_cssn_configured = true;
     s_cff_configured = true;
+    s_cff_flags_absent = false;
     s_dviext_configured = true;
     s_dvi_configured = true;
     s_wkio_configured = false;
@@ -1229,6 +1273,7 @@ static void begin_telit(bool rxdiv_configured) {
     s_diag_moni_hold_once = false;
     s_diag_firmware_hold_once = false;
     s_rfsts_response = NULL;
+    s_cops_response = NULL;
     s_clcc_row = NULL;
     s_sms_keep_unread = false;
     s_sms_test_row_enabled = false;
@@ -1239,6 +1284,9 @@ static void begin_telit(bool rxdiv_configured) {
     s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
     s_sms_prompt = SMS_PROMPT_NONE;
     s_sms_esc_returns_final = false;
+    s_hold_final_command = NULL;
+    s_sms_fail_cmgf_text_when_ready = false;
+    s_sms_cmgf_text_error_budget = 0u;
     s_sms_inject_crossed_urcs = false;
     s_sms_delete_command_count = 0u;
     memset(&s_message_waiting, 0, sizeof(s_message_waiting));
@@ -1552,7 +1600,9 @@ static void test_cold_boot_matching_provision(void) {
               mh_tx_count_exact("AT#QSS=2") == 1u &&
               mh_tx_count_exact("AT+CFUN=1") == 1u &&
               mh_tx_count_exact("AT+CFUN=5") == 2u &&
-              mh_tx_count_exact("AT+CNMI=1,1,0,0,0") == 1u,
+              mh_tx_count_exact("AT+CSDH=1") == 1u &&
+              mh_tx_count_exact("AT+CNMI=2,2,0,0,0") == 1u &&
+              mh_tx_count_exact("AT+CNMI=1,1,0,0,0") == 0u,
           "RF-safe activation and focused SIM lifecycle run once each");
     check(mh_tx_count_exact("AT+CSSN?") == 1u &&
               mh_tx_count_exact("AT+CSSN=1,1") == 0u &&
@@ -1561,8 +1611,10 @@ static void test_cold_boot_matching_provision(void) {
           "matching supplementary URC settings are verified without rewrites");
     check(tx_first_index("AT+CFUN=5") < tx_first_index("AT+CFUN=1") &&
               tx_first_index("AT+CFUN=1") <
-                  tx_first_index("AT+CNMI=1,1,0,0,0") &&
-              tx_first_index("AT+CNMI=1,1,0,0,0") <
+                  tx_first_index("AT+CSDH=1") &&
+              tx_first_index("AT+CSDH=1") <
+                  tx_first_index("AT+CNMI=2,2,0,0,0") &&
+              tx_first_index("AT+CNMI=2,2,0,0,0") <
                   tx_first_index("AT#WKIO?") &&
               tx_first_index("AT#WKIO?") < tx_first_index("AT&V") &&
               tx_first_index("AT&V") < tx_first_index("AT#PSMRI?") &&
@@ -1786,6 +1838,37 @@ static void test_transport_sleep_confirmation_is_strict(void) {
     check(!modem_service_transport_sleep_confirmed(),
           "continuously readable UART rejects dormant entry");
     s_mh_rx_stuck_readable = false;
+}
+
+static void test_transport_sleep_waits_for_a_raw_cmt_body(void) {
+    /* A +CMT body is read raw by <length>, bypassing the line framer, so the
+     * framer-pending check alone would let the transport sleep between two
+     * body bytes. The collector's pending state must hold the gate. */
+    begin_telit(true);
+    check(boot_until_ready(30000u), "raw-body sleep fixture boots");
+    settle_dtr_sleep();
+    check(modem_service_transport_sleep_confirmed(),
+          "raw-body sleep fixture starts from confirmed transport sleep");
+
+    static const char BODY[] = "abcdefghijklmnopqrst"; /* 20 GSM chars */
+    mh_rx_push("+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,20");
+    mh_rx_push_raw((const uint8_t *)BODY, 5u);
+    mh_settle();
+    /* One awake window (1 s), inside the 5 s body deadline. */
+    mh_advance(g_modem_vendor.wake.awake_window_ms + 1u);
+    check(modem_sms_direct_pending() && !service_probe().command_active &&
+              !modem_service_transport_sleep_confirmed(),
+          "a partially received raw +CMT body rejects transport sleep");
+
+    modem_status_t before = mh_status();
+    mh_rx_push_raw((const uint8_t *)&BODY[5], sizeof(BODY) - 1u - 5u);
+    mh_rx_push_raw((const uint8_t *)"\r\n", 2u);
+    mh_settle();
+    settle_dtr_sleep();
+    check(!modem_sms_direct_pending() &&
+              mh_status().sms_received_count == before.sms_received_count + 1u &&
+              modem_service_transport_sleep_confirmed(),
+          "the completed body is stored and transport sleep is permitted again");
 }
 
 static void test_cold_boot_repairs_dvi_and_restores_runtime_mode(void) {
@@ -3090,10 +3173,14 @@ static void test_sms_binary_failures_and_prompt_settle(void) {
         {SMS_FLOW_FAULT_CMGS_FINAL_TIMEOUT, 120001u, 1u,
          MODEM_SMS_OUTCOME_UNCERTAIN, false,
          "binary segment-final timeout"},
-        {SMS_FLOW_FAULT_CMGF_TEXT_ERROR, 0u, 1u,
+        /* A failed text-mode restore completes the operation (OK, counted)
+         * and arms the idle text-mode restore: the persistent ERROR fault
+         * then burns its three bounded retries (1 + 3); the timeout fault
+         * sees the first idle retry inside the window (1 + 1). */
+        {SMS_FLOW_FAULT_CMGF_TEXT_ERROR, 0u, 4u,
          MODEM_SMS_OUTCOME_OK, true,
          "binary text-restore error"},
-        {SMS_FLOW_FAULT_CMGF_TEXT_TIMEOUT, 5001u, 1u,
+        {SMS_FLOW_FAULT_CMGF_TEXT_TIMEOUT, 5001u, 2u,
          MODEM_SMS_OUTCOME_OK, true,
          "binary text-restore timeout"},
     };
@@ -5569,8 +5656,8 @@ static void test_call_forwarding_mailbox_and_indicators(void) {
           "SIM voice mailbox is discovered once after readiness");
     check(status.call_forward_unconditional_known &&
               !status.call_forward_unconditional_active &&
-              mh_tx_count_exact("AT+CCFC=0,2,,,1") >= 1u,
-          "startup synchronizes authoritative unconditional-divert state");
+              mh_tx_count_exact("AT+CCFC=0,2,,,1") == 0u,
+          "startup reads local divert flags without a network transaction");
     check(mh_tx_count_exact("AT#MWI?") == 1u &&
               status.message_waiting
                   .category[MODEM_MESSAGE_WAITING_VOICE_LINE_1].active &&
@@ -5770,8 +5857,7 @@ static void test_call_forwarding_mailbox_and_indicators(void) {
     request.action = CALL_FORWARD_ACTION_REGISTER;
     request.has_number = true;
     snprintf(request.number, sizeof(request.number), "+15550000020");
-    size_t cfu_queries_before =
-        mh_tx_count_exact("AT+CCFC=0,2,,,1");
+    size_t cfu_queries_before = mh_tx_count_exact("AT#CFF?");
     s_fault = TELIT_FAULT_CALL_FORWARD_TIMEOUT_ONCE;
     s_fault_consumed = false;
     check(modem_service_request_call_forward(&request, &request_id),
@@ -5782,11 +5868,11 @@ static void test_call_forwarding_mailbox_and_indicators(void) {
               result.request_id == request_id &&
               result.outcome == CALL_FORWARD_OUTCOME_RESULT_UNKNOWN,
           "on-wire mutation timeout reports Result unknown");
-    check(mh_tx_count_exact("AT+CCFC=0,2,,,1") ==
+    check(mh_tx_count_exact("AT#CFF?") ==
                   cfu_queries_before + 1u &&
               mh_status().call_forward_unconditional_known &&
               mh_status().call_forward_unconditional_active,
-          "timed-out CFU mutation repairs the icon from an authoritative query");
+          "timed-out CFU mutation refreshes local flags without another network query");
 
     begin_telit(true);
     check(boot_until_ready(30000u),
@@ -5997,6 +6083,91 @@ static void test_mwi_ambiguous_query_never_invents_voice_mail(void) {
           "solicited raw MWI response cannot masquerade as a production URC");
 }
 
+static void test_carrier_refresh_priority(void) {
+    const char *held_commands[] = {"AT#MBN"};
+    for (size_t i = 0u; i < sizeof(held_commands) / sizeof(held_commands[0]); i++) {
+        begin_telit(true);
+        s_cops_response = "+COPS: 0,0,\"Test Carrier\",7";
+        s_hold_final_command = held_commands[i];
+        check(boot_until_ready(30000u), "carrier-priority fixture boots");
+        mh_feed("+CEREG: 1");
+        mh_advance(1000u);
+        modem_status_t status = mh_status();
+        check(status.network_registered &&
+                  strcmp(status.operator_name, "Test Carrier") == 0,
+              "carrier is available while a supplementary query is stalled");
+        check(tx_first_index("AT+COPS?") < tx_first_index(held_commands[i]),
+              "boot carrier lookup precedes slow supplementary work");
+    }
+
+    begin_telit(true);
+    check(boot_until_ready(30000u), "registration-priority fixture boots");
+    settle_dtr_sleep();
+    s_hold_final_command = "AT+CGMI";
+    check(modem_service_request_debug_at("AT+CGMI"),
+          "carrier-priority fixture holds one existing command");
+    mh_advance(1u);
+    mh_advance(1u);
+    check(service_probe().command_active, "existing command remains active");
+    mh_clear_tx_capture();
+    check(modem_service_request_debug_at("AT+CGMM"),
+          "ordinary request queues behind the active command");
+    s_cops_response = "+COPS: 0,0,\"New Carrier\",7";
+    mh_feed("+CEREG: 0");
+    mh_feed("+CEREG: 1");
+    check(mh_tx_count_exact("AT+COPS?") == 0u,
+          "registration refresh never interrupts an on-wire command");
+    modem_supplementary_refresh_arm(
+        MODEM_SUPPLEMENTARY_REFRESH_VOICE_MAILBOX, s_mh_now);
+    modem_supplementary_refresh_arm(
+        MODEM_SUPPLEMENTARY_REFRESH_MESSAGE_WAITING, s_mh_now);
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    mh_settle();
+    check(strcmp(mh_status().operator_name, "New Carrier") == 0 &&
+              tx_first_index("AT+COPS?") < tx_first_index("AT+CGMM") &&
+              tx_first_index("AT+COPS?") < tx_first_index("AT#RFSTS"),
+          "registration-edge carrier refresh precedes ordinary queued work and signal polling");
+    check(tx_first_index("AT#MBN") < tx_first_index("AT#MWI?") &&
+              tx_first_index("AT#MWI?") < tx_first_index("AT#CFF?") &&
+              mh_tx_count_exact("AT+CCFC=0,2,,,1") == 0u,
+          "re-registration keeps voicemail ahead of local forwarding flags");
+}
+
+static void test_local_forwarding_flags_without_network_fallback(void) {
+    begin_telit(true);
+    s_cff_flags_absent = true;
+    check(boot_until_ready(30000u), "missing local-flags fixture boots");
+    settle_dtr_sleep();
+    check(!mh_status().call_forward_unconditional_known &&
+              mh_tx_count_exact("AT+CCFC=0,2,,,1") == 0u,
+          "absent SIM flags stay unknown without an automatic network query");
+    mh_advance(300000u);
+    check(mh_tx_count_exact("AT+CCFC=0,2,,,1") == 0u,
+          "background refresh never falls back to a network SS transaction");
+
+    mh_feed("#CFF: 1,1,+15551234567");
+    check(mh_status().call_forward_unconditional_known &&
+              mh_status().call_forward_unconditional_active,
+          "a real forwarding indication still updates standby");
+    mh_feed("+CEREG: 0");
+    mh_feed("+CEREG: 1");
+    mh_settle();
+    check(!mh_status().call_forward_unconditional_known,
+          "a later valid flags-absent snapshot does not claim a stale state");
+
+    s_hold_final_command = "AT#CFF?";
+    modem_supplementary_refresh_arm(MODEM_SUPPLEMENTARY_REFRESH_CFU, s_mh_now);
+    mh_settle();
+    mh_feed("#CFF: 1,1,+15551234567");
+    mh_feed("#CFF: 1");
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    check(mh_status().call_forward_unconditional_known &&
+              mh_status().call_forward_unconditional_active,
+          "newer CFU evidence survives a flags-absent query final");
+}
+
 static void test_supplementary_refresh_recovery(void) {
     begin_telit(true);
     s_fault = TELIT_FAULT_MBN_ERROR_ALWAYS;
@@ -6044,26 +6215,27 @@ static void test_supplementary_refresh_recovery(void) {
     s_call_forward_active[CALL_FORWARD_REASON_UNCONDITIONAL] = true;
     snprintf(s_call_forward_number[CALL_FORWARD_REASON_UNCONDITIONAL],
              sizeof(s_call_forward_number[0]), "+15550000021");
-    s_fault = TELIT_FAULT_CFU_QUERY_ERROR_ONCE;
+    size_t flags_before = mh_tx_count_exact("AT#CFF?");
+    s_fault = TELIT_FAULT_CFU_FLAGS_ERROR_ONCE;
     mh_feed("+CEREG: 1");
     mh_settle();
-    check(mh_tx_count_exact("AT+CCFC=0,2,,,1") == 1u &&
+    check(mh_tx_count_exact("AT#CFF?") == flags_before + 1u &&
               !mh_status().call_forward_unconditional_known,
-          "failed registration-edge CFU read remains unknown");
+          "failed registration-edge flags read remains unknown");
     mh_advance(MODEM_SUPPLEMENTARY_REFRESH_RETRY_MS + 1u);
     modem_status_t status = mh_status();
-    check(mh_tx_count_exact("AT+CCFC=0,2,,,1") == 2u &&
+    check(mh_tx_count_exact("AT#CFF?") == flags_before + 2u &&
               status.call_forward_unconditional_known &&
               status.call_forward_unconditional_active,
-          "bounded CFU retry restores network authority");
+          "bounded local-flags retry restores the indicator");
 
     call_forward_request_t request;
     memset(&request, 0, sizeof(request));
     request.reason = CALL_FORWARD_REASON_UNCONDITIONAL;
     request.action = CALL_FORWARD_ACTION_DISABLE;
     uint32_t request_id = 0u;
-    size_t queries_before = mh_tx_count_exact("AT+CCFC=0,2,,,1");
-    s_fault = TELIT_FAULT_CFU_QUERY_ERROR_ONCE;
+    size_t queries_before = mh_tx_count_exact("AT#CFF?");
+    s_fault = TELIT_FAULT_CFU_FLAGS_ERROR_ONCE;
     s_fault_consumed = false;
     check(modem_service_request_call_forward(&request, &request_id),
           "CFU mutation with failed verification is admitted");
@@ -6073,10 +6245,10 @@ static void test_supplementary_refresh_recovery(void) {
               result.request_id == request_id &&
               result.outcome == CALL_FORWARD_OUTCOME_SUCCESS &&
               !mh_status().call_forward_unconditional_known,
-          "mutation success invalidates the old icon until network verification");
+          "mutation success invalidates the old icon until local flags refresh");
     mh_advance(MODEM_SUPPLEMENTARY_REFRESH_RETRY_MS + 1u);
     status = mh_status();
-    check(mh_tx_count_exact("AT+CCFC=0,2,,,1") == queries_before + 2u &&
+    check(mh_tx_count_exact("AT#CFF?") == queries_before + 2u &&
               status.call_forward_unconditional_known &&
               !status.call_forward_unconditional_active,
           "failed post-mutation verification retries and clears the icon");
@@ -6454,6 +6626,1012 @@ static void test_phonebook_queue_eviction_and_recovery_are_terminal(void) {
           "runtime recovery cancels current and queued phonebook requests exactly once");
 }
 
+
+/* ---- direct delivery (+CMT) -------------------------------------------- */
+
+static const char DIRECT_3GPP2_HEADER[] =
+    "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,9";
+static const char DIRECT_3GPP2_BODY[] = "Dhdjdjdjs";
+static const char DIRECT_CPMS_SET[] = "AT+CPMS=\"ME\",\"ME\",\"ME\"";
+
+/* The module emits a +CMT as one atomic header+payload unit: nothing can land
+ * between the two lines on the wire, so the fixture queues both before the
+ * service runs (a settle between them would let the auto-responder interleave
+ * a background command's row as the payload, which hardware cannot do). */
+static void feed_direct(const char *header, const char *payload) {
+    mh_rx_push(header);
+    mh_rx_push(payload);
+    mh_settle();
+}
+
+/* Golden: the same vendor hook + codec the service uses, run independently. */
+static bool build_expected_direct_pdu(const char *header, const char *payload,
+                                      char *pdu, uint8_t *tpdu_len) {
+    sms_deliver_t deliver;
+    return g_modem_vendor.translate_direct_sms != NULL &&
+           g_modem_vendor.translate_direct_sms(header, (const uint8_t *)payload,
+                                               strlen(payload), &deliver) ==
+               MODEM_SMS_DIRECT_ACCEPTED &&
+           sms_deliver_build(&deliver, pdu, SMS_DELIVER_HEX_MAX, tpdu_len);
+}
+
+/* Wire bytes exactly as the module emits them: header CRLF body CRLF, queued
+ * as one unit before the service runs. The body is a byte range so it can
+ * carry CR, LF and 0x00. */
+static void feed_direct_wire(const char *header, const uint8_t *body,
+                             size_t body_len) {
+    mh_rx_push(header);
+    mh_rx_push_raw(body, body_len);
+    mh_rx_push_raw((const uint8_t *)"\r\n", 2u);
+    mh_settle();
+}
+
+/* The PDU hex the service wrote after its last AT+CMGW= (the raw event that
+ * follows the command; the ^Z is a separate one-byte event). */
+static bool captured_stored_pdu(char *out, size_t cap) {
+    size_t cmgw = SIZE_MAX;
+    for (size_t i = 0u; i < s_mh_tx_event_count; i++) {
+        const mh_tx_event_t *event = &s_mh_tx_events[i];
+        if (event->kind == MH_TX_EVENT_CSTR && event->len >= 8u &&
+            memcmp(event->data, "AT+CMGW=", 8u) == 0) {
+            cmgw = i;
+        }
+    }
+    if (cmgw == SIZE_MAX) {
+        return false;
+    }
+    for (size_t i = cmgw + 1u; i < s_mh_tx_event_count; i++) {
+        const mh_tx_event_t *event = &s_mh_tx_events[i];
+        if (event->kind == MH_TX_EVENT_RAW && event->len > 1u &&
+            !event->truncated && event->len < cap) {
+            memcpy(out, event->data, event->len);
+            out[event->len] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_direct_delivery_is_restored_as_a_pdu(void) {
+    static const uint8_t sub = 0x1au;
+    if (!begin_sms_operation_fixture("direct-delivery fixture boots")) {
+        return;
+    }
+    char expected_pdu[SMS_DELIVER_HEX_MAX];
+    uint8_t expected_tpdu = 0u;
+    check(build_expected_direct_pdu(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY,
+                                    expected_pdu, &expected_tpdu),
+          "direct-delivery golden builds independently");
+    modem_status_t before = mh_status();
+    size_t cpms_poll_before = mh_tx_count_exact("AT+CPMS?");
+
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+
+    char cmgw[24];
+    snprintf(cmgw, sizeof(cmgw), "AT+CMGW=%u,0", (unsigned)expected_tpdu);
+    size_t cpms_event = tx_event_cstr(DIRECT_CPMS_SET, 0u);
+    size_t pdu_mode = tx_event_cstr("AT+CMGF=0", cpms_event + 1u);
+    size_t cmgw_event = tx_event_cstr(cmgw, pdu_mode + 1u);
+    size_t pdu_event = tx_event_raw(expected_pdu, strlen(expected_pdu),
+                                    cmgw_event + 1u);
+    size_t sub_event = tx_event_raw(&sub, 1u, pdu_event + 1u);
+    size_t text_mode = tx_event_cstr("AT+CMGF=1", sub_event + 1u);
+    check(cpms_event != SIZE_MAX && pdu_mode != SIZE_MAX &&
+              cmgw_event != SIZE_MAX && pdu_event != SIZE_MAX &&
+              sub_event != SIZE_MAX && text_mode != SIZE_MAX &&
+              mh_tx_count_exact("AT+CMGF=1") == 1u,
+          "a +CMT is re-stored as an SMS-DELIVER PDU in exact wire order");
+    modem_status_t after = mh_status();
+    check(after.sms_received_count == before.sms_received_count + 1u &&
+              after.sms_user_received_count == before.sms_user_received_count &&
+              after.command_errors == before.command_errors,
+          "a stored delivery counts like a +CMTI (classified by the scan)");
+    check(mh_tx_count_exact("AT+CPMS?") == cpms_poll_before + 1u,
+          "a stored delivery schedules the +CMTI receive-store check");
+    check(!after.operation_busy && !service_probe().command_active &&
+              service_probe().request_queue_depth == 0u,
+          "the internal store leaves no request or operation behind");
+
+    /* The ring slot was released: a second delivery stores again. */
+    mh_clear_tx_capture();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    check(mh_tx_count_exact(cmgw) == 1u &&
+              mh_status().sms_received_count == before.sms_received_count + 2u,
+          "a released ring slot stores the next delivery");
+}
+
+static void test_slow_call_forwarding_keeps_receiving(void) {
+    for (unsigned reject = 0u; reject < 2u; reject++) {
+        begin_telit(true);
+        check(boot_until_ready(30000u), "slow forwarding fixture boots");
+        settle_dtr_sleep();
+        mh_clear_tx_capture();
+        modem_status_t before = mh_status();
+        call_forward_request_t request = {0};
+        request.reason = CALL_FORWARD_REASON_BUSY;
+        request.action = CALL_FORWARD_ACTION_QUERY;
+        uint32_t request_id = 0u;
+        s_hold_final_command = "AT+CCFC=1,2,,,1";
+        check(modem_service_request_call_forward(&request, &request_id),
+              "explicit network forwarding query is admitted");
+        mh_advance(1u);
+        mh_advance(1u);
+        check(modem_service_request_debug_at("AT+CGMM"),
+              "ordinary work queues behind the network request");
+        mh_advance(16000u);
+        check(service_probe().command_active &&
+                  service_probe().active_command == MODEM_SERVICE_TEST_COMMAND_CALL_FORWARD &&
+                  mh_tx_count_exact("AT+CGMM") == 0u,
+              "network request still owns UART beyond the old 15-second deadline");
+
+        feed_direct("+CMT: \"15551230000\",\"\",\"20260916210000\",129,4098,0,8,2", "OK");
+        feed_direct("+CMT: \"15551230000\",\"\",\"20260916210001\",129,4098,0,8,7", "Another");
+        mh_feed("RING");
+        mh_feed("+CLIP: \"+15557654321\",145,,,,0");
+        mh_feed("#ECAM: 0,6,1,,,");
+        check(mh_status().ring_active &&
+                  strcmp(mh_status().incoming_number, "+15557654321") == 0 &&
+                  service_probe().active_command == MODEM_SERVICE_TEST_COMMAND_CALL_FORWARD &&
+                  mh_tx_count_exact(DIRECT_CPMS_SET) == 0u,
+              "call indication and SMS bodies are received without completing the pending query");
+        mh_advance(14000u);
+        check(service_probe().active_command == MODEM_SERVICE_TEST_COMMAND_CALL_FORWARD &&
+                  mh_status().ring_active && mh_tx_count_exact("AT+CGMM") == 0u,
+              "30-second network wait preserves the incoming call and queued work");
+        check(modem_service_request_answer(), "answer queues for the incoming call");
+        s_clcc_row = "+CLCC: 1,1,0,0,0,\"15557654321\",145";
+        s_hold_final_command = NULL;
+        if (!reject) {
+            mh_feed("+CCFC: 0,1");
+        }
+        mh_feed(reject ? "+CME ERROR: network rejected request" : "OK");
+        for (unsigned i = 0u; i < 5u; i++) mh_advance(100u);
+        call_forward_result_t result;
+        check(modem_service_pop_call_forward_result(&result) &&
+                  result.request_id == request_id &&
+                  result.outcome == (reject ? CALL_FORWARD_OUTCOME_NOT_DONE :
+                                             CALL_FORWARD_OUTCOME_SUCCESS),
+              "late network final completes only its original forwarding request");
+        check(tx_first_index("ATA") < tx_first_index("AT+CGMM") &&
+                  mh_status().call_state == MODEM_CALL_ACTIVE,
+              "queued answer takes priority as soon as the network request finishes");
+        check(mh_status().sms_received_count == before.sms_received_count + 2u,
+              "both SMS received during the wait are stored after the answer");
+        char expected[SMS_DELIVER_HEX_MAX];
+        char stored[SMS_DELIVER_HEX_MAX];
+        uint8_t tpdu = 0u;
+        check(build_expected_direct_pdu(
+                  "+CMT: \"15551230000\",\"\",\"20260916210001\",129,4098,0,8,7",
+                  "Another", expected, &tpdu) &&
+                  captured_stored_pdu(stored, sizeof(stored)) &&
+                  strcmp(stored, expected) == 0,
+              "delayed SMS storage preserves the exact received payload");
+        modem_debug_result_t debug;
+        check(modem_service_pop_debug_result(&debug) && debug.ok,
+              "the next AT transaction is not poisoned by the delayed forwarding final");
+    }
+}
+
+static void test_direct_delivery_mid_command_and_qcmti(void) {
+    if (!begin_sms_operation_fixture(
+            "direct-delivery mid-command fixture boots")) {
+        return;
+    }
+    modem_status_t before = mh_status();
+
+    s_hold_final_command = "AT+CGMI";
+    check(modem_service_request_debug_at("AT+CGMI"),
+          "debug command is admitted");
+    mh_settle();
+    check(service_probe().command_active && mh_status().operation_busy,
+          "debug command is on the wire without a final");
+
+    /* A payload that reads like a final must not finish AT+CGMI. The body
+     * is read raw by <length> (2), so the header says exactly "OK". */
+    feed_direct("+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,2",
+                "OK");
+    check(service_probe().command_active && mh_status().operation_busy &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u,
+          "a +CMT payload spelled OK does not complete the active command");
+
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    check(!service_probe().command_active &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
+              mh_tx_count_exact("AT+CMGF=1") == 1u &&
+              mh_status().sms_received_count == before.sms_received_count + 1u,
+          "the store runs after the command completes");
+
+    /* A zero-length body never reaches the service as a line (the framer
+     * drops empty lines): the header alone must complete the delivery, so the
+     * OK that follows still finishes the command it belongs to. */
+    s_hold_final_command = "AT+CGMI";
+    check(modem_service_request_debug_at("AT+CGMI"),
+          "second debug command is admitted");
+    mh_settle();
+    mh_clear_tx_capture();
+    s_hold_final_command = NULL;
+    feed_direct("+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,0",
+                "OK");
+    check(!service_probe().command_active && !mh_status().operation_busy &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
+              mh_tx_count_exact("AT+CMGW=18,0") == 1u &&
+              mh_tx_count_exact("AT+CMGF=1") == 1u &&
+              mh_status().sms_received_count == before.sms_received_count + 2u,
+          "a length-0 +CMT completes on its header: the OK after it finishes "
+          "the command and one empty message is stored");
+    before.sms_received_count++;
+
+    /* A header whose body never arrives (wire corruption; the module emits
+     * header and body as one unit): the raw reader takes the next line as
+     * the body candidate, it does not parse and is far past the plain-body
+     * bound for <length> 9, so the delivery is rejected at once; the stray
+     * line after it is ignored and the next real delivery stores normally.
+     * Nothing is misparsed. */
+    modem_status_t lost_before = mh_status();
+    mh_clear_tx_capture();
+    mh_rx_push(DIRECT_3GPP2_HEADER);
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    check(mh_tx_count_exact(DIRECT_CPMS_SET) == 0u && !modem_sms_direct_pending() &&
+              mh_status().command_errors == lost_before.command_errors + 1u &&
+              mh_status().sms_received_count == lost_before.sms_received_count,
+          "a header without its body is rejected at the next line (past the plain-body bound)");
+    mh_clear_tx_capture();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    for (unsigned i = 0u; i < 5u; i++) {
+        mh_advance(100u); /* the store may first need the DTR wake */
+    }
+    check(mh_tx_count_exact("AT+CMGF=0") == 1u &&
+              mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
+              mh_status().sms_received_count == before.sms_received_count + 2u,
+          "the delivery after a corrupted one stores exactly one message");
+
+    /* An unsupported encoding is rejected at its own terminator, without
+     * waiting for the body deadline or consuming the next notification. */
+    modem_status_t rejected_before = mh_status();
+    mh_clear_tx_capture();
+    feed_direct("+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,7,9",
+                DIRECT_3GPP2_BODY);
+    check(!modem_sms_direct_pending() &&
+              mh_status().command_errors == rejected_before.command_errors + 1u &&
+              mh_status().sms_received_count ==
+                  rejected_before.sms_received_count &&
+              mh_tx_count_exact("AT+CMGF=0") == 0u,
+          "an unparseable +CMT is counted as an error and not stored");
+
+    /* $QCMTI: a store this backend cannot read. Counted, never read. */
+    modem_status_t qcmti_before = mh_status();
+    mh_feed("$QCMTI: \"ME\",24");
+    modem_status_t qcmti_after = mh_status();
+    check(qcmti_after.command_errors == qcmti_before.command_errors + 1u &&
+              qcmti_after.urc_count == qcmti_before.urc_count + 1u &&
+              qcmti_after.sms_received_count ==
+                  qcmti_before.sms_received_count &&
+              mh_tx_count_exact("AT+CMGR=24") == 0u &&
+              mh_tx_count_exact("AT+CMGF=0") == 0u,
+          "$QCMTI is recognised, counted as an error, and never read");
+}
+
+static void test_direct_delivery_retries_after_store_failure(void) {
+    if (!begin_sms_operation_fixture("direct-delivery retry fixture boots")) {
+        return;
+    }
+    modem_status_t before = mh_status();
+
+    s_sms_flow_fault = SMS_FLOW_FAULT_CPMS_ERROR;
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    for (unsigned i = 0u; i < 8u; i++) {
+        mh_advance(100u);
+    }
+    check(mh_tx_count_exact(DIRECT_CPMS_SET) == 3u &&
+              mh_tx_count_exact("AT+CMGF=0") == 0u,
+          "a failed store is retried from the ring, bounded to three attempts");
+    modem_status_t after = mh_status();
+    /* Three failed operations count one command error each (finish_operation
+     * accounting shared by every failed SMS command) plus exactly one for the
+     * drop itself. */
+    check(after.sms_received_count == before.sms_received_count &&
+              after.command_errors == before.command_errors + 3u + 1u &&
+              !after.operation_busy &&
+              service_probe().request_queue_depth == 0u,
+          "a dropped delivery costs exactly one error beyond its three failed stores");
+    /* A failed CPMS set also re-arms the deferred SMS-setup chain (CSMP then
+     * CPMS), so count the store itself: no PDU mode is ever entered again. */
+    mh_advance(1000u);
+    check(mh_tx_count_exact("AT+CMGF=0") == 0u && !mh_status().operation_busy &&
+              service_probe().request_queue_depth == 0u,
+          "a dropped slot is never retried again");
+
+    /* The slot was dropped after the third attempt; a healthy modem stores
+     * the next delivery in one attempt. */
+    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
+    mh_clear_tx_capture();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    check(mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
+              mh_tx_count_exact("AT+CMGF=1") == 1u &&
+              mh_status().sms_received_count == before.sms_received_count + 1u,
+          "a dropped slot does not block later deliveries");
+
+    /* Ring full: the ninth pending delivery while eight are held is dropped. */
+    s_sms_flow_fault = SMS_FLOW_FAULT_CMGF_PDU_TIMEOUT; /* no CMGF=0 final */
+    mh_clear_tx_capture();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY); /* slot 0: parks */
+    check(service_probe().command_active &&
+              mh_tx_count_exact("AT+CMGF=0") == 1u,
+          "ring-full fixture parks the first store at AT+CMGF=0");
+    modem_status_t held_before = mh_status();
+    for (unsigned i = 1u; i < 8u; i++) {
+        feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY); /* slots 1..7 */
+    }
+    check(mh_status().command_errors == held_before.command_errors,
+          "eight deliveries are held without loss");
+    modem_status_t full_before = mh_status();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY); /* no slot */
+    check(mh_status().command_errors == full_before.command_errors + 1u,
+          "the ninth delivery on a full ring is counted as an error");
+    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
+    for (unsigned i = 0u; i < 24u; i++) {
+        mh_advance(1000u); /* CMGF=0 times out; retry, then drain the rest */
+    }
+    check(mh_status().sms_received_count == before.sms_received_count + 1u + 8u &&
+              !mh_status().operation_busy &&
+              service_probe().request_queue_depth == 0u,
+          "all eight held slots drain once the modem answers again");
+}
+
+/* Bodies of distinct lengths give distinct AT+CMGW=<tpdu>,0 commands, so
+ * the store order is observable on the wire. */
+static void feed_direct_len(unsigned chars) {
+    static const char LETTERS[] = "abcdefghijkl";
+    char header[96];
+    char body[16];
+    snprintf(header, sizeof(header),
+             "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,%u", chars);
+    memcpy(body, LETTERS, chars);
+    body[chars] = '\0';
+    feed_direct(header, body);
+}
+
+static void test_direct_delivery_dropped_line_resets_the_collector(void) {
+    if (!begin_sms_operation_fixture("direct-delivery dropped-line fixture boots")) {
+        return;
+    }
+    modem_status_t before = mh_status();
+    s_hold_final_command = "AT+CGMI";
+    check(modem_service_request_debug_at("AT+CGMI"), "debug command is admitted");
+    mh_settle();
+    check(service_probe().command_active, "debug command is on the wire without a final");
+
+    /* A header without a <length> field pends in line mode (the next framed
+     * line is its body). If that line overflows the framer it is DROPPED and
+     * never delivered: the collector must be reset so the command's real
+     * final is not eaten as the body. */
+    mh_clear_tx_capture();
+    mh_feed("+CMT: \"+1555\",,\"26/09/16,10:59:04-16\"");
+    static char garbage[600];
+    memset(garbage, 'X', sizeof(garbage) - 1u);
+    garbage[sizeof(garbage) - 1u] = '\0';
+    mh_feed(garbage);
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    check(!service_probe().command_active && !mh_status().operation_busy &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u &&
+              mh_status().sms_received_count == before.sms_received_count,
+          "a dropped overlong line resets a pending header: the final completes "
+          "the command and nothing is stored");
+    /* The collector is clean afterwards: a real delivery stores normally. */
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    check(mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
+              mh_status().sms_received_count == before.sms_received_count + 1u,
+          "the next delivery after a dropped line stores normally");
+}
+
+/* Index of the n-th (1-based) CSTR event equal to text, or SIZE_MAX. */
+static size_t tx_event_cstr_nth(const char *text, unsigned n) {
+    size_t at = 0u;
+    for (unsigned i = 0u; i < n; i++) {
+        at = tx_event_cstr(text, at);
+        if (at == SIZE_MAX) {
+            return SIZE_MAX;
+        }
+        at++;
+    }
+    return at - 1u;
+}
+
+static void test_direct_delivery_restores_text_mode_after_a_cancelled_scan(void) {
+    /* A MAILBOX scan parked after AT+CMGF=0 succeeded, then cancelled by a
+     * runtime power fault (the live cancel path: call requests wait behind
+     * a running SMS operation, and the multipart-read yield already restores
+     * text mode itself). After recovery the idle scheduler must issue
+     * AT+CMGF=1 before any +CMT store. */
+    if (!begin_sms_operation_fixture("mode-restore fixture boots")) {
+        return;
+    }
+    s_hold_final_command = "AT+CMGL=4";
+    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
+          "mailbox scan is admitted");
+    mh_settle();
+    check(service_probe().command_active && mh_tx_count_exact("AT+CMGF=0") == 1u &&
+              mh_tx_count_exact("AT+CMGF=1") == 0u,
+          "the scan is parked at AT+CMGL=4 with PDU mode entered");
+
+    s_mh_supply_pg = false;
+    mh_advance(250u);
+    modem_sms_mailbox_result_t mailbox_result;
+    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+              modem_service_pop_sms_mailbox_result(&mailbox_result) &&
+              mailbox_result.outcome == MODEM_SMS_OUTCOME_CANCELLED &&
+              service_probe().sms_mode_restore_pending,
+          "the cancelled scan leaves a text-mode restore pending");
+
+    s_hold_final_command = NULL;
+    s_mh_supply_pg = true;
+    mh_clear_tx_capture();
+    modem_service_power_on();
+    check(boot_until_ready(30000u), "retained modem recovers");
+    modem_status_t before = mh_status();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    size_t cnmi = tx_event_cstr("AT+CNMI=2,2,0,0,0", 0u);
+    size_t init_text = tx_event_cstr_nth("AT+CMGF=1", 1u);
+    size_t restore_text = tx_event_cstr_nth("AT+CMGF=1", 2u);
+    size_t store_pdu = tx_event_cstr("AT+CMGF=0", 0u);
+    check(cnmi != SIZE_MAX && init_text != SIZE_MAX && restore_text != SIZE_MAX &&
+              store_pdu != SIZE_MAX && init_text < cnmi && cnmi < restore_text &&
+              restore_text < store_pdu && !service_probe().sms_mode_restore_pending &&
+              mh_status().sms_received_count == before.sms_received_count + 1u,
+          "after recovery the idle restore issues AT+CMGF=1 before the +CMT store");
+
+    /* Bounded: a restore the module keeps rejecting is retried from the idle
+     * scheduler at most three times, then given up. */
+    if (!begin_sms_operation_fixture("mode-restore retry fixture boots")) {
+        return;
+    }
+    s_hold_final_command = "AT+CMGL=4";
+    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX), "retry scan admitted");
+    mh_settle();
+    s_mh_supply_pg = false;
+    mh_advance(250u);
+    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+              service_probe().sms_mode_restore_pending,
+          "retry fixture cancelled with a restore pending");
+    s_hold_final_command = NULL;
+    s_mh_supply_pg = true;
+    s_sms_fail_cmgf_text_when_ready = true;
+    mh_clear_tx_capture();
+    modem_service_power_on();
+    check(boot_until_ready(30000u), "retained modem recovers for the retry fixture");
+    before = mh_status();
+    for (unsigned i = 0u; i < 6u; i++) {
+        mh_advance(1000u);
+    }
+    size_t rejected = mh_tx_count_exact("AT+CMGF=1") - 1u; /* minus init's */
+    check(rejected == 3u && !service_probe().sms_mode_restore_pending &&
+              !mh_status().operation_busy,
+          "a rejected restore is retried three times, then given up");
+    s_sms_fail_cmgf_text_when_ready = false;
+    mh_advance(1000u);
+    check(mh_tx_count_exact("AT+CMGF=1") == 4u,
+          "no further restore after giving up");
+}
+
+static void test_direct_delivery_failed_restore_after_store_is_recovered(void) {
+    /* A store whose AT+CMGF=1 answers ERROR still published its row; the
+     * module may rest in PDU mode, so the idle restore must run. */
+    if (!begin_sms_operation_fixture("failed-restore-after-store fixture boots")) {
+        return;
+    }
+    modem_status_t before = mh_status();
+    s_sms_cmgf_text_error_budget = 1u; /* only the store's own AT+CMGF=1 fails */
+    mh_clear_tx_capture();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    mh_advance(100u);
+    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
+              mh_status().sms_received_count == before.sms_received_count + 1u &&
+              !mh_status().operation_busy,
+          "the stored row is published OK despite the failed AT+CMGF=1");
+    check(mh_tx_count_exact("AT+CMGF=1") == 2u &&
+              tx_event_cstr_nth("AT+CMGF=1", 2u) > tx_event_cstr("AT+CMGW=26,0", 0u) &&
+              !service_probe().sms_mode_restore_pending,
+          "the idle scheduler re-issues AT+CMGF=1 after the store's failed restore");
+
+    /* Same for a MAILBOX scan whose own restore fails. */
+    mh_clear_tx_capture();
+    s_sms_cmgf_text_error_budget = 1u;
+    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX), "scan admitted");
+    mh_settle();
+    mh_advance(100u);
+    modem_sms_mailbox_result_t mailbox_result;
+    check(modem_service_pop_sms_mailbox_result(&mailbox_result) &&
+              !mh_status().operation_busy &&
+              mh_tx_count_exact("AT+CMGF=1") == 2u && !service_probe().sms_mode_restore_pending,
+          "the idle scheduler restores text mode after the failed scan restore");
+}
+
+static void test_direct_delivery_interrupted_body_times_out(void) {
+    /* A header followed by a truncated body must not keep the collector (and
+     * the transport) pending forever: the service bounds the wait. */
+    if (!begin_sms_operation_fixture("interrupted-body fixture boots")) {
+        return;
+    }
+    s_hold_final_command = "AT+CGMI";
+    check(modem_service_request_debug_at("AT+CGMI"), "debug command is admitted");
+    mh_settle();
+    modem_status_t before = mh_status();
+    mh_clear_tx_capture();
+    static const char BODY[] = "abcdefghijklmnopqrst";
+    mh_rx_push("+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,20");
+    mh_rx_push_raw((const uint8_t *)BODY, 5u);
+    mh_settle();
+    check(modem_sms_direct_pending(), "the truncated body leaves the collector pending");
+    mh_advance(5100u);
+    check(!modem_sms_direct_pending() &&
+              mh_status().command_errors == before.command_errors + 1u &&
+              mh_status().sms_received_count == before.sms_received_count,
+          "5 s without the rest of the body resets the collector and counts one error");
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    check(!service_probe().command_active && mh_tx_count_exact("AT+CMGF=0") == 0u,
+          "the next line after the timeout completes the command instead of being eaten");
+    settle_dtr_sleep();
+    check(modem_service_transport_sleep_confirmed(),
+          "transport sleep is permitted again after the body timeout");
+
+    /* A body completed within the deadline stores as before. */
+    before = mh_status();
+    mh_clear_tx_capture();
+    mh_rx_push("+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,20");
+    mh_rx_push_raw((const uint8_t *)BODY, 5u);
+    mh_settle();
+    mh_advance(2000u);
+    mh_rx_push_raw((const uint8_t *)&BODY[5], sizeof(BODY) - 1u - 5u);
+    mh_rx_push_raw((const uint8_t *)"\r\n", 2u);
+    mh_settle();
+    for (unsigned i = 0u; i < 4u; i++) {
+        mh_advance(100u); /* the store may first need the DTR wake */
+    }
+    check(mh_tx_count_exact("AT+CMGF=0") == 1u &&
+              mh_status().sms_received_count == before.sms_received_count + 1u &&
+              mh_status().command_errors == before.command_errors,
+          "a body completed within the deadline is stored");
+}
+
+static void test_direct_delivery_storage_full_waits_for_room(void) {
+    /* A full ME store must not burn the bounded attempts: the module has
+     * already acknowledged the network, so the entry waits for room. */
+    if (!begin_sms_operation_fixture("storage-full fixture boots")) {
+        return;
+    }
+    settle_dtr_sleep(); /* drain the boot backstops, incl. the first AT+CPMS? */
+    modem_status_t before = mh_status();
+    s_sms_flow_fault = SMS_FLOW_FAULT_CMGW_FINAL_MEMORY_FULL;
+    mh_clear_tx_capture();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    for (unsigned i = 0u; i < 5u; i++) {
+        mh_advance(1000u);
+    }
+    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
+              mh_status().sms_received_count == before.sms_received_count &&
+              !mh_status().operation_busy && service_probe().request_queue_depth == 0u,
+          "a memory-full store is not retried while the store stays full");
+
+    /* (a) a DELETE that completes OK makes room: the store is retried. */
+    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
+    static const uint16_t victim = 7u;
+    check(modem_service_request_delete_sms_indices(&victim, 1u), "delete is admitted");
+    for (unsigned i = 0u; i < 5u; i++) {
+        mh_advance(100u); /* the delete first needs the DTR wake */
+    }
+    modem_sms_delete_result_t delete_result;
+    check(modem_service_pop_sms_delete_result(&delete_result) &&
+              delete_result.outcome == MODEM_SMS_OUTCOME_OK,
+          "the delete completes OK");
+    for (unsigned i = 0u; i < 3u; i++) {
+        mh_advance(100u);
+    }
+    check(mh_tx_count_exact("AT+CMGW=26,0") == 2u &&
+              mh_status().sms_received_count == before.sms_received_count + 1u,
+          "after a successful delete the held store is retried and succeeds");
+
+    /* (b) a +CPMS? poll reporting used < total unblocks as well. */
+    before = mh_status();
+    s_sms_flow_fault = SMS_FLOW_FAULT_CMGW_FINAL_MEMORY_FULL;
+    mh_clear_tx_capture();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    mh_advance(1000u);
+    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u, "second memory-full store is held");
+    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
+    /* The +CMTI is only the harness's trigger for an AT+CPMS? poll (store
+     * mode never runs alongside direct delivery); the poll's answer unblocks. */
+    mh_feed("+CMTI: \"ME\",30"); /* schedules AT+CPMS?; the harness answers 0/255 */
+    for (unsigned i = 0u; i < 3u; i++) {
+        mh_advance(100u);
+    }
+    check(mh_tx_count_exact("AT+CPMS?") >= 1u && mh_tx_count_exact("AT+CMGW=26,0") == 2u &&
+              mh_status().sms_received_count == before.sms_received_count + 2u,
+          "a receive-store poll with room unblocks the held store");
+
+    /* (c) without a delete or a poll, one retry after 60 s. */
+    before = mh_status();
+    s_sms_flow_fault = SMS_FLOW_FAULT_CMGW_FINAL_MEMORY_FULL;
+    mh_clear_tx_capture();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    for (unsigned i = 0u; i < 30u; i++) {
+        mh_advance(1000u);
+    }
+    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u, "still held at 30 s");
+    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
+    /* 31 s reach the 60 s retry; the rest lets the retried store's first
+     * command dispatch through the DTR wake after the long idle. */
+    for (unsigned i = 0u; i < 45u; i++) {
+        mh_advance(1000u);
+    }
+    check(mh_tx_count_exact("AT+CMGW=26,0") == 2u &&
+              mh_status().sms_received_count == before.sms_received_count + 1u,
+          "after 60 s the held store is retried once");
+
+    /* Refused at the prompt stage (AT+CMGW= answered +CMS ERROR: 322, no
+     * prompt): the same hold, retried after a delete. */
+    before = mh_status();
+    s_sms_flow_fault = SMS_FLOW_FAULT_CMGW_PROMPT_MEMORY_FULL;
+    mh_clear_tx_capture();
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    for (unsigned i = 0u; i < 5u; i++) {
+        mh_advance(1000u);
+    }
+    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
+              mh_status().sms_received_count == before.sms_received_count &&
+              !mh_status().operation_busy,
+          "a prompt-stage memory-full refusal holds the slot without retry");
+    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
+    check(modem_service_request_delete_sms_indices(&victim, 1u), "second delete is admitted");
+    for (unsigned i = 0u; i < 8u; i++) {
+        mh_advance(100u);
+    }
+    check(modem_service_pop_sms_delete_result(&delete_result) &&
+              delete_result.outcome == MODEM_SMS_OUTCOME_OK &&
+              mh_tx_count_exact("AT+CMGW=26,0") == 2u &&
+              mh_status().sms_received_count == before.sms_received_count + 1u,
+          "after the delete the prompt-refused store is retried and succeeds");
+}
+
+static void test_direct_delivery_bursts_store_in_arrival_order(void) {
+    if (!begin_sms_operation_fixture("direct-delivery FIFO fixture boots")) {
+        return;
+    }
+    modem_status_t before = mh_status();
+
+    /* Three back-to-back +CMT pairs queued before the service runs. */
+    mh_clear_tx_capture();
+    static const char LETTERS[] = "abcdefghijkl";
+    for (unsigned chars = 5u; chars <= 7u; chars++) {
+        char header[96];
+        char body[16];
+        snprintf(header, sizeof(header),
+                 "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,%u", chars);
+        memcpy(body, LETTERS, chars);
+        body[chars] = '\0';
+        mh_rx_push(header);
+        mh_rx_push(body);
+    }
+    mh_settle();
+    for (unsigned i = 0u; i < 4u; i++) {
+        mh_advance(100u);
+    }
+    size_t first = tx_event_cstr("AT+CMGW=23,0", 0u);
+    size_t second = tx_event_cstr("AT+CMGW=24,0", 0u);
+    size_t third = tx_event_cstr("AT+CMGW=25,0", 0u);
+    check(first != SIZE_MAX && second != SIZE_MAX && third != SIZE_MAX &&
+              first < second && second < third &&
+              mh_status().sms_received_count == before.sms_received_count + 3u &&
+              mh_status().command_errors == before.command_errors,
+          "three back-to-back deliveries are stored in arrival order");
+
+    /* A slot freed and refilled while older entries wait must not jump the
+     * queue: A stores, B and C wait, D lands in A's slot, order stays B C D. */
+    mh_clear_tx_capture();
+    before = mh_status();
+    s_hold_final_command = "AT+CMGF=1";
+    feed_direct_len(5u); /* A: parks at its AT+CMGF=1 final */
+    check(service_probe().command_active && mh_tx_count_exact("AT+CMGW=23,0") == 1u,
+          "FIFO fixture parks A at its text-mode restore");
+    feed_direct_len(6u); /* B waits */
+    feed_direct_len(7u); /* C waits */
+    mh_feed("OK");       /* A completes; B starts and parks likewise */
+    check(mh_tx_count_exact("AT+CMGW=24,0") == 1u && service_probe().command_active,
+          "B starts after A and parks");
+    /* D is 9 chars: 8 septets pack into 7 octets, the same TPDU length as C. */
+    feed_direct_len(9u); /* D takes A's freed slot while C still waits */
+    s_hold_final_command = NULL;
+    mh_feed("OK");       /* B completes; C then D drain */
+    for (unsigned i = 0u; i < 4u; i++) {
+        mh_advance(100u);
+    }
+    size_t c_event = tx_event_cstr("AT+CMGW=25,0", 0u);
+    size_t d_event = tx_event_cstr("AT+CMGW=26,0", 0u);
+    check(c_event != SIZE_MAX && d_event != SIZE_MAX && c_event < d_event &&
+              mh_status().sms_received_count == before.sms_received_count + 4u &&
+              !mh_status().operation_busy &&
+              service_probe().request_queue_depth == 0u,
+          "a refilled slot does not overtake older held deliveries (FIFO)");
+}
+
+typedef struct {
+    const char *header;
+    const uint8_t *body;
+    size_t body_len;
+    const char *expected_text;
+    const char *name;
+} direct_wire_case_t;
+
+static void test_direct_delivery_plain_bodies_are_read_raw(void) {
+    static const char MULTI[] = "Your code is 123456\r\nDo not share";
+    static const uint8_t AT_BODY[3] = {'a', 0x00u, 'b'};
+    static const uint8_t ESC_BODY[3] = {'a', 0x1Bu, 0x3Cu};
+    static const char TELIT_MULTI[] = "Hi\r\nthere";
+    static const char WEMT_HEX[] = "050003620202D46435599D9EABE7EAB99AAC26ABC9";
+    static const char EMOJI_HEX[] = "D83EDD2A";
+    static const direct_wire_case_t cases[] = {
+        {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,33",
+         (const uint8_t *)MULTI, sizeof(MULTI) - 1u, MULTI,
+         "3GPP text body with an embedded CRLF"},
+        {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,6",
+         (const uint8_t *)"Hello ", 6u, "Hello ", "3GPP text body with a trailing space"},
+        {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,3",
+         AT_BODY, sizeof(AT_BODY), "a@b", "3GPP text body with GSM 0x00 (@)"},
+        {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,3",
+         ESC_BODY, sizeof(ESC_BODY), "a[", "3GPP text body with ESC 0x3C ([)"},
+        {"+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,9",
+         (const uint8_t *)TELIT_MULTI, sizeof(TELIT_MULTI) - 1u, TELIT_MULTI,
+         "Telit enc 8 body with a line break"},
+        {DIRECT_3GPP2_HEADER, (const uint8_t *)DIRECT_3GPP2_BODY,
+         sizeof(DIRECT_3GPP2_BODY) - 1u, DIRECT_3GPP2_BODY, "Verizon enc 8 plain body"},
+        {"+CMT: \"7866910488\",\"\",\"20260916105553\",129,4101,0,9,23",
+         (const uint8_t *)WEMT_HEX, sizeof(WEMT_HEX) - 1u, NULL,
+         "Verizon WEMT GSM-7+UDH hex body"},
+        {"+CMT: \"7866910488\",\"\",\"20260916105559\",129,4098,0,4,2",
+         (const uint8_t *)EMOJI_HEX, sizeof(EMOJI_HEX) - 1u, "??",
+         "Verizon Unicode hex body"},
+    };
+    if (!begin_sms_operation_fixture("raw-body fixture boots")) {
+        return;
+    }
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const direct_wire_case_t *c = &cases[i];
+        modem_status_t before = mh_status();
+        mh_clear_tx_capture();
+        feed_direct_wire(c->header, c->body, c->body_len);
+        char pdu[SMS_DELIVER_HEX_MAX];
+        sms_codec_message_t decoded;
+        bool stored = captured_stored_pdu(pdu, sizeof(pdu)) &&
+                      sms_pdu_decode(pdu, &decoded) && !decoded.submit;
+        bool text_ok = stored &&
+                       (c->expected_text == NULL
+                            ? (decoded.has_concat && decoded.concat_seq == 2u)
+                            : strcmp(decoded.text, c->expected_text) == 0);
+        if (!text_ok) {
+            fprintf(stderr, "raw body case '%s': stored=%u text='%s'\n", c->name,
+                    stored ? 1u : 0u, stored ? decoded.text : "");
+        }
+        check(text_ok && mh_tx_count_exact("AT+CMGF=1") == 1u &&
+                  mh_status().sms_received_count == before.sms_received_count + 1u &&
+                  mh_status().command_errors == before.command_errors &&
+                  !mh_status().operation_busy,
+              c->name);
+    }
+
+    /* IS-637 7-bit ASCII (enc 2): <length> is the packed octet count (14 for
+     * 15 characters), so the RAW reader terminates at the body's own CRLF
+     * one byte past <length>. Bench self-loopback vector, 2026-09-15. */
+    {
+        static const char ASCII_HEADER[] =
+            "+CMT: \"8132936877\",\"\",\"20260915193325\",129,4098,1,2,14";
+        static const char ASCII_BODY[] = "Warp loopback 2";
+        char expected[SMS_DELIVER_HEX_MAX];
+        uint8_t expected_tpdu = 0u;
+        check(build_expected_direct_pdu(ASCII_HEADER, ASCII_BODY, expected, &expected_tpdu),
+              "enc 2 golden builds independently");
+        modem_status_t ascii_before = mh_status();
+        mh_clear_tx_capture();
+        feed_direct_wire(ASCII_HEADER, (const uint8_t *)ASCII_BODY, sizeof(ASCII_BODY) - 1u);
+        char cmgw[24];
+        snprintf(cmgw, sizeof(cmgw), "AT+CMGW=%u,0", (unsigned)expected_tpdu);
+        char ascii_pdu[SMS_DELIVER_HEX_MAX];
+        sms_codec_message_t ascii;
+        check(mh_tx_count_exact(cmgw) == 1u && captured_stored_pdu(ascii_pdu, sizeof(ascii_pdu)) &&
+                  strcmp(ascii_pdu, expected) == 0 && sms_pdu_decode(ascii_pdu, &ascii) &&
+                  strcmp(ascii.text, "Warp loopback 2") == 0 &&
+                  mh_status().sms_received_count == ascii_before.sms_received_count + 1u,
+              "a CDMA 7-bit ASCII text-form message is stored through the RAW reader");
+    }
+
+    /* Encoding 2 bodies are up to 8/7 longer than <length> and may contain a
+     * line break past it: the RAW reader must not stop at the first line
+     * break at/after <length> unless the body up to it parses (owner audit P2
+     * repro: "AAAAAAAAAAAAAA\nB", <length> 14, was truncated to 14 chars). */
+    {
+        static const char ENC2_HEADER[] =
+            "+CMT: \"8132936877\",\"\",\"20260915193325\",129,4098,1,2,14";
+        static const struct { const char *body; const char *name; } enc2[] = {
+            {"AAAAAAAAAAAAAA\nB", "enc 2 body with a line break past <length> is stored whole"},
+            {"AAAAAAAAAAAAAA\n", "enc 2 body ending in a line break keeps it"},
+            {"AAAAAAAAAAAAAAA\n", "enc 2 preserves a trailing LF at the ambiguous packed boundary"},
+            {"AAAAAAAAAAAAAA\r\n", "enc 2 preserves a trailing CRLF"},
+            {"AAAAAAAAAAAAAAA\r", "enc 2 preserves a trailing CR before the terminator"},
+            {"AAAAAAAAAAAAAAB", "enc 2 body without a line break is stored as before"},
+        };
+        for (size_t i = 0u; i < sizeof(enc2) / sizeof(enc2[0]); i++) {
+            modem_status_t e_before = mh_status();
+            s_hold_final_command = "AT+CGMI";
+            check(modem_service_request_debug_at("AT+CGMI"), "enc 2 fixture admits a debug command");
+            mh_settle();
+            mh_clear_tx_capture();
+            feed_direct_wire(ENC2_HEADER, (const uint8_t *)enc2[i].body, strlen(enc2[i].body));
+            bool held = service_probe().command_active &&
+                        mh_status().urc_count == e_before.urc_count + 1u;
+            s_hold_final_command = NULL;
+            mh_feed("OK");
+            char e_pdu[SMS_DELIVER_HEX_MAX];
+            sms_codec_message_t e_msg;
+            bool stored = captured_stored_pdu(e_pdu, sizeof(e_pdu)) &&
+                          sms_pdu_decode(e_pdu, &e_msg) && strcmp(e_msg.text, enc2[i].body) == 0;
+            if (!stored || !held) {
+                fprintf(stderr, "enc2 case '%s': held=%u stored=%u text='%s'\n", enc2[i].name,
+                        held ? 1u : 0u, stored ? 1u : 0u, stored ? e_msg.text : "");
+            }
+            check(held && !service_probe().command_active && stored &&
+                      mh_status().sms_received_count == e_before.sms_received_count + 1u &&
+                      mh_status().command_errors == e_before.command_errors,
+                  enc2[i].name);
+        }
+    }
+
+    /* A garbage enc 2 body that never parses is rejected once it exceeds the
+     * plain-body bound (ceil(8*14/7) + 1 = 17), not held to the deadline:
+     * LFs at 14 and 18, the held command survives and completes on its OK. */
+    {
+        static const char GARBAGE[] = "XXXXXXXXXXXXXX\nXXX\nXX";
+        modem_status_t g_before = mh_status();
+        s_hold_final_command = "AT+CGMI";
+        check(modem_service_request_debug_at("AT+CGMI"), "bound fixture admits a debug command");
+        mh_settle();
+        mh_clear_tx_capture();
+        feed_direct_wire("+CMT: \"8132936877\",\"\",\"20260915193325\",129,4098,1,2,14",
+                         (const uint8_t *)GARBAGE, sizeof(GARBAGE) - 1u);
+        bool held = service_probe().command_active && !modem_sms_direct_pending() &&
+                    mh_status().command_errors == g_before.command_errors + 1u;
+        s_hold_final_command = NULL;
+        mh_feed("OK");
+        check(held && !service_probe().command_active && mh_tx_count_exact("AT+CMGF=0") == 0u &&
+                  mh_status().sms_received_count == g_before.sms_received_count,
+              "a never-parsing plain body is rejected at the bound and the next line reaches the command");
+    }
+
+    /* The byte exceeding a continued body's bound can start the waiting
+     * command's final: it must be replayed, not dropped with the body. */
+    {
+        modem_status_t b_before = mh_status();
+        s_hold_final_command = "AT+CGMI";
+        check(modem_service_request_debug_at("AT+CGMI"), "byte-replay fixture admits a command");
+        mh_settle();
+        mh_clear_tx_capture();
+        mh_rx_push("+CMT: \"123\",\"\",\"20260915193325\",129,4098,1,2,14");
+        mh_rx_push_raw((const uint8_t *)"XXXXXXXXXXXXXX\nXX", 17u);
+        mh_settle();
+        check(modem_sms_direct_pending(), "incomplete body reaches its bound");
+        s_hold_final_command = NULL;
+        mh_feed("OK");
+        check(!service_probe().command_active && !modem_sms_direct_pending() &&
+                  mh_status().command_errors == b_before.command_errors + 1u &&
+                  mh_status().sms_received_count == b_before.sms_received_count &&
+                  mh_tx_count_exact("AT+CMGF=0") == 0u,
+              "the first byte beyond the body bound is retained in the command final");
+    }
+
+    /* Reviewer's probe: an unparseable plain body (final rejection) followed
+     * by a valid +CMT inside the window must not eat the second header. */
+    {
+        static const struct { const char *header; size_t len; const char *name; } probes[] = {
+            {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,15",
+             15u, "an unparseable 3GPP plain body (L 15) is rejected at its CRLF"},
+            {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,140",
+             140u, "an unparseable 3GPP plain body (L 140) is rejected at its CRLF"},
+            {"+CMT: \"7866910488\",\"\",\"20260916105559\",129,4099,0,8,15",
+             15u, "a rejected-by-design VMN text delivery ends at its CRLF"},
+            {"+CMT: \"123\",\"\",\"20260915193325\",129,4098,0,2,14",
+             15u, "an invalid ASCII body ends at its CRLF without consuming the next SMS"},
+        };
+        for (size_t i = 0u; i < sizeof(probes) / sizeof(probes[0]); i++) {
+            static uint8_t body[160];
+            memset(body, 'A', probes[i].len);
+            body[probes[i].len / 2u] = 0xE9u; /* >= 0x80: no plain parser accepts it */
+            modem_status_t p_before = mh_status();
+            mh_clear_tx_capture();
+            mh_rx_push(probes[i].header);
+            mh_rx_push_raw(body, probes[i].len);
+            mh_rx_push_raw((const uint8_t *)"\r\n", 2u);
+            feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY); /* within the window */
+            for (unsigned t = 0u; t < 4u; t++) {
+                mh_advance(100u);
+            }
+            check(mh_status().command_errors == p_before.command_errors + 1u &&
+                      mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
+                      mh_status().sms_received_count == p_before.sms_received_count + 1u &&
+                      !modem_sms_direct_pending(),
+                  probes[i].name);
+        }
+    }
+
+    /* Telit enc 8 exact-length body with an embedded LF before <length>. */
+    {
+        modem_status_t l_before = mh_status();
+        mh_clear_tx_capture();
+        feed_direct_wire("+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,5",
+                         (const uint8_t *)"ab\ncd", 5u);
+        char l_pdu[SMS_DELIVER_HEX_MAX];
+        sms_codec_message_t l_msg;
+        check(captured_stored_pdu(l_pdu, sizeof(l_pdu)) && sms_pdu_decode(l_pdu, &l_msg) &&
+                  strcmp(l_msg.text, "ab\ncd") == 0 &&
+                  mh_status().sms_received_count == l_before.sms_received_count + 1u,
+              "a Telit enc 8 exact-length body keeps an embedded LF");
+    }
+
+    /* An A2P message from an alphanumeric sender (TON 5) is stored with its
+     * sender intact. */
+    {
+        static const char A2P_HEADER[] =
+            "+CMT: \"AMAZON\",,\"26/09/16,10:59:04-16\",208,4,0,0,\"+19037029920\",145,7";
+        modem_status_t a2p_before = mh_status();
+        mh_clear_tx_capture();
+        feed_direct_wire(A2P_HEADER, (const uint8_t *)"Djssjjs", 7u);
+        char a2p_pdu[SMS_DELIVER_HEX_MAX];
+        sms_codec_message_t a2p;
+        check(captured_stored_pdu(a2p_pdu, sizeof(a2p_pdu)) && sms_pdu_decode(a2p_pdu, &a2p) &&
+                  strcmp(a2p.address, "AMAZON") == 0 && strcmp(a2p.text, "Djssjjs") == 0 &&
+                  mh_status().sms_received_count == a2p_before.sms_received_count + 1u,
+              "an alphanumeric sender is stored and decodes as its name");
+    }
+
+    /* No fragment of a multi-line body reaches route_urc or an active
+     * command: with AT+CGMI held on the wire, only the +CMT itself counts as a
+     * URC and the command still waits for its real final. */
+    modem_status_t before = mh_status();
+    s_hold_final_command = "AT+CGMI";
+    check(modem_service_request_debug_at("AT+CGMI"), "debug command is admitted");
+    mh_settle();
+    mh_clear_tx_capture();
+    feed_direct_wire(cases[0].header, cases[0].body, cases[0].body_len);
+    check(service_probe().command_active && mh_status().operation_busy &&
+              mh_status().urc_count == before.urc_count + 1u &&
+              mh_status().command_errors == before.command_errors &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u,
+          "a multi-line body raises exactly one URC and never completes the command");
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    char pdu[SMS_DELIVER_HEX_MAX];
+    sms_codec_message_t decoded;
+    check(!service_probe().command_active &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
+              captured_stored_pdu(pdu, sizeof(pdu)) && sms_pdu_decode(pdu, &decoded) &&
+              strcmp(decoded.text, MULTI) == 0 &&
+              mh_status().sms_received_count == before.sms_received_count + 1u,
+          "the real final completes the command and the whole body is stored");
+
+    /* A body that would overflow the raw cap is dropped as unreadable and the
+     * bytes after it flow through the framer again. */
+    modem_status_t cap_before = mh_status();
+    mh_clear_tx_capture();
+    static uint8_t huge[MODEM_SMS_DIRECT_LINE_MAX + 16u];
+    memset(huge, 'A', sizeof(huge));
+    feed_direct_wire(cases[0].header, huge, sizeof(huge));
+    mh_feed("+CEREG: 1,1");
+    check(mh_status().command_errors == cap_before.command_errors + 1u &&
+              mh_status().sms_received_count == cap_before.sms_received_count &&
+              mh_status().urc_count == cap_before.urc_count + 2u &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u,
+          "a body past the raw cap is dropped and the line path resumes");
+}
+
 int main(void) {
     test_autonomous_startup_restart_reinitializes_once();
     test_startup_restart_preserves_wait_and_shutdown_guards();
@@ -6477,6 +7655,7 @@ int main(void) {
     test_raw_rx_capture_preserves_wire_bytes();
     test_background_polling_bench_gate_is_narrow();
     test_transport_sleep_confirmation_is_strict();
+    test_transport_sleep_waits_for_a_raw_cmt_body();
     test_cold_boot_repairs_dvi_and_restores_runtime_mode();
     test_cold_boot_provisions_antenna_before_rf_online();
     test_carrier_reset_tuner_read_error();
@@ -6489,6 +7668,17 @@ int main(void) {
     test_sms_text_send_failures_and_prompt_settle();
     test_sms_save_and_delete_contracts();
     test_sms_binary_send_contract();
+    test_direct_delivery_is_restored_as_a_pdu();
+    test_direct_delivery_mid_command_and_qcmti();
+    test_slow_call_forwarding_keeps_receiving();
+    test_direct_delivery_retries_after_store_failure();
+    test_direct_delivery_plain_bodies_are_read_raw();
+    test_direct_delivery_bursts_store_in_arrival_order();
+    test_direct_delivery_dropped_line_resets_the_collector();
+    test_direct_delivery_restores_text_mode_after_a_cancelled_scan();
+    test_direct_delivery_failed_restore_after_store_is_recovered();
+    test_direct_delivery_interrupted_body_times_out();
+    test_direct_delivery_storage_full_waits_for_room();
     test_sms_binary_failures_and_prompt_settle();
     test_sms_cpms_timeout_cancels_every_cpms_operation();
     test_sms_power_recovery_never_replays_transaction();
@@ -6539,6 +7729,8 @@ int main(void) {
     test_call_forwarding_mailbox_and_indicators();
     test_mwi_urc_survives_query_interleave();
     test_mwi_ambiguous_query_never_invents_voice_mail();
+    test_carrier_refresh_priority();
+    test_local_forwarding_flags_without_network_fallback();
     test_supplementary_refresh_recovery();
     test_call_forward_queue_cancellation();
     test_newer_call_forward_result_survives_old_final();

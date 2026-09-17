@@ -62,6 +62,7 @@ static const char *const TELIT_AUX_URC_PREFIXES[] = {
     "+CSSI:",
     "+CSSU:",
     "#TEMPMEAS:",
+    "$QCMTI:",
 };
 
 static bool telit_command_invalidates_sms_wake(const char *cmd) {
@@ -176,8 +177,13 @@ const modem_vendor_t g_modem_vendor = {
             MODEM_CALL_FORWARD_REASON(CALL_FORWARD_REASON_NOT_REACHABLE) |
             MODEM_CALL_FORWARD_REASON(CALL_FORWARD_REASON_ALL) |
             MODEM_CALL_FORWARD_REASON(CALL_FORWARD_REASON_ALL_CONDITIONAL),
-        .command_timeout_ms = 15000u,
+        /* CCFC is non-abortable and can return a network rejection after
+         * about 30 s. Do not release the AT channel at the old 15 s cutoff. */
+        .command_timeout_ms = 60000u,
         .call_forward_response_prefix = "+CCFC:",
+        .call_forward_flags_query_cmd = "AT#CFF?",
+        .call_forward_flags_response_prefix = "#CFF:",
+        .call_forward_flags_timeout_ms = 5000u,
         .call_forward_step_count = telit_call_forward_step_count,
         .build_call_forward_step = telit_build_call_forward_step,
         .parse_call_forward_row = telit_parse_call_forward_row,
@@ -241,4 +247,5 @@ const modem_vendor_t g_modem_vendor = {
         (uint8_t)(sizeof(TELIT_AUX_URC_PREFIXES) /
                   sizeof(TELIT_AUX_URC_PREFIXES[0])),
     .parse_aux_urc = telit_parse_aux_urc,
+    .translate_direct_sms = telit_translate_direct_sms,
 };

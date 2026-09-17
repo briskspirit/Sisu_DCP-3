@@ -9,6 +9,11 @@
 #include <string.h>
 
 #include "../src/services/modem_vendor_telit_internal.h"
+#include "services/modem_sms_direct.h"
+#include "services/sms_picture_codec.h"
+
+/* Payloads are byte ranges, never C strings. */
+#define BYTES(s) (const uint8_t *)(s), strlen(s)
 
 static int s_failures;
 
@@ -264,7 +269,9 @@ static void test_production_descriptor(void) {
     check_init_policy("AT+CSMP=17,167,0,0",
                       MODEM_INIT_PREREQ_SIM_READY,
                       MODEM_SETTING_RUNTIME);
-    check_init_policy("AT+CNMI=1,1,0,0,0", MODEM_INIT_PREREQ_SIM_READY,
+    check_init_policy("AT+CSDH=1", MODEM_INIT_PREREQ_SIM_READY,
+                      MODEM_SETTING_PROFILE);
+    check_init_policy("AT+CNMI=2,2,0,0,0", MODEM_INIT_PREREQ_SIM_READY,
                       MODEM_SETTING_PROFILE);
     check_init_policy("AT+CLIP=1", MODEM_INIT_PREREQ_SIM_READY,
                       MODEM_SETTING_PROFILE);
@@ -640,6 +647,25 @@ static void test_call_builders(void) {
           "DTMF builder rejects hidden keys and truncated output");
 }
 
+static void test_init_table_direct_sms_delivery(void) {
+    bool saw_csdh = false;
+    bool saw_cnmi_direct = false;
+    bool saw_cnmi_store = false;
+    for (size_t i = 0u; i < TELIT_INIT_STEP_COUNT; i++) {
+        const char *cmd = TELIT_INIT_STEPS[i].cmd;
+        if (strcmp(cmd, "AT+CSDH=1") == 0) {
+            saw_csdh = TELIT_INIT_STEPS[i].persistence == MODEM_SETTING_PROFILE;
+        } else if (strcmp(cmd, "AT+CNMI=2,2,0,0,0") == 0) {
+            saw_cnmi_direct = true;
+        } else if (strncmp(cmd, "AT+CNMI=1,", 10u) == 0) {
+            saw_cnmi_store = true;
+        }
+    }
+    check(saw_csdh, "init sets the extended text header (+CSDH=1)");
+    check(saw_cnmi_direct && !saw_cnmi_store,
+          "init routes SMS-DELIVER directly (+CNMI=2,2) instead of storing");
+}
+
 static void test_antenna_tuner_policy(void) {
     check(telit_init_parse_stune_capability(
               "#STUNEANT: (0,1),(7FD9FFFF),(0,1),(0,1)"),
@@ -1000,6 +1026,14 @@ static void test_sim_mwi_temperature_and_readbacks(void) {
               aux.kind == MODEM_AUX_EVENT_CFU_STATE && aux.active &&
               strcmp(aux.number, "+15551212") == 0,
           "aux dispatcher normalizes CFU state");
+    check(g_modem_vendor.parse_aux_urc("#CFF: 1", &aux) &&
+              aux.kind == MODEM_AUX_EVENT_NONE &&
+              g_modem_vendor.parse_aux_urc("#CFF: 0", &aux) &&
+              aux.kind == MODEM_AUX_EVENT_NONE,
+          "configuration-only CFF readback does not invent a forwarding flag");
+    check(!g_modem_vendor.parse_aux_urc("#CFF: 1,9,", &aux) &&
+              !g_modem_vendor.parse_aux_urc("#CFF: garbage", &aux),
+          "malformed local forwarding flags are rejected");
     check(g_modem_vendor.parse_aux_urc("+CSSU: 0", &aux) &&
               aux.kind == MODEM_AUX_EVENT_INCOMING_DIVERTED,
           "aux dispatcher normalizes redirected MT call");
@@ -1009,6 +1043,21 @@ static void test_sim_mwi_temperature_and_readbacks(void) {
     check(g_modem_vendor.parse_aux_urc("#TEMPMEAS: 0,28", &aux) &&
               aux.kind == MODEM_AUX_EVENT_NONE,
           "aux dispatcher handles temperature");
+    /* The Qualcomm store indication: a message filed where this image cannot
+     * read it. Neutral kind; the generic service never sees the URC name. */
+    bool qcmti_known = false;
+    for (uint8_t i = 0u; i < g_modem_vendor.aux_urc_prefix_count; i++) {
+        if (strcmp(g_modem_vendor.aux_urc_prefixes[i], "$QCMTI:") == 0) {
+            qcmti_known = true;
+        }
+    }
+    check(qcmti_known, "$QCMTI: is a vendor aux URC prefix");
+    check(g_modem_vendor.parse_aux_urc("$QCMTI: \"ME\",24", &aux) &&
+              aux.kind == MODEM_AUX_EVENT_MESSAGE_STORED_UNREADABLE,
+          "$QCMTI maps to the unreadable-store event");
+    check(!g_modem_vendor.parse_aux_urc("$QCMTI: \"ME\"", &aux) &&
+              !g_modem_vendor.parse_aux_urc("$QCMTI: \"ME\",x", &aux),
+          "malformed $QCMTI is rejected");
     check(!g_modem_vendor.parse_aux_urc("#UNKNOWN: 1", &aux),
           "aux dispatcher rejects unknown prefix");
 }
@@ -1654,8 +1703,487 @@ static void test_guarded_maintenance_boundary(void) {
           "GPIO maintenance preserves explicit runtime-only save policy");
 }
 
+static bool build_and_decode(const sms_deliver_t *d, sms_codec_message_t *decoded) {
+    char hex[SMS_DELIVER_HEX_MAX];
+    uint8_t tpdu = 0u;
+    return sms_deliver_build(d, hex, sizeof(hex), &tpdu) && sms_pdu_decode(hex, decoded);
+}
+
+static void test_direct_3gpp2_text_forms(void) {
+    sms_deliver_t d;
+    sms_codec_message_t m;
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,9",
+              BYTES("Dhdjdjdjs"), &d) == MODEM_SMS_DIRECT_ACCEPTED,
+          "3GPP2 text, Latin-1 body accepted");
+    check(build_and_decode(&d, &m) && strcmp(m.address, "7866910488") == 0 &&
+              strcmp(m.text, "Dhdjdjdjs") == 0 &&
+              strcmp(m.timestamp, "26/09/16,10:55:24") == 0,
+          "Latin-1 body re-encoded as GSM-7 with the delivery time");
+
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105553\",129,4101,0,9,23",
+              BYTES("050003620202D46435599D9EABE7EAB99AAC26ABC9"), &d) == MODEM_SMS_DIRECT_ACCEPTED,
+          "WEMT GSM-7 hex body accepted");
+    check(d.udhi && d.udl == 24u && d.ud_len == 21u,
+          "UDH kept and non-padding final septet retained despite length 23");
+    check(build_and_decode(&d, &m) && m.has_concat && m.concat_ref == 0x62u &&
+              m.concat_total == 2u && m.concat_seq == 2u,
+          "concatenation survives");
+
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105559\",129,4098,0,4,2",
+              BYTES("D83EDD2A"), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.dcs == 0x08u && d.udl == 4u && d.ud_len == 4u,
+          "Unicode body -> UCS2 DCS");
+    check(d.ud[0] == 0xD8u && d.ud[1] == 0x3Eu && d.ud[2] == 0xDDu && d.ud[3] == 0x2Au,
+          "UTF-16BE code units copied verbatim");
+    /* sms_pdu_decode renders surrogate pairs as '?' by design. */
+    check(build_and_decode(&d, &m) && strcmp(m.text, "??") == 0,
+          "emoji surrogate pair decodes as the '?' fallback");
+
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105559\",129,4099,0,8,1",
+              BYTES("3"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "voice mail notification teleservice rejected");
+    check(telit_translate_direct_sms(
+              "+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,7",
+              BYTES("Djssjjs"), &d) == MODEM_SMS_DIRECT_NOT_MINE,
+          "3GPP text form is not claimed");
+    check(telit_translate_direct_sms("+CMT: ,26", BYTES("07"), &d) == MODEM_SMS_DIRECT_NOT_MINE,
+          "3GPP PDU form is not claimed");
+
+    /* Zero-length bodies: the collector completes them on the header alone. */
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,0",
+              BYTES(""), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.ud_len == 0u && d.udl == 0u && d.dcs == 0x00u,
+          "3GPP2 text enc 8 with length 0 -> empty GSM-7 UD");
+    check(build_and_decode(&d, &m) && m.text[0] == '\0' &&
+              strcmp(m.address, "7866910488") == 0,
+          "empty Latin-1 body builds and decodes");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,9,0",
+              BYTES(""), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.ud_len == 0u && d.udl == 0u && d.dcs == 0x00u && !d.udhi,
+          "3GPP2 text enc 9 with length 0 -> empty GSM-7 UD");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,4,0",
+              BYTES(""), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.ud_len == 0u && d.udl == 0u && d.dcs == 0x08u,
+          "3GPP2 text enc 4 with length 0 -> empty UCS2 UD");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,0,0",
+              BYTES(""), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.ud_len == 0u && d.udl == 0u && d.dcs == 0x04u,
+          "3GPP2 text enc 0 with length 0 -> empty octet UD");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,9,0",
+              BYTES("41"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "a body that contradicts length 0 is rejected");
+
+    /* Plain bodies are validated against <length> (the RAW reader delivers
+     * exactly that many bytes; CR, LF, 0x00 and ESC+x count 1:1). */
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,9",
+              BYTES("Dhdjdjdj"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "enc 8 body shorter than <length> rejected");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,9",
+              BYTES("Dhdjdjdjsx"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "enc 8 body longer than <length> rejected");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,9",
+              BYTES("Hi\r\nthere"), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              build_and_decode(&d, &m) && strcmp(m.text, "Hi\r\nthere") == 0,
+          "enc 8 body with an embedded CRLF round-trips");
+    static const uint8_t at_body[3] = {'a', 0x00u, 'b'};
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,3",
+              at_body, sizeof(at_body), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              build_and_decode(&d, &m) && strcmp(m.text, "a@b") == 0,
+          "enc 8 body with GSM 0x00 (@) round-trips");
+    static const uint8_t high_body[2] = {'a', 0xE9u};
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,2",
+              high_body, sizeof(high_body), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "enc 8 text-form byte >= 0x80 rejected");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,9,7",
+              BYTES("Djssjj\n"), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              build_and_decode(&d, &m) && strcmp(m.text, "Djssjj\n") == 0,
+          "enc 9 plain body with a trailing LF round-trips");
+}
+
+static void test_direct_3gpp2_wemt_length_boundary(void) {
+    static const char first[] =
+        "050003170201A6E9791DD4AEB3E96978584E078DD1E5F1DA059A96CFEDB29B0E12BF"
+        "EB6E72589E2ECF41EDFA9C0E82CBCBF3B2DC5E0695ED65791E344687E5E131BD2C07"
+        "85DD64101D5D06B9CB783AA85D9ECFC3E732A85D9FD341737A9ACD0685E5F2B4BDEC"
+        "0251D1E939685E76D3CBEE7119442EB3D3E2B23C4C2FB3F3207A785D9E83E8E83268"
+        "DA9C82C4";
+    static const char second[] =
+        "050003170202CAF9B79B0C7ABBCBA079F9DC2EBBE92E50D14D06B5C3F27559AE030D"
+        "9F4D28B3482DBA1A";
+    static const char expected[] =
+        "Sisu multipart check. Segment boundaries must preserve every character "
+        "and the next message must still arrive. This sentence deliberately takes "
+        "the SMS beyond one segment. End marker: COMPLETE.";
+    sms_deliver_t d;
+    sms_codec_message_t m;
+    char joined[sizeof(expected)];
+    joined[0] = '\0';
+    check(telit_translate_direct_sms(
+              "+CMT: \"12025550123\",\"\",\"20260916201951\",129,4101,0,9,159",
+              BYTES(first), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.udl == 160u && d.ud_len == 140u,
+          "WEMT 159/160 ambiguity retains the non-padding final septet");
+    if (build_and_decode(&d, &m)) {
+        snprintf(joined, sizeof(joined), "%s", m.text);
+        check(strlen(m.text) == 153u && m.text[152] == 'b',
+              "first full WEMT part retains the boundary character");
+    } else {
+        check(false, "first WEMT boundary fixture decodes");
+    }
+    check(telit_translate_direct_sms(
+              "+CMT: \"12025550123\",\"\",\"20260916201957\",129,4101,0,9,47",
+              BYTES(second), &d) == MODEM_SMS_DIRECT_ACCEPTED && d.udl == 47u,
+          "WEMT CR padding is not appended as another text character");
+    if (build_and_decode(&d, &m)) {
+        size_t used = strlen(joined);
+        snprintf(joined + used, sizeof(joined) - used, "%s", m.text);
+        check_string(joined, expected, "live multipart fixture round-trips exactly");
+    } else {
+        check(false, "second WEMT boundary fixture decodes");
+    }
+    check(telit_translate_direct_sms(
+              "+CMT: \"12025550123\",\"\",\"20260916201951\",129,4101,0,9,158",
+              BYTES(first), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "padding evidence does not widen the one-septet correction bound");
+
+    /* At each ambiguous octet boundary, preserve zero/CR padding, but retain
+     * every other septet value as an actual additional character. */
+    for (unsigned udl = 15u; udl < 160u; udl += 8u) {
+        uint8_t bytes[140] = {5u, 0u, 3u, 1u, 2u, 1u};
+        size_t octets = (udl * 7u + 7u) / 8u;
+        char header[100];
+        snprintf(header, sizeof(header),
+                 "+CMT: \"12025550123\",\"\",\"20260916201951\",129,4101,0,9,%u",
+                 udl);
+        for (unsigned tail = 0u; tail < 128u; tail++) {
+            bytes[octets - 1u] = (uint8_t)(tail << 1);
+            char hex[281];
+            for (size_t i = 0u; i < octets; i++) {
+                snprintf(hex + i * 2u, sizeof(hex) - i * 2u, "%02X", bytes[i]);
+            }
+            unsigned expected_udl = udl + (tail != 0u && tail != 13u ? 1u : 0u);
+            if (telit_translate_direct_sms(header, BYTES(hex), &d) !=
+                    MODEM_SMS_DIRECT_ACCEPTED || d.udl != expected_udl ||
+                d.ud_len != octets || memcmp(d.ud, bytes, octets) != 0) {
+                check(false, "WEMT ambiguous lengths preserve data and padding");
+                return;
+            }
+        }
+    }
+}
+
+static void test_direct_3gpp2_pdu_forms(void) {
+    sms_deliver_t d;
+    sms_codec_message_t m;
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",25",
+              BYTES("068187661940882609161059281002000807446A73736A6A73"), &d) ==
+              MODEM_SMS_DIRECT_ACCEPTED,
+          "3GPP2 PDU form accepted");
+    check(build_and_decode(&d, &m) && strcmp(m.address, "7866910488") == 0 &&
+              strcmp(m.text, "Djssjjs") == 0 &&
+              strcmp(m.timestamp, "26/09/16,10:59:28") == 0,
+          "PDU-form fields map to a DELIVER");
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",22",
+              BYTES("068187661940882609161127491002000404D83DDE1C"), &d) ==
+              MODEM_SMS_DIRECT_ACCEPTED && d.dcs == 0x08u && d.ud_len == 4u,
+          "PDU-form Unicode");
+    check(d.ud[0] == 0xD8u && d.ud[1] == 0x3Du && d.ud[2] == 0xDEu && d.ud[3] == 0x1Cu &&
+              build_and_decode(&d, &m) && strcmp(m.text, "??") == 0,
+          "PDU-form emoji code units copied, decoder '?' fallback");
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",32",
+              BYTES("06818766194088260916112747100500090F6A721A4D4693D56435594D469301"), &d) ==
+              MODEM_SMS_DIRECT_ACCEPTED && !d.udhi && d.udl == 15u && d.ud_len == 14u,
+          "PDU-form GSM-7 (UDH stripped by the module) accepted as a plain part");
+    check(build_and_decode(&d, &m) && strcmp(m.text, "jdihdhdjdjdjdhd") == 0,
+          "PDU-form GSM-7 decodes");
+
+    /* Bench 2026-09-16: the module's text-form <length> is off by one on
+     * some WEMT parts (21 given, 20 hex octets = 22 septets: 7 UDH+fill + 15
+     * text). The octet count is authoritative; UDL is taken from {L, L+1, L-1}. */
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916150755\",129,4101,0,9,21",
+              BYTES("050003FB0202D4E4349A8C26ABC96AB29A8C2603"), &d) ==
+              MODEM_SMS_DIRECT_ACCEPTED && d.udhi && d.udl == 22u && d.ud_len == 20u,
+          "WEMT part with <length> off by one is accepted with UDL from the octets");
+    check(build_and_decode(&d, &m) && strcmp(m.text, "jdihdhdjdjdjdhd") == 0 &&
+              m.has_concat && m.concat_ref == 0xFBu && m.concat_total == 2u &&
+              m.concat_seq == 2u,
+          "the off-by-one WEMT part round-trips with its concat fields");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916150755\",129,4101,0,9,21",
+              BYTES("050003FB0202D4E4349A8C26ABC96AB29A8C260300"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "a GSM-7 hex body off by two octets is still rejected");
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",25",
+              BYTES("068187661940882609161059281002000807446A73736A6A"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "short payload rejected");
+}
+
+/* IS-637 encodings 2 (7-bit ASCII) and 3 (IA5): the text form carries the
+ * plain text with <length> = PACKED OCTET count (some modules report
+ * characters); the PDU form carries <data_len> = CHARACTER count and the
+ * data packed 7 bits per char MSB-first. Bench self-loopback 2026-09-15. */
+static void test_direct_3gpp2_ascii7(void) {
+    sms_deliver_t d;
+    sms_codec_message_t m;
+    static const char TEXT_HEADER[] =
+        "+CMT: \"8132936877\",\"\",\"20260915193325\",129,4098,1,2,14";
+    check(telit_translate_direct_sms(TEXT_HEADER, BYTES("Warp loopback 2"), &d) ==
+              MODEM_SMS_DIRECT_ACCEPTED,
+          "enc 2 text form with <length> = packed octets accepted");
+    check(build_and_decode(&d, &m) && strcmp(m.text, "Warp loopback 2") == 0 &&
+              strcmp(m.address, "8132936877") == 0 &&
+              strcmp(m.timestamp, "26/09/15,19:33:25") == 0,
+          "enc 2 text form round-trips text, sender and time");
+    /* Only the packed relation holds: a character-count <length> would let a
+     * body truncated at a line break pass as complete (owner audit P2). */
+    check(telit_translate_direct_sms(
+              "+CMT: \"8132936877\",\"\",\"20260915193325\",129,4098,1,2,15",
+              BYTES("Warp loopback 2"), &d) == MODEM_SMS_DIRECT_INCOMPLETE,
+          "a larger packed length requires more characters, not a character-count match");
+    check(telit_translate_direct_sms(TEXT_HEADER, BYTES("AAAAAAAAAAAAAA"), &d) ==
+              MODEM_SMS_DIRECT_INCOMPLETE,
+          "enc 2 body of exactly <length> characters is incomplete (13 packed octets)");
+    check(telit_translate_direct_sms(TEXT_HEADER, BYTES("AAAAAAAAAAAAAA\nB"), &d) ==
+              MODEM_SMS_DIRECT_ACCEPTED && build_and_decode(&d, &m) &&
+              strcmp(m.text, "AAAAAAAAAAAAAA\nB") == 0,
+          "enc 2 16-char body with an embedded LF packs to <length> 14");
+    check(telit_translate_direct_sms(
+              "+CMT: \"8132936877\",\"\",\"20260915193325\",129,4098,1,2,13",
+              BYTES("Warp loopback 2"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "enc 2 text form with an impossible <length> rejected");
+    check(telit_translate_direct_sms(
+              "+CMT: \"8132936877\",\"\",\"20260915193325\",129,4098,1,3,14",
+              BYTES("Warp loopback 2"), &d) == MODEM_SMS_DIRECT_ACCEPTED,
+          "enc 3 (IA5) text form follows the same rule");
+
+    check(telit_translate_direct_sms("+CMT: \"8132936877\",\"\",32",
+              BYTES("06811823398677260915193259100201020FAF8797041B37EFE18B0E3D681900"),
+              &d) == MODEM_SMS_DIRECT_ACCEPTED,
+          "enc 2 PDU form with <data_len> = characters accepted");
+    check(build_and_decode(&d, &m) && strcmp(m.text, "Warp loopback 2") == 0 &&
+              strcmp(m.address, "8132936877") == 0 &&
+              strcmp(m.timestamp, "26/09/15,19:32:59") == 0,
+          "enc 2 PDU form unpacks MSB-first and round-trips");
+    check(telit_translate_direct_sms("+CMT: \"8132936877\",\"\",31",
+              BYTES("06811823398677260915193259100201020FAF8797041B37EFE18B0E3D6819"),
+              &d) == MODEM_SMS_DIRECT_REJECTED,
+          "enc 2 PDU form with 13 octets for 15 characters rejected");
+
+    /* Unpack helper: 2 chars ("Hi") and the 8-chars-in-7-octets boundary. */
+    uint8_t out[8];
+    static const uint8_t two[2] = {0x91u, 0xA4u}; /* 1001000 1101001 00 */
+    check(telit_unpack_ascii7(two, sizeof(two), 2u, out) && out[0] == 'H' && out[1] == 'i',
+          "7-bit ASCII unpack: two characters");
+    static const uint8_t eight[7] = {0x83u, 0x0Au, 0x1Cu, 0x48u, 0xB1u, 0xA3u, 0xC8u};
+    check(telit_unpack_ascii7(eight, sizeof(eight), 8u, out) &&
+              memcmp(out, "ABCDEFGH", 8u) == 0,
+          "7-bit ASCII unpack: eight characters fill seven octets exactly");
+    check(!telit_unpack_ascii7(eight, 6u, 8u, out) && !telit_unpack_ascii7(eight, 7u, 9u, out),
+          "7-bit ASCII unpack rejects an octet/character mismatch");
+
+    check(telit_translate_direct_sms(TEXT_HEADER, BYTES("AAAAAAAAAAAAAAAAB"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "an oversized ASCII body is a final rejection");
+    static const uint8_t invalid_prefix[] = {'A', 0xE9u};
+    check(telit_translate_direct_sms(TEXT_HEADER, invalid_prefix, sizeof(invalid_prefix), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "an invalid short ASCII prefix is not allowed to consume another line");
+}
+
+static void test_direct_3gpp2_ascii7_line_breaks(void) {
+    char header[128];
+    uint8_t body[160];
+    char hex[SMS_DELIVER_HEX_MAX];
+    sms_codec_message_t decoded;
+    unsigned cases = 0u;
+    for (unsigned enc = 2u; enc <= 3u; enc++) {
+        for (size_t n = 1u; n <= sizeof(body); n++) {
+            snprintf(header, sizeof(header),
+                     "+CMT: \"123\",\"\",\"20260915193325\",129,4098,0,%u,%u",
+                     enc, (unsigned)((n * 7u + 7u) / 8u));
+            for (size_t pos = 0u; pos < n; pos++) {
+                for (unsigned kind = 0u; kind < 3u; kind++) {
+                    if (kind == 2u && pos + 1u == n) {
+                        continue;
+                    }
+                    memset(body, 'A', n);
+                    body[pos] = kind == 0u ? '\n' : '\r';
+                    if (kind == 2u) {
+                        body[pos + 1u] = '\n';
+                    }
+                    uint8_t tpdu = 0u;
+                    modem_sms_direct_reset();
+                    bool ok = modem_sms_direct_feed(header, telit_translate_direct_sms,
+                                                    hex, sizeof(hex), &tpdu) ==
+                              MODEM_SMS_DIRECT_STEP_HEADER;
+                    for (size_t i = 0u; i < n + 2u && ok; i++) {
+                        uint8_t byte = i < n ? body[i] : i == n ? '\r' : '\n';
+                        modem_sms_direct_step_t step = modem_sms_direct_feed_raw(
+                            byte, telit_translate_direct_sms, hex, sizeof(hex), &tpdu);
+                        ok = step == (i == n + 1u ? MODEM_SMS_DIRECT_STEP_READY
+                                                 : MODEM_SMS_DIRECT_STEP_IGNORED);
+                    }
+                    ok = ok && !modem_sms_direct_pending() &&
+                         sms_pdu_decode(hex, &decoded) && strlen(decoded.text) == n &&
+                         memcmp(decoded.text, body, n) == 0;
+                    if (!ok) {
+                        fprintf(stderr, "ASCII framing: enc=%u length=%zu pos=%zu kind=%u\n",
+                                enc, n, pos, kind);
+                        check(false, "ASCII CR/LF positions preserve every body byte");
+                        return;
+                    }
+                    cases++;
+                }
+            }
+        }
+    }
+    check(cases == 76960u, "all ASCII/IA5 lengths and CR/LF positions round-trip");
+}
+
+static void test_direct_3gpp2_bounds(void) {
+    sms_deliver_t d;
+    sms_codec_message_t m;
+    char header[128];
+    char body[400];
+    /* addr_len must cover the TOA byte and at most 10 BCD bytes. */
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",25",
+              BYTES("FF8187661940882609161059281002000807446A73736A6A73"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "PDU-form oversized address length rejected");
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",25",
+              BYTES("018187661940882609161059281002000807446A73736A6A73"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "PDU-form address without BCD bytes rejected");
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",25",
+              BYTES("0681A7661940882609161059281002000807446A73736A6A73"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "PDU-form non-decimal BCD nibble rejected");
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",25",
+              BYTES("0681876619408826A9161059281002000807446A73736A6A73"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "PDU-form non-decimal date nibble rejected");
+    /* 20 digits (10 BCD bytes) is the DELIVER builder's address cap. */
+    check(telit_translate_direct_sms("+CMT: \"12345678901234567890\",\"\",30",
+              BYTES("0B81214365870921436587092609161059281002000807446A73736A6A73"), &d) ==
+              MODEM_SMS_DIRECT_ACCEPTED && build_and_decode(&d, &m) &&
+              strcmp(m.address, "12345678901234567890") == 0,
+          "PDU-form 20-digit address accepted");
+    /* Odd digit count uses the 0xF filler in the last high nibble. */
+    check(telit_translate_direct_sms("+CMT: \"786691048\",\"\",25",
+              BYTES("068187F61940882609161059281002000807446A73736A6A73"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "PDU-form filler nibble only valid in the last BCD byte");
+    check(telit_translate_direct_sms("+CMT: \"786691048\",\"\",25",
+              BYTES("068187661940F82609161059281002000807446A73736A6A73"), &d) ==
+              MODEM_SMS_DIRECT_ACCEPTED && strcmp(d.address, "786691048") == 0,
+          "PDU-form odd-length address accepted");
+
+    memset(body, 'a', 160u);
+    body[160] = '\0';
+    snprintf(header, sizeof(header),
+             "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,%u", 160u);
+    check(telit_translate_direct_sms(header, BYTES(body), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.udl == 160u && d.ud_len == 140u,
+          "text-form 160-septet Latin-1 body fills the user data");
+    body[160] = 'a';
+    body[161] = '\0';
+    check(telit_translate_direct_sms(header, BYTES(body), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "text-form 161-character body rejected");
+    snprintf(header, sizeof(header),
+             "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,9,%u", 160u);
+    body[160] = '\0';
+    check(telit_translate_direct_sms(header, BYTES(body), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.dcs == 0x00u && !d.udhi && d.udl == 160u && d.ud_len == 140u,
+          "text-form 160-septet plain GSM-7 body accepted");
+
+    for (size_t i = 0u; i < 71u; i++) {
+        memcpy(&body[i * 4u], "0041", 4u);
+    }
+    body[70u * 4u] = '\0';
+    snprintf(header, sizeof(header),
+             "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,4,%u", 70u);
+    check(telit_translate_direct_sms(header, BYTES(body), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.dcs == 0x08u && d.udl == 140u && d.ud_len == 140u,
+          "text-form 70 code units of Unicode fill the user data");
+    body[70u * 4u] = '0';
+    body[71u * 4u] = '\0';
+    snprintf(header, sizeof(header),
+             "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,4,%u", 71u);
+    check(telit_translate_direct_sms(header, BYTES(body), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "text-form 71 code units of Unicode rejected");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,4,2",
+              BYTES("D83EDD2A00"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "text-form Unicode length/body mismatch rejected");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,262144,0,8,1",
+              BYTES("3"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "alternate voice mail teleservice id rejected");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,5,1",
+              BYTES("3"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "unknown encoding rejected");
+    check(telit_translate_direct_sms(
+              "+CMT: \"7866910488\",\"\",\"20261316105524\",129,4098,0,8,1",
+              BYTES("3"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "impossible text-form date rejected");
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",25",
+              BYTES("068187661940882609161059281003000807446A73736A6A73"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "PDU-form voice mail teleservice rejected");
+    check(telit_translate_direct_sms("+CMT: \"7866910488\",\"\",1", BYTES("06"), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "PDU-form truncated header rejected");
+
+    /* PDU-form bodies at the 140-octet user-data maximum (the largest
+     * payload the translator's scratch ever holds): 18 header bytes + 140. */
+    static const char PDU_PREFIX_OCTET[] = "06818766194088260916105928100200008C";
+    static const char PDU_PREFIX_UCS2[] = "06818766194088260916105928100200048C";
+    memcpy(body, PDU_PREFIX_OCTET, sizeof(PDU_PREFIX_OCTET) - 1u);
+    for (size_t i = 0u; i < 140u; i++) {
+        memcpy(&body[sizeof(PDU_PREFIX_OCTET) - 1u + i * 2u], "5A", 2u);
+    }
+    body[sizeof(PDU_PREFIX_OCTET) - 1u + 280u] = '\0';
+    snprintf(header, sizeof(header), "+CMT: \"7866910488\",\"\",%u", 158u);
+    check(telit_translate_direct_sms(header, BYTES(body), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.dcs == 0x04u && d.udl == 140u && d.ud_len == 140u && d.ud[139] == 0x5Au,
+          "PDU-form 140-octet 8-bit body fills the user data");
+    memcpy(body, PDU_PREFIX_UCS2, sizeof(PDU_PREFIX_UCS2) - 1u);
+    for (size_t i = 0u; i < 70u; i++) {
+        memcpy(&body[sizeof(PDU_PREFIX_UCS2) - 1u + i * 4u], "0041", 4u);
+    }
+    body[sizeof(PDU_PREFIX_UCS2) - 1u + 280u] = '\0';
+    check(telit_translate_direct_sms(header, BYTES(body), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.dcs == 0x08u && d.udl == 140u && d.ud_len == 140u && build_and_decode(&d, &m) &&
+              strlen(m.text) == 70u && m.text[69] == 'A',
+          "PDU-form 70-code-unit Unicode body fills the user data");
+    memcpy(&body[sizeof(PDU_PREFIX_UCS2) - 1u + 280u], "00", 2u);
+    body[sizeof(PDU_PREFIX_UCS2) - 1u + 282u] = '\0';
+    snprintf(header, sizeof(header), "+CMT: \"7866910488\",\"\",%u", 159u);
+    check(telit_translate_direct_sms(header, BYTES(body), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "PDU-form body past the user-data maximum rejected");
+}
+
 int main(void) {
     test_production_descriptor();
+    test_init_table_direct_sms_delivery();
     test_antenna_tuner_policy();
     test_call_builders();
     test_call_forwarding_and_mailbox();
@@ -1664,6 +2192,12 @@ int main(void) {
     test_parser_bounds();
     test_typed_diagnostics();
     test_guarded_maintenance_boundary();
+    test_direct_3gpp2_text_forms();
+    test_direct_3gpp2_wemt_length_boundary();
+    test_direct_3gpp2_pdu_forms();
+    test_direct_3gpp2_bounds();
+    test_direct_3gpp2_ascii7();
+    test_direct_3gpp2_ascii7_line_breaks();
 
     if (s_failures != 0) {
         fprintf(stderr, "%d Telit vendor test(s) failed\n", s_failures);

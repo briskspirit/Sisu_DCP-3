@@ -86,6 +86,9 @@ typedef enum {
     MODEM_SMS_REQUEST_MAILBOX,
     MODEM_SMS_REQUEST_READ,
     MODEM_SMS_REQUEST_DELETE,
+    /* Internal re-store of a direct-delivered (+CMT) message. No app-facing
+     * result channel; the arrival surfaces through the mailbox scan. */
+    MODEM_SMS_REQUEST_DELIVERED,
 } modem_sms_request_kind_t;
 
 typedef enum {
@@ -99,6 +102,10 @@ typedef enum {
      * authoritative final was lost. Retrying may duplicate or partially
      * repeat the operation. */
     MODEM_SMS_OUTCOME_UNCERTAIN,
+    /* The module's message store is full (+CMS ERROR: 322 / "memory full").
+     * A failure for every consumer; a direct-delivery store keeps its entry
+     * and waits for room instead of burning a retry attempt. */
+    MODEM_SMS_OUTCOME_STORAGE_FULL,
 } modem_sms_outcome_t;
 
 typedef struct {

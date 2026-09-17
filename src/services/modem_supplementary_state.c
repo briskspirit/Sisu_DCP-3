@@ -215,6 +215,21 @@ uint32_t modem_supplementary_call_forward_next_request_id(void) {
     return s_call_forward_next_request_id;
 }
 
+bool modem_supplementary_call_forward_flags_finish(bool ok, uint32_t now_ms) {
+    supplementary_refresh_t *refresh =
+        refresh_for_kind(MODEM_SUPPLEMENTARY_REFRESH_CFU);
+    bool changed = false;
+    /* A real CFU flag (solicited or unsolicited) already resolves this
+     * generation. A valid reply with no flag leaves the state unknown. */
+    if (ok && refresh->in_flight_generation != 0u &&
+        refresh->in_flight_generation == refresh->generation) {
+        changed = s_cache.call_forward_unconditional_known;
+        s_cache.call_forward_unconditional_known = false;
+    }
+    refresh_finish(MODEM_SUPPLEMENTARY_REFRESH_CFU, ok, now_ms);
+    return changed;
+}
+
 void modem_supplementary_call_forward_publish_result(
     uint32_t request_id, const call_forward_request_t *request,
     call_forward_outcome_t outcome, bool status_known, bool active,

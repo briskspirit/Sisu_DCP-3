@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "services/modem_sms_direct.h"
 #include "services/modem_vendor.h"
 
 #define TELIT_FIELD_CAP 48u
@@ -12,7 +13,7 @@
 #define TELIT_SERVINFO_FIELD_COUNT 9u
 #define TELIT_TUNE_COMMAND_DOMAIN_MASK ((UINT64_C(1) << 35u) - 1u)
 #define TELIT_DIAG_QUERY_COUNT 43u
-#define TELIT_INIT_STEP_COUNT 22u
+#define TELIT_INIT_STEP_COUNT 23u
 #define TELIT_PROVISION_STEP_COUNT 28u
 
 typedef struct {
@@ -147,6 +148,14 @@ bool telit_parse_ismscfg(const char *line, uint8_t *mode_out);
 bool telit_parse_fwswitch(const char *line, telit_fwswitch_t *state);
 bool telit_parse_fwautosim(const char *line, uint8_t *mode_out);
 bool telit_parse_aux_urc(const char *line, modem_aux_event_t *out);
+/* IS-637 7-bit ASCII (encodings 2/3): unpack `chars` characters packed 7
+ * bits each MSB-first (bit 7 of octet 0 is bit 6 of char 0) from exactly
+ * ceil(7*chars/8) octets. Exposed for tests. */
+bool telit_unpack_ascii7(const uint8_t *data, size_t octets, size_t chars,
+                         uint8_t *out);
+modem_sms_direct_translate_result_t telit_translate_direct_sms(
+    const char *header, const uint8_t *payload, size_t payload_len,
+    sms_deliver_t *out);
 
 bool telit_parse_signal_response(const char *line,
                                  modem_signal_sample_t *out);

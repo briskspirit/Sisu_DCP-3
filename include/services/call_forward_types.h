@@ -83,6 +83,9 @@ typedef enum {
     MODEM_AUX_EVENT_MESSAGE_WAITING,
     MODEM_AUX_EVENT_CFU_STATE,
     MODEM_AUX_EVENT_INCOMING_DIVERTED,
+    /* The module filed a message in a store this backend cannot read; the
+     * message is not retrievable. Counted as an error by the service. */
+    MODEM_AUX_EVENT_MESSAGE_STORED_UNREADABLE,
 } modem_aux_event_kind_t;
 
 typedef struct {

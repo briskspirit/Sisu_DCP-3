@@ -15,6 +15,7 @@ typedef enum {
     MODEM_SMS_PROTOCOL_MAILBOX,
     MODEM_SMS_PROTOCOL_READ,
     MODEM_SMS_PROTOCOL_DELETE,
+    MODEM_SMS_PROTOCOL_STORE_DELIVERED, /* re-store a +CMT as a REC UNREAD PDU */
 } modem_sms_protocol_operation_t;
 
 typedef enum {
@@ -57,6 +58,8 @@ typedef struct {
     bool quarantined;
     uint32_t expected_identity_hash;
     modem_sms_read_status_policy_t read_status;
+    const char *pdu_hex;  /* STORE_DELIVERED: SMSC-prefixed SMS-DELIVER hex */
+    uint8_t tpdu_len;     /* STORE_DELIVERED: +CMGW length argument */
 } modem_sms_protocol_request_t;
 
 typedef enum {
@@ -76,6 +79,7 @@ typedef enum {
     MODEM_SMS_ACTION_ARRIVAL_SCAN_COMMIT,
     MODEM_SMS_ACTION_INCREMENT_SENT,
     MODEM_SMS_ACTION_INCREMENT_COMMAND_ERRORS,
+    MODEM_SMS_ACTION_PUBLISH_DELIVERED,
     MODEM_SMS_ACTION_COMPLETE,
 } modem_sms_action_type_t;
 
@@ -142,6 +146,10 @@ typedef struct {
             bool inbox;
         } arrival_commit;
         struct {
+            uint16_t index;
+            modem_sms_outcome_t outcome;
+        } delivered;
+        struct {
             uint32_t request_id;
             modem_sms_request_kind_t kind;
             modem_sms_outcome_t outcome;
@@ -178,6 +186,9 @@ bool modem_sms_protocol_on_prompt(
  * UART boundary because DTR/CTS may defer it; mutating cancellation semantics
  * may advance only from this callback. */
 void modem_sms_protocol_command_dispatched(modem_sms_command_kind_t kind);
+/* The final line's text, noted by the root host just before on_final() so
+ * the protocol can classify a rejected +CMGW as a full store. */
+void modem_sms_protocol_note_final_line(const char *line);
 void modem_sms_protocol_on_final(
     modem_sms_command_kind_t kind, bool ok,
     const modem_sms_protocol_request_t *request,
@@ -197,6 +208,10 @@ void modem_sms_protocol_resume_after_prompt_abort(
  * already handed to the modem as safely retryable. */
 modem_sms_outcome_t modem_sms_protocol_cancel_outcome(
     const modem_sms_protocol_request_t *request);
+/* True when AT+CMGF=0 crossed the UART and no AT+CMGF=1 has completed since,
+ * so cancelling now may leave the module in PDU mode. Read it BEFORE
+ * modem_sms_protocol_cancel(), which resets the protocol state. */
+bool modem_sms_protocol_pdu_mode_possible(void);
 void modem_sms_protocol_cancel(void);
 
 void modem_sms_protocol_line_dropped(void);
