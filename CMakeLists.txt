@@ -222,6 +222,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/sms_deliver_codec.c
     src/services/sms_submit_codec.c
     src/services/sms_vvm_filter.c
+    src/services/sms_control_filter.c
     src/services/t9_service.c
     src/services/timebase.c
     src/services/usb_service.c

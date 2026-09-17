@@ -3,7 +3,8 @@
  * A +CMT is a header line followed by the body. The collector remembers the
  * header, reads the body, hands header+body to the vendor hook first
  * (module-specific forms), then to the generic 3GPP text/PDU parsers, and
- * returns a SMS-DELIVER PDU ready for +CMGW. Pure: no I/O, no vendor names.
+ * returns a SMS-DELIVER PDU ready for +CMGW or a filtered-control result.
+ * Pure: no I/O, no vendor names.
  *
  * Body reading (RAW mode): the line path cannot carry a plain-text body
  * intact (the framer drops CR, splits on LF, maps 0x00 to a C terminator and
@@ -50,6 +51,8 @@ static uint8_t s_pdu_bytes[1u + TPDU_MAX];
 static char s_pdu_hex_scratch[MODEM_SMS_DIRECT_LINE_MAX + 1u]; /* NUL-terminated view for the decoder */
 static sms_codec_message_t s_decoded;
 static sms_deliver_t s_deliver;
+static bool s_wdp;
+static sms_control_filter_t s_filter_reason;
 
 static void raw_leave(void) {
     s_raw_active = false;
@@ -75,6 +78,12 @@ void modem_sms_direct_reset(void) {
     s_pending = false;
     s_header[0] = '\0';
     raw_leave();
+    s_wdp = false;
+    s_filter_reason = SMS_CONTROL_KEEP;
+}
+
+sms_control_filter_t modem_sms_direct_filter_reason(void) {
+    return s_filter_reason;
 }
 
 bool modem_sms_direct_pending(void) {
@@ -367,10 +376,13 @@ static modem_sms_direct_translate_result_t collect(
     const uint8_t *payload, size_t payload_len,
     modem_sms_direct_translate_fn vendor,
     char *pdu_hex, size_t pdu_hex_cap, uint8_t *tpdu_len_out) {
+    s_wdp = false;
     if (vendor != NULL) {
+        memset(&s_deliver, 0, sizeof(s_deliver));
         modem_sms_direct_translate_result_t result =
             vendor(s_header, payload, payload_len, &s_deliver);
         if (result == MODEM_SMS_DIRECT_ACCEPTED) {
+            s_wdp = s_deliver.wdp;
             return sms_deliver_build(&s_deliver, pdu_hex, pdu_hex_cap, tpdu_len_out)
                        ? MODEM_SMS_DIRECT_ACCEPTED : MODEM_SMS_DIRECT_REJECTED;
         }
@@ -389,6 +401,19 @@ static modem_sms_direct_translate_result_t collect(
     return MODEM_SMS_DIRECT_REJECTED;
 }
 
+/* Classification runs only after framing commits the body, never during
+ * speculative CR/LF parsing. Reuse the normal decoder's static scratch. */
+static modem_sms_direct_step_t completed_step(
+    modem_sms_direct_translate_result_t result, const char *pdu_hex) {
+    if (result != MODEM_SMS_DIRECT_ACCEPTED) {
+        return MODEM_SMS_DIRECT_STEP_REJECTED;
+    }
+    s_filter_reason = sms_pdu_decode(pdu_hex, &s_decoded)
+        ? sms_control_classify(&s_decoded, s_wdp) : SMS_CONTROL_KEEP;
+    return s_filter_reason != SMS_CONTROL_KEEP
+        ? MODEM_SMS_DIRECT_STEP_FILTERED : MODEM_SMS_DIRECT_STEP_READY;
+}
+
 modem_sms_direct_step_t modem_sms_direct_feed(
     const char *line, modem_sms_direct_translate_fn vendor,
     char *pdu_hex, size_t pdu_hex_cap, uint8_t *tpdu_len_out) {
@@ -399,6 +424,7 @@ modem_sms_direct_step_t modem_sms_direct_feed(
      * stale header then loses its payload instead of misparsing the new one.
      * A header can only arrive through the framer, so RAW mode cannot nest. */
     if (modem_at_starts_with(line, "+CMT:")) {
+        s_filter_reason = SMS_CONTROL_KEEP;
         modem_at_copy_bounded(s_header, sizeof(s_header), line);
         raw_leave();
         s_pending = false;
@@ -409,9 +435,9 @@ modem_sms_direct_step_t modem_sms_direct_feed(
         }
         if (length == 0u) {
             /* The framer never delivers an empty line: complete on the header. */
-            return collect(s_raw, 0u, vendor, pdu_hex, pdu_hex_cap, tpdu_len_out) ==
-                           MODEM_SMS_DIRECT_ACCEPTED
-                       ? MODEM_SMS_DIRECT_STEP_READY : MODEM_SMS_DIRECT_STEP_REJECTED;
+            modem_sms_direct_translate_result_t result =
+                collect(s_raw, 0u, vendor, pdu_hex, pdu_hex_cap, tpdu_len_out);
+            return completed_step(result, pdu_hex);
         }
         s_raw_active = true;
         s_raw_min = length;
@@ -421,9 +447,9 @@ modem_sms_direct_step_t modem_sms_direct_feed(
         return MODEM_SMS_DIRECT_STEP_IGNORED;
     }
     s_pending = false;
-    return collect((const uint8_t *)line, strlen(line), vendor, pdu_hex, pdu_hex_cap,
-                   tpdu_len_out) == MODEM_SMS_DIRECT_ACCEPTED
-               ? MODEM_SMS_DIRECT_STEP_READY : MODEM_SMS_DIRECT_STEP_REJECTED;
+    modem_sms_direct_translate_result_t result = collect(
+        (const uint8_t *)line, strlen(line), vendor, pdu_hex, pdu_hex_cap, tpdu_len_out);
+    return completed_step(result, pdu_hex);
 }
 
 static bool raw_append(uint8_t byte) {
@@ -468,8 +494,7 @@ modem_sms_direct_step_t modem_sms_direct_feed_raw(
             }
             if (result != MODEM_SMS_DIRECT_INCOMPLETE) {
                 raw_leave();
-                return result == MODEM_SMS_DIRECT_ACCEPTED
-                           ? MODEM_SMS_DIRECT_STEP_READY : MODEM_SMS_DIRECT_STEP_REJECTED;
+                return completed_step(result, pdu_hex);
             }
             s_raw_multiline = true;
             bool held = s_raw_cr_held;

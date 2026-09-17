@@ -54,6 +54,13 @@ tree; tests use synthetic operators, hosts, mailbox IDs, and tokens.
 
 ## Receive transaction
 
+Complete single-part direct deliveries are now recognized before `CMGW` and
+consumed without using an ME slot or generating a user arrival. The filter
+preserves unsupported UDH and message-waiting/class-specific codings; see
+[direct-delivery controls](sms_direct_delivery_design.md#controls-before-storage).
+The reconciliation path below remains for already-stored controls and
+multipart deliveries.
+
 1. `+CMTI` increments the raw mailbox revision and records its storage index.
 2. The app requests its existing protected Inbox reconciliation. No tone,
    unread bump, or backlight notification is emitted yet.

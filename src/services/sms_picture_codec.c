@@ -192,8 +192,9 @@ bool sms_pdu_decode(const char *hex, sms_codec_message_t *out_message) {
             return false;
         }
         pos += address_bytes;
-        pos++; /* TP-PID */
+        decoded.pid = pdu[pos++];
         uint8_t dcs = pdu[pos++];
+        decoded.dcs = dcs;
         decode_timestamp(&pdu[pos], decoded.timestamp, sizeof(decoded.timestamp));
         pos += 7u;
         if (pos >= pdu_len) {
@@ -220,8 +221,9 @@ bool sms_pdu_decode(const char *hex, sms_codec_message_t *out_message) {
             return false;
         }
         pos += address_bytes;
-        pos++; /* TP-PID */
+        decoded.pid = pdu[pos++];
         uint8_t dcs = pdu[pos++];
+        decoded.dcs = dcs;
         uint8_t vpf = (uint8_t)((first >> 3) & 0x03u);
         if (vpf == 2u) {
             if (pos + 1u > pdu_len) {
@@ -392,6 +394,9 @@ static void decode_timestamp(const uint8_t *src, char *dst, size_t cap) {
 
 static void parse_udh(const uint8_t *data, uint8_t data_len, sms_codec_message_t *out, uint8_t *payload_offset) {
     *payload_offset = 0u;
+    if (out != NULL) {
+        out->udh_unhandled = true;
+    }
     if (data == 0 || data_len == 0u || out == 0) {
         return;
     }
@@ -399,33 +404,41 @@ static void parse_udh(const uint8_t *data, uint8_t data_len, sms_codec_message_t
     if ((uint16_t)udhl + 1u > data_len) {
         return;
     }
+    out->udh_unhandled = false;
     size_t pos = 1u;
     while (pos + 2u <= (size_t)udhl + 1u) {
         uint8_t iei = data[pos++];
         uint8_t len = data[pos++];
         if (pos + len > (size_t)udhl + 1u) {
+            out->udh_unhandled = true;
             break;
         }
         if (iei == 0x05u && len == 4u) {
+            out->udh_unhandled |= out->has_ports;
             out->has_ports = true;
             out->dest_port = (uint16_t)(((uint16_t)data[pos] << 8) | data[pos + 1u]);
             out->source_port = (uint16_t)(((uint16_t)data[pos + 2u] << 8) | data[pos + 3u]);
         } else if (iei == 0x00u && len == 3u) {
+            out->udh_unhandled |= out->has_concat;
             out->has_concat = true;
             out->concat_ref_16bit = false;
             out->concat_ref = data[pos];
             out->concat_total = data[pos + 1u];
             out->concat_seq = data[pos + 2u];
         } else if (iei == 0x08u && len == 4u) {
+            out->udh_unhandled |= out->has_concat;
             out->has_concat = true;
             out->concat_ref_16bit = true;
             out->concat_ref = (uint16_t)(((uint16_t)data[pos] << 8u) |
                                          data[pos + 1u]);
             out->concat_total = data[pos + 2u];
             out->concat_seq = data[pos + 3u];
+        } else {
+            out->udh_unhandled = true;
         }
         pos += len;
     }
+    out->udh_unhandled |= pos != (size_t)udhl + 1u;
     *payload_offset = (uint8_t)(udhl + 1u);
 }
 
@@ -473,6 +486,7 @@ static bool decode_user_data(const uint8_t *data, size_t available,
             return false;
         }
         uint8_t bytes = (uint8_t)(((uint16_t)udl * 7u + 7u) / 8u);
+        out->trailing_data = available > bytes;
         return available >= bytes &&
                decode_gsm7_user_data(data, bytes, udl, udhi, out);
     }
@@ -480,6 +494,7 @@ static bool decode_user_data(const uint8_t *data, size_t available,
     if (udl > SMS_TP_UD_MAX_OCTETS || available < udl) {
         return false;
     }
+    out->trailing_data = available > udl;
     uint8_t payload_offset = 0u;
     if (udhi) {
         parse_udh(data, udl, out, &payload_offset);

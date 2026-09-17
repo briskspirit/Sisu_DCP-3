@@ -2163,6 +2163,10 @@ static void command_status(void) {
            (unsigned long)status.sms_sent_count,
            (unsigned long)status.sms_received_count,
            (unsigned long)status.command_errors);
+    printf("[debug] sms_filtered type0=%lu vvm=%lu oma_dm=%lu\n",
+           (unsigned long)status.sms_filtered_type0,
+           (unsigned long)status.sms_filtered_vvm,
+           (unsigned long)status.sms_filtered_oma_dm);
     const char *operator_source =
         status.operator_name_source == MODEM_OPERATOR_NAME_DATABASE ? "db" :
         status.operator_name_source == MODEM_OPERATOR_NAME_SIM ? "sim" :

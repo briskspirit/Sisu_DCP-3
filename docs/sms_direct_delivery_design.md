@@ -27,7 +27,8 @@ quarantine, UI) is built on 3GPP TS 23.040 PDUs read from the ME store.
 
 ## Decision
 
-One receive route for every carrier: direct delivery, then re-store.
+One receive route for every carrier: direct delivery, classify complete
+controls, then re-store user messages.
 
 ```
 modem  --+CMT header/payload-->  modem_sms_direct (generic collector)
@@ -36,6 +37,8 @@ modem  --+CMT header/payload-->  modem_sms_direct (generic collector)
                                      v
                               sms_deliver_codec (SMS-DELIVER TPDU builder)
                                      v
+                       sms_control_filter -> known controls consumed in RAM
+                                     v (keep)
                        STORE_DELIVERED protocol op: AT+CMGF=0, AT+CMGW=<len>,0,
                        <pdu>^Z, AT+CMGF=1  ->  +CMGW: <idx>
                                      v
@@ -111,6 +114,48 @@ Therefore:
 the module fall back to `<mt>=0` (indications off) until CNMI is re-executed,
 a larger availability risk than the host-side window between `+CMT` and
 `+CMGW`. The window is covered by a bounded retry ring (below).
+
+### Controls before storage
+
+The collector classifies only a completed delivery, never a speculative
+CR/LF boundary. A `FILTERED` result consumes the body without entering the
+storage ring, issuing `CMGW`, advancing mailbox/user-arrival counters or
+recording a command error. This also works when the ring or ME is full.
+The normal module-managed network acknowledgement is unchanged.
+
+The initial filter is deliberately small:
+
+- Type-0 SMS (`TP-PID=0x40`) is discarded as specified by 3GPP TS 23.040.
+  This is not Class-0 flash SMS.
+- Complete VVM controls use the existing strict port-and-payload recognizer.
+  Multipart controls retain their existing store/reconciliation path.
+- OMA-DM notifications require a complete single-datagram WAP Push on port
+  2948, compact WSP headers `06 03 C4 AF 87` after the transaction ID,
+  a 16-byte digest, notification version 11, server initiation, zero reserved
+  bits, a nonempty printable server identifier and no vendor-specific body.
+  Both 3GPP UDH ports and Telit octet-encoded WAP teleservice 4100 are accepted.
+  The latter carries WDP metadata separately through translation; arbitrary
+  binary payloads cannot acquire WDP status by resembling its header.
+
+Unknown WSP encodings, extra headers, multipart packets, malformed/duplicate
+UDH and trailing data stay on the normal path. Outside Type-0, filtering
+requires PID 0 and DCS 0, 4 or 8. In particular, it does not swallow MWI,
+Class-0/2 messages, SIM downloads, MMS or LwM2M application notifications.
+There is no sender-number, server-name or carrier blacklist.
+
+This is an unsupported-host-service policy, not an OMA-DM client: no digest
+authentication, management session or successful-update response is implied.
+Telit's internal management clients and provisioning are not changed.
+Existing stored OMA-DM rows are not automatically deleted because their
+translated TPDU no longer contains the original WAP teleservice metadata.
+
+Three saturating RAM counters (`sms_filtered type0/vvm/oma_dm` in `status`)
+provide diagnostics without retaining payloads or writing persistent logs.
+
+References:
+- [3GPP TS 23.040, Type-0 SMS](https://www.etsi.org/deliver/etsi_ts/123000_123099/123040/16.00.00_60/ts_123040v160000p.pdf)
+- [OMA-DM Notification 1.2.1, sections 6 and 7](https://www.openmobilealliance.org/release/DM/V1_2_1-20080617-A/OMA-TS-DM_Notification-V1_2_1-20080617-A.pdf)
+- [OMA Push application IDs](https://oma-knowledge-base.openmobilealliance.org/omna/wag/push_application_id.html)
 
 ### Sleep and power: unchanged
 

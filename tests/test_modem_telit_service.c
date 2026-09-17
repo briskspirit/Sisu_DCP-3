@@ -6807,6 +6807,8 @@ static void test_phonebook_queue_eviction_and_recovery_are_terminal(void) {
 
 /* ---- direct delivery (+CMT) -------------------------------------------- */
 
+#include "sms_control_fixtures.h"
+
 static const char DIRECT_3GPP2_HEADER[] =
     "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,9";
 static const char DIRECT_3GPP2_BODY[] = "Dhdjdjdjs";
@@ -6918,6 +6920,62 @@ static void test_direct_delivery_is_restored_as_a_pdu(void) {
           "a released ring slot stores the next delivery");
 }
 
+static void test_direct_controls_skip_storage(void) {
+    if (!begin_sms_operation_fixture("control-filter fixture boots")) {
+        return;
+    }
+    modem_status_t before = mh_status();
+    for (unsigned i = 0u; i < 12u; i++) {
+        feed_direct(CONTROL_DM_TELIT_HEADER, CONTROL_DM_WDP_HEX);
+    }
+    feed_direct("+CMT: \"15551230000\",,\"26/09/17,12:00:00+00\",129,4,64,0,,129,4", "test");
+    /* UDH port 5500 + binary //VVM:SYNC:ev=NM; */
+    feed_direct("+CMT: \"15551230000\",,\"26/09/17,12:00:00+00\",129,68,0,4,,129,24",
+                "060504157CC0022F2F56564D3A53594E433A65763D4E4D3B");
+    modem_status_t after = mh_status();
+    check(after.sms_filtered_oma_dm == before.sms_filtered_oma_dm + 12u &&
+              after.sms_filtered_type0 == before.sms_filtered_type0 + 1u &&
+              after.sms_filtered_vvm == before.sms_filtered_vvm + 1u,
+          "complete controls count by reason, even beyond the ring depth");
+    check(after.sms_received_count == before.sms_received_count &&
+              after.sms_user_received_count == before.sms_user_received_count &&
+              after.command_errors == before.command_errors &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u &&
+              mh_tx_count_exact("AT+CMGF=0") == 0u &&
+              mh_tx_count_exact("AT+CNMA") == 0u &&
+              !modem_sms_direct_pending() && !service_probe().command_active &&
+              service_probe().request_queue_depth == 0u,
+          "controls cause no store, arrival, error, host ACK or pending work");
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    check(mh_status().sms_received_count == before.sms_received_count + 1u &&
+              mh_tx_count_exact("AT+CMGW=26,0") == 1u,
+          "ordinary text immediately after filtered controls still stores");
+
+    /* Identical bytes on ordinary octet teleservice are not a WDP assertion. */
+    feed_direct("+CMT: \"15551230000\",\"\",\"20260917120000\",129,4098,0,0,52",
+                CONTROL_DM_WDP_HEX);
+    check(mh_status().sms_received_count == before.sms_received_count + 2u &&
+              mh_status().sms_filtered_oma_dm == after.sms_filtered_oma_dm,
+          "non-WAP binary data keeps the normal store path");
+
+    /* Same qualified WAP notification during a transient PDU-mode window. */
+    feed_direct("+CMT: \"15551230000\",\"\",71",
+                "07815155210300F02609171200001004000034" CONTROL_DM_WDP_HEX);
+    check(mh_status().sms_filtered_oma_dm == after.sms_filtered_oma_dm + 1u &&
+              mh_status().sms_received_count == before.sms_received_count + 2u,
+          "Telit PDU form retains WDP provenance and filters too");
+
+    feed_direct("+CMT: \"15551230000\",,\"26/09/17,12:00:00+00\",129,68,0,4,,129,52",
+                "0605040B84C002" CONTROL_DM_WSP_HEX);
+    check(mh_status().sms_filtered_oma_dm == after.sms_filtered_oma_dm + 2u &&
+              mh_status().sms_received_count == before.sms_received_count + 2u,
+          "3GPP port-addressed notification follows the same filter policy");
+
+    mh_advance(6000u);
+    check(mh_status().command_errors == before.command_errors && !modem_sms_direct_pending(),
+          "filtered delivery disarms the body timeout");
+}
+
 static void test_slow_call_forwarding_keeps_receiving(void) {
     for (unsigned reject = 0u; reject < 2u; reject++) {
         begin_telit(true);
@@ -7003,6 +7061,13 @@ static void test_direct_delivery_mid_command_and_qcmti(void) {
     mh_settle();
     check(service_probe().command_active && mh_status().operation_busy,
           "debug command is on the wire without a final");
+
+    feed_direct(CONTROL_DM_TELIT_HEADER, CONTROL_DM_WDP_HEX);
+    check(service_probe().command_active && mh_status().operation_busy &&
+              mh_status().sms_filtered_oma_dm == before.sms_filtered_oma_dm + 1u &&
+              mh_status().command_errors == before.command_errors &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u,
+          "filtering a control cannot consume the active command's final or queue a store");
 
     /* A payload that reads like a final must not finish AT+CGMI. The body
      * is read raw by <length> (2), so the header says exactly "OK". */
@@ -7144,6 +7209,10 @@ static void test_direct_delivery_retries_after_store_failure(void) {
     check(mh_status().command_errors == held_before.command_errors,
           "eight deliveries are held without loss");
     modem_status_t full_before = mh_status();
+    feed_direct(CONTROL_DM_TELIT_HEADER, CONTROL_DM_WDP_HEX);
+    check(mh_status().command_errors == full_before.command_errors &&
+              mh_status().sms_filtered_oma_dm == full_before.sms_filtered_oma_dm + 1u,
+          "a full storage ring still silently consumes complete controls");
     feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY); /* no slot */
     check(mh_status().command_errors == full_before.command_errors + 1u,
           "the ninth delivery on a full ring is counted as an error");
@@ -7936,6 +8005,7 @@ int main(void) {
     test_sms_save_and_delete_contracts();
     test_sms_binary_send_contract();
     test_direct_delivery_is_restored_as_a_pdu();
+    test_direct_controls_skip_storage();
     test_direct_delivery_mid_command_and_qcmti();
     test_slow_call_forwarding_keeps_receiving();
     test_direct_delivery_retries_after_store_failure();

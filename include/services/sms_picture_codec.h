@@ -20,6 +20,10 @@ typedef struct {
     bool has_ports;
     bool has_concat;
     bool concat_ref_16bit;
+    bool udh_unhandled; /* malformed, duplicate or unsupported UDH information */
+    bool trailing_data; /* bytes beyond the user-data length declared by TP-UDL */
+    uint8_t pid;
+    uint8_t dcs;
     uint16_t dest_port;
     uint16_t source_port;
     uint16_t concat_ref;

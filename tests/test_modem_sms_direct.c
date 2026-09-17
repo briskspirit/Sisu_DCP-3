@@ -537,6 +537,40 @@ static void test_hex_helper(void) {
           "an embedded NUL is a non-hex byte, not a terminator");
 }
 
+static void test_type0_filter(void) {
+    char hex[SMS_DELIVER_HEX_MAX];
+    uint8_t tpdu = 0u;
+    modem_sms_direct_reset();
+    check(modem_sms_direct_feed(
+              "+CMT: \"15551230000\",,\"26/09/17,12:00:00+00\",129,4,64,0,,129,0",
+              NULL, hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_FILTERED &&
+              modem_sms_direct_filter_reason() == SMS_CONTROL_TYPE0 && !modem_sms_direct_pending(),
+          "empty type-0 is filtered on its header without waiting for a body");
+    modem_sms_direct_reset();
+    check(modem_sms_direct_filter_reason() == SMS_CONTROL_KEEP, "reset clears filter reason");
+    check(modem_sms_direct_feed(
+              "+CMT: \"15551230000\",,\"26/09/17,12:00:00+00\",129,4,64,0,,129,4",
+              NULL, hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_HEADER &&
+              feed_raw_cstr("test\r\n", NULL, hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_FILTERED &&
+              modem_sms_direct_filter_reason() == SMS_CONTROL_TYPE0,
+          "nonempty type-0 consumes its complete raw body");
+    char pdu[SMS_DELIVER_HEX_MAX];
+    strcpy(pdu, hex);
+    strcat(pdu, "\r\n");
+    char header[24];
+    snprintf(header, sizeof(header), "+CMT: ,%u", tpdu);
+    check(modem_sms_direct_feed(header, NULL, hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_HEADER &&
+              modem_sms_direct_filter_reason() == SMS_CONTROL_KEEP &&
+              feed_raw_cstr(pdu, NULL, hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_FILTERED,
+          "3GPP PDU form filters type-0 too");
+    check(modem_sms_direct_feed(
+              "+CMT: \"15551230000\",,\"26/09/17,12:00:00+00\",129,4,0,16,,129,4",
+              NULL, hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_HEADER &&
+              feed_raw_cstr("test\r\n", NULL, hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_READY &&
+              modem_sms_direct_filter_reason() == SMS_CONTROL_KEEP,
+          "class-0 flash SMS is not type-0; following message stays intact");
+}
+
 int main(void) {
     test_pdu_form_passthrough();
     test_text_form_gsm7();
@@ -546,6 +580,7 @@ int main(void) {
     test_collector();
     test_zero_length_body();
     test_hex_helper();
+    test_type0_filter();
     if (s_failures != 0) { printf("%d failures\n", s_failures); return 1; }
     printf("test_modem_sms_direct: all passed\n");
     return 0;

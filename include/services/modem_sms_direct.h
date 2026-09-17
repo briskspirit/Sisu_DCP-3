@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "services/sms_deliver_codec.h"
+#include "services/sms_control_filter.h"
 
 #define MODEM_SMS_DIRECT_LINE_MAX 400u
 
@@ -29,11 +30,14 @@ typedef enum {
     MODEM_SMS_DIRECT_STEP_HEADER,      /* header captured, payload expected next */
     MODEM_SMS_DIRECT_STEP_READY,       /* pdu_hex/tpdu_len filled */
     MODEM_SMS_DIRECT_STEP_REJECTED,    /* header+payload seen, no parser accepted */
+    MODEM_SMS_DIRECT_STEP_FILTERED,    /* complete control; no storage or error */
 } modem_sms_direct_step_t;
 
 void modem_sms_direct_reset(void);
 /* A delivery is in progress (payload expected, in line or RAW mode). */
 bool modem_sms_direct_pending(void);
+/* Reason for the last FILTERED step; cleared on reset or a new header. */
+sms_control_filter_t modem_sms_direct_filter_reason(void);
 /* RAW mode: the byte drain must hand every byte to modem_sms_direct_feed_raw
  * instead of the line framer until this returns false. */
 bool modem_sms_direct_raw_active(void);

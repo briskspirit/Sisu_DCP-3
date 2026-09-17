@@ -3076,6 +3076,19 @@ static void direct_apply_step(modem_sms_direct_step_t step, uint8_t slot,
         LOGI("modem", "direct SMS rebuilt tpdu=%u slot=%u",
              (unsigned)tpdu_len, (unsigned)slot);
         break;
+    case MODEM_SMS_DIRECT_STEP_FILTERED: {
+        s_direct_body_deadline_armed = false;
+        sms_control_filter_t reason = modem_sms_direct_filter_reason();
+        critical_section_enter_blocking(&s_status_lock);
+        uint32_t *counter = reason == SMS_CONTROL_TYPE0 ? &s_status.sms_filtered_type0 :
+            reason == SMS_CONTROL_VVM ? &s_status.sms_filtered_vvm :
+            &s_status.sms_filtered_oma_dm;
+        if (*counter != UINT32_MAX) {
+            (*counter)++;
+        }
+        critical_section_exit(&s_status_lock);
+        break;
+    }
     case MODEM_SMS_DIRECT_STEP_REJECTED:
         s_direct_body_deadline_armed = false;
         /* The module already acknowledged the network: the message is lost.

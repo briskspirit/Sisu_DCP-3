@@ -36,6 +36,7 @@ MODEM_SERVICE_SOURCES=(
     src/services/sms_picture_codec.c
     src/services/sms_submit_codec.c
     src/services/sms_vvm_filter.c
+    src/services/sms_control_filter.c
 )
 MODEM_TELIT_VENDOR_SOURCES=(
     src/services/modem_vendor_telit.c
@@ -787,7 +788,8 @@ run test_text_fit            src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c"
 run test_ui_wrap             src/ui/ui.c src/ui/text_layout.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c" src/ui/framebuffer.c src/services/strings.c "$GENERATED_SRC_DIR/strings_data.c"
 run test_sms_picture_codec   src/services/sms_picture_codec.c
 run test_sms_deliver_codec   src/services/sms_deliver_codec.c src/services/sms_picture_codec.c
-run test_modem_sms_direct    src/services/modem_sms_direct.c src/services/sms_deliver_codec.c src/services/sms_picture_codec.c
+run test_modem_sms_direct    src/services/modem_sms_direct.c src/services/sms_deliver_codec.c src/services/sms_picture_codec.c src/services/sms_control_filter.c src/services/sms_vvm_filter.c
+run test_sms_control_filter  src/services/sms_control_filter.c src/services/sms_vvm_filter.c src/services/sms_picture_codec.c src/services/sms_deliver_codec.c
 run test_sms_vvm_filter      src/services/sms_vvm_filter.c
 run test_sms_types
 run test_audio_tonedecode    "$GENERATED_SRC_DIR/tones_data.c" src/audio/composer_codec.c src/audio/audio_levels.c
@@ -908,7 +910,8 @@ run test_modem_service_parsers src/services/modem_line_framer.c src/services/mod
 run test_operator_name_db
 run_telit test_telit_operator_name src/services/modem_vendor_telit_operator.c
 run_telit test_modem_vendor_telit "${MODEM_TELIT_VENDOR_SOURCES[@]}" \
-    src/services/sms_deliver_codec.c src/services/modem_sms_direct.c src/services/sms_picture_codec.c
+    src/services/sms_deliver_codec.c src/services/modem_sms_direct.c src/services/sms_picture_codec.c \
+    src/services/sms_control_filter.c src/services/sms_vvm_filter.c
 run_telit test_modem_telit_service -DSISU_MODEM_SERVICE_TEST=1 \
     "${MODEM_SERVICE_SOURCES[@]}" "${MODEM_TELIT_VENDOR_SOURCES[@]}"
 run test_call_model_golden   src/services/modem_call_model.c  # public-API golden traces

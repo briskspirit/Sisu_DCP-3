@@ -30,6 +30,7 @@
 #include "services/sms_deliver_codec.h"
 
 #define TELIT_TELE_WEMT 4101u           /* enhanced messaging: UDH present */
+#define TELIT_TELE_WAP 4100u
 #define TELIT_TELE_VMN 4099u            /* voice mail notification */
 #define TELIT_TELE_VMN_ALT 262144u
 #define TELIT_TELE_MAX 262144u
@@ -185,6 +186,7 @@ static bool apply_encoding(uint32_t tele_id, uint32_t enc, uint32_t length,
             return false;
         }
         out->dcs = 0x04u;
+        out->wdp = tele_id == TELIT_TELE_WAP;
         break;
     case ENC_LATIN1:
         /* Text form: the module already mapped the text through +CSCS="GSM"

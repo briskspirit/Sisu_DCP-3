@@ -17,6 +17,7 @@ typedef struct {
     uint8_t pid;
     uint8_t dcs;
     bool udhi;
+    bool wdp;          /* vendor identified a WDP datagram; not encoded in TPDU */
     uint8_t udl;        /* septets for GSM-7 DCS, octets otherwise */
     uint8_t ud[SMS_DELIVER_UD_MAX];
     uint8_t ud_len;     /* octets used in ud[] */
