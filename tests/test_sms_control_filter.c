@@ -121,8 +121,58 @@ static void test_vvm(void) {
     memcpy(m.binary_data, control, sizeof(control) - 1u);
     m.binary_len = sizeof(control) - 1u;
     check(sms_control_classify(&m, false) == SMS_CONTROL_VVM, "known OMTP binary control");
+    m.dcs = 0x15u;
+    check(sms_control_classify(&m, false) == SMS_CONTROL_KEEP,
+          "class-1 OMA-DM support does not widen VVM policy");
+    m.dcs = 0xf5u;
+    check(sms_control_classify(&m, false) == SMS_CONTROL_KEEP,
+          "alternate class-1 coding does not widen VVM policy");
+    m.dcs = 4u;
     m.binary_data[0] = '?';
     check(sms_control_classify(&m, false) == SMS_CONTROL_KEEP, "unknown VVM payload kept");
+}
+
+static void test_dm_class1(void) {
+    for (unsigned wdp = 0u; wdp < 2u; wdp++) {
+        sms_codec_message_t m = dm_message(wdp != 0u);
+        for (unsigned dcs = 0u; dcs <= 255u; dcs++) {
+            m.dcs = (uint8_t)dcs;
+            bool supported = dcs == 4u || dcs == 0x15u || dcs == 0xf5u;
+            check(sms_control_classify(&m, wdp != 0u) ==
+                      (supported ? SMS_CONTROL_OMA_DM : SMS_CONTROL_KEEP),
+                  "DM accepts only classless or class-1 uncompressed octets");
+        }
+        const uint8_t codings[] = {0x15u, 0xf5u};
+        for (size_t i = 0u; i < sizeof(codings); i++) {
+            m = dm_message(wdp != 0u);
+            m.dcs = codings[i];
+            uint16_t length = m.binary_len;
+            for (uint16_t n = 0u; n < length; n++) {
+                m.binary_len = n;
+                check(sms_control_classify(&m, wdp != 0u) == SMS_CONTROL_KEEP,
+                      "truncated class-1 DM is not discarded");
+            }
+            m.binary_len = length + 1u;
+            check(sms_control_classify(&m, wdp != 0u) == SMS_CONTROL_KEEP,
+                  "class-1 DM with extra vendor data stays visible");
+            m.binary_len = length;
+            m.has_concat = true;
+            check(sms_control_classify(&m, wdp != 0u) == SMS_CONTROL_KEEP,
+                  "class-1 DM fragments stay on the normal path");
+            m.has_concat = false;
+            m.udh_unhandled = true;
+            check(sms_control_classify(&m, wdp != 0u) == SMS_CONTROL_KEEP,
+                  "class-1 DM with ambiguous UDH stays visible");
+            m.udh_unhandled = false;
+            m.pid = 0x7fu;
+            check(sms_control_classify(&m, wdp != 0u) == SMS_CONTROL_KEEP,
+                  "class-1 SIM-download PID stays visible");
+            m.pid = 0u;
+            m.binary_data[(wdp ? 7u : 0u) + 5u] = 0x9au;
+            check(sms_control_classify(&m, wdp != 0u) == SMS_CONTROL_KEEP,
+                  "class-1 LwM2M notification is not legacy DM");
+        }
+    }
 }
 
 static void test_udh_validation(void) {
@@ -176,6 +226,7 @@ static void test_udh_validation(void) {
 int main(void) {
     test_dm();
     test_vvm();
+    test_dm_class1();
     test_udh_validation();
     if (failures) { printf("%u failures\n", failures); return 1; }
     puts("test_sms_control_filter: all passed");

@@ -3,6 +3,7 @@
 
 #include "services/modem_sms_direct.h"
 #include "services/sms_picture_codec.h"
+#include "sms_control_fixtures.h"
 
 static int s_failures;
 static void check(bool ok, const char *msg) {
@@ -571,6 +572,38 @@ static void test_type0_filter(void) {
           "class-0 flash SMS is not type-0; following message stays intact");
 }
 
+static void test_class1_dm_filter(void) {
+    char hex[SMS_DELIVER_HEX_MAX];
+    uint8_t tpdu = 0u;
+    modem_sms_direct_reset();
+    check(modem_sms_direct_feed(CONTROL_DM_CLASS1_HEADER, NULL,
+                                hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_HEADER &&
+              feed_raw_cstr(CONTROL_DM_UDH_HEX "\r\n", NULL,
+                            hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_FILTERED &&
+              modem_sms_direct_filter_reason() == SMS_CONTROL_OMA_DM &&
+              !modem_sms_direct_pending(),
+          "class-1 3GPP text delivery is filtered after complete UDH and DM decode");
+
+    char pdu[SMS_DELIVER_HEX_MAX];
+    strcpy(pdu, hex);
+    strcat(pdu, "\r\n");
+    char header[24];
+    snprintf(header, sizeof(header), "+CMT: ,%u", tpdu);
+    check(modem_sms_direct_feed(header, NULL, hex, sizeof(hex), &tpdu) ==
+              MODEM_SMS_DIRECT_STEP_HEADER &&
+              feed_raw_cstr(pdu, NULL, hex, sizeof(hex), &tpdu) ==
+              MODEM_SMS_DIRECT_STEP_FILTERED &&
+              modem_sms_direct_filter_reason() == SMS_CONTROL_OMA_DM,
+          "class-1 3GPP PDU delivery uses the same filter");
+    check(modem_sms_direct_feed(
+              "+CMT: \"15551230000\",,\"26/09/18,12:00:00+00\",129,4,0,245,,129,4",
+              NULL, hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_HEADER &&
+              feed_raw_cstr("01020304\r\n", NULL, hex, sizeof(hex), &tpdu) ==
+              MODEM_SMS_DIRECT_STEP_READY &&
+              modem_sms_direct_filter_reason() == SMS_CONTROL_KEEP,
+          "ordinary class-1 binary SMS immediately afterward remains intact");
+}
+
 int main(void) {
     test_pdu_form_passthrough();
     test_text_form_gsm7();
@@ -581,6 +614,7 @@ int main(void) {
     test_zero_length_body();
     test_hex_helper();
     test_type0_filter();
+    test_class1_dm_filter();
     if (s_failures != 0) { printf("%d failures\n", s_failures); return 1; }
     printf("test_modem_sms_direct: all passed\n");
     return 0;

@@ -42,22 +42,29 @@ sms_control_filter_t sms_control_classify(const sms_codec_message_t *message,
     if (message->pid == 0x40u) {
         return SMS_CONTROL_TYPE0;
     }
+    bool ordinary_dcs = message->dcs == 0x00u || message->dcs == 0x04u ||
+                        message->dcs == 0x08u;
+    /* TS 23.038: 0x15 and 0xf5 are uncompressed class-1 octets. The latter
+     * carries Verizon's port-addressed DM notifications after provisioning. */
+    bool dm_octets = message->dcs == 0x04u || message->dcs == 0x15u ||
+                     message->dcs == 0xf5u;
     /* Keep MWI, class-0/2, SIM download, reserved/compressed encodings and
      * all multipart/unknown UDH on their existing paths. Never filter a
      * fragment solely because its prefix resembles a complete control. */
     if (message->pid != 0u || message->has_concat || message->udh_unhandled ||
         message->trailing_data || message->binary_len > sizeof(message->binary_data) ||
-        (message->dcs != 0x00u && message->dcs != 0x04u && message->dcs != 0x08u)) {
+        (!ordinary_dcs && !dm_octets)) {
         return SMS_CONTROL_KEEP;
     }
     const uint8_t *payload = message->binary
         ? message->binary_data : (const uint8_t *)message->text;
     size_t length = message->binary ? message->binary_len : strlen(message->text);
-    if (sms_vvm_control_payload_is_recognized(message->has_ports,
-                                              message->dest_port, payload, length)) {
+    if (ordinary_dcs &&
+        sms_vvm_control_payload_is_recognized(message->has_ports,
+                                             message->dest_port, payload, length)) {
         return SMS_CONTROL_VVM;
     }
-    if (!message->binary || message->dcs != 0x04u) {
+    if (!message->binary || !dm_octets) {
         return SMS_CONTROL_KEEP;
     }
     if (wdp) {

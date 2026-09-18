@@ -142,10 +142,15 @@ The initial filter is deliberately small:
   Both 3GPP UDH ports and Telit octet-encoded WAP teleservice 4100 are accepted.
   The latter carries WDP metadata separately through translation; arbitrary
   binary payloads cannot acquire WDP status by resembling its header.
+  The accepted octet codings are classless `0x04` and class-1 `0x15`/`0xF5`.
+  Verizon reprovisioning notifications were observed with `0xF5`; they still
+  require every port, WSP and Package-0 validation above. This does not widen
+  the separate VVM filter's coding policy.
 
 Unknown WSP encodings, extra headers, multipart packets, malformed/duplicate
 UDH and trailing data stay on the normal path. Outside Type-0, filtering
-requires PID 0 and DCS 0, 4 or 8. In particular, it does not swallow MWI,
+requires PID 0 and DCS 0, 4 or 8, with the class-1 exception for OMA-DM above.
+In particular, it does not swallow MWI,
 Class-0/2 messages, SIM downloads, MMS or LwM2M application notifications.
 There is no sender-number, server-name or carrier blacklist.
 
@@ -160,6 +165,7 @@ provide diagnostics without retaining payloads or writing persistent logs.
 
 References:
 - [3GPP TS 23.040, Type-0 SMS](https://www.etsi.org/deliver/etsi_ts/123000_123099/123040/16.00.00_60/ts_123040v160000p.pdf)
+- [3GPP TS 23.038, SMS data coding schemes](https://www.etsi.org/deliver/etsi_ts/123000_123099/123038/18.00.00_60/ts_123038v180000p.pdf)
 - [OMA-DM Notification 1.2.1, sections 6 and 7](https://www.openmobilealliance.org/release/DM/V1_2_1-20080617-A/OMA-TS-DM_Notification-V1_2_1-20080617-A.pdf)
 - [OMA Push application IDs](https://oma-knowledge-base.openmobilealliance.org/omna/wag/push_application_id.html)
 

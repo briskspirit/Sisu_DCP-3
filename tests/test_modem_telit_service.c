@@ -6929,12 +6929,15 @@ static void test_direct_controls_skip_storage(void) {
     for (unsigned i = 0u; i < 12u; i++) {
         feed_direct(CONTROL_DM_TELIT_HEADER, CONTROL_DM_WDP_HEX);
     }
+    feed_direct(CONTROL_DM_CLASS1_HEADER, CONTROL_DM_UDH_HEX);
+    feed_direct("+CMT: \"15551230000\",,\"26/09/18,12:00:00+00\",129,68,0,21,,129,52",
+                CONTROL_DM_UDH_HEX);
     feed_direct("+CMT: \"15551230000\",,\"26/09/17,12:00:00+00\",129,4,64,0,,129,4", "test");
     /* UDH port 5500 + binary //VVM:SYNC:ev=NM; */
     feed_direct("+CMT: \"15551230000\",,\"26/09/17,12:00:00+00\",129,68,0,4,,129,24",
                 "060504157CC0022F2F56564D3A53594E433A65763D4E4D3B");
     modem_status_t after = mh_status();
-    check(after.sms_filtered_oma_dm == before.sms_filtered_oma_dm + 12u &&
+    check(after.sms_filtered_oma_dm == before.sms_filtered_oma_dm + 14u &&
               after.sms_filtered_type0 == before.sms_filtered_type0 + 1u &&
               after.sms_filtered_vvm == before.sms_filtered_vvm + 1u,
           "complete controls count by reason, even beyond the ring depth");
