@@ -9,21 +9,17 @@
 #include "storage/nvm_hal.h"
 #include "storage/storage_journal.h"
 
-/* Sixteen live units reserve two 4 KiB journal slots each: the complete
- * 128 KiB NVM partition. These exact guards force any future unit/layout
- * change to be reviewed. */
-#define STORE_JOURNAL_REQUIRED_BYTES \
-    ((int)STORE_UNIT_COUNT * 2 * (int)STORAGE_JOURNAL_SLOT_SIZE)
-_Static_assert(STORE_UNIT_COUNT == 16, "recalculate the persistent-store layout");
-_Static_assert(STORE_JOURNAL_REQUIRED_BYTES == 128 * 1024,
-               "recalculate the persistent-store byte requirement");
-_Static_assert(STORE_JOURNAL_REQUIRED_BYTES <= 128 * 1024,
-               "store units exceed the reserved NVM region (128 KiB)");
+/* Legacy unit IDs/order remain fixed for one-way import. The new backend is
+ * an opaque record store; domain codecs do not depend on filesystem layout. */
+_Static_assert(STORE_UNIT_COUNT == 16, "review the legacy import layout");
 _Static_assert(STORE_UNIT_COUNT <= 16,
                "store diagnostics use 16-bit dirty/degraded masks");
+#define STORE_MIGRATION_ID 0xffffu
+static const uint8_t MIGRATION_DONE[] = {'S', 'I', 'S', 1};
 
 static store_commit_result_t commit_unit(store_unit_t unit);
-static void load_unit(store_unit_t unit);
+static bool load_unit(store_unit_t unit);
+static bool import_legacy(void);
 static uint16_t unit_id_for_index(store_unit_t unit);
 
 static const store_unit_binding_t STORE_UNIT_BINDINGS[STORE_UNIT_COUNT] = {
@@ -50,11 +46,10 @@ _Static_assert(sizeof(STORE_UNIT_BINDINGS) / sizeof(STORE_UNIT_BINDINGS[0]) ==
                    STORE_UNIT_COUNT,
                "every persistent unit needs one immutable binding");
 
-static nvm_hal_t s_hal;
-static storage_journal_t s_journals[STORE_UNIT_COUNT];
+static storage_backend_t s_backend;
 static bool s_dirty_units[STORE_UNIT_COUNT];
-/* Per-unit consecutive commit-failure count: bounds the erase-cycling of a
- * degraded journal sector (a verify-mismatch fails every attempt). A unit at the
+/* Per-unit consecutive commit-failure count: bounds repeated attempts against
+ * degraded media (a verify-mismatch fails every attempt). A unit at the
  * cap is skipped -- so it neither burns its own sector nor starves the others --
  * until the slow trickle re-arm grants one retry credit or the phone reboots. */
 static uint8_t s_commit_fail_count[STORE_UNIT_COUNT];
@@ -89,7 +84,7 @@ static store_diag_snapshot_t s_diag;
  * further out (or a stale one wrapped into the past) is treated as expired, so a
  * >2^31-stale deadline can't silently block ALL commits. */
 #define STORE_COMMIT_DEFER_MAX_MS (STORE_COMMIT_AUDIO_GUARD_MS + 64u)
-static uint8_t s_payload[STORAGE_JOURNAL_MAX_PAYLOAD];
+static uint8_t s_payload[STORAGE_RECORD_MAX_PAYLOAD];
 
 const store_unit_binding_t *store_engine_unit_binding(store_unit_t unit) {
     if (unit >= STORE_UNIT_COUNT) {
@@ -99,7 +94,7 @@ const store_unit_binding_t *store_engine_unit_binding(store_unit_t unit) {
 }
 
 store_status_t store_service_init(void) {
-    nvm_status_t nvm = nvm_flash_hal_init(&s_hal);
+    s_ready = false;
     for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
         const store_unit_binding_t *binding = store_engine_unit_binding(unit);
         if (binding == 0 || binding->ops == 0 ||
@@ -120,44 +115,39 @@ store_status_t store_service_init(void) {
     memset(&s_diag, 0, sizeof(s_diag));
     s_diag.current_unit = STORE_DIAG_NO_UNIT;
     s_diag.last_unit = STORE_DIAG_NO_UNIT;
-    if (nvm != NVM_STATUS_OK) {
+    if (storage_backend_open(&s_backend) != STORAGE_RECORD_OK) {
         s_ready = false;
         s_diag.ready = false;
-        LOGW("store", "no NVM backend available");
+        LOGW("store", "record backend unavailable; media left intact");
         return STORE_STATUS_STORAGE_ERROR;
     }
 
-    uint32_t slot_size = s_hal.erase_required ? STORAGE_JOURNAL_SLOT_SIZE : 2048u;
-    uint32_t needed = (uint32_t)STORE_UNIT_COUNT * 2u * slot_size;
-    if (s_hal.capacity < needed) {
-        s_ready = false;
-        LOGE("store", "NVM backend too small: %lu < %lu",
-             (unsigned long)s_hal.capacity,
-             (unsigned long)needed);
-        return STORE_STATUS_STORAGE_ERROR;
-    }
-
-    for (uint8_t i = 0; i < STORE_UNIT_COUNT; i++) {
-        uint32_t base = (uint32_t)i * 2u * slot_size;
-        if (!storage_journal_init(&s_journals[i], &s_hal, unit_id_for_index((store_unit_t)i), base,
-                                  slot_size)) {
-            s_ready = false;
+    size_t marker_len = 0;
+    storage_record_result_t marker = s_backend.read(&s_backend, STORE_MIGRATION_ID,
+                                                     s_payload, sizeof(s_payload), &marker_len);
+    if (marker == STORAGE_RECORD_NOT_FOUND) {
+        if (!import_legacy()) {
+            LOGE("store", "legacy import incomplete; retry on reboot");
             return STORE_STATUS_STORAGE_ERROR;
         }
-    }
-
-    s_ready = true;
-    s_diag.ready = true;
-    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
-        load_unit(unit);
+    } else if (marker != STORAGE_RECORD_OK || marker_len != sizeof(MIGRATION_DONE) ||
+               memcmp(s_payload, MIGRATION_DONE, sizeof(MIGRATION_DONE)) != 0) {
+        LOGE("store", "invalid migration authority; refusing stale legacy fallback");
+        return STORE_STATUS_STORAGE_ERROR;
+    } else {
+        for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+            if (!load_unit(unit)) {
+                LOGE("store", "record %u unreadable", (unsigned)unit);
+                return STORE_STATUS_STORAGE_ERROR;
+            }
+        }
     }
     store_warranty_post_load();
     store_calls_migrate_life_timer(store_warranty_legacy_life_timer());
 
-    LOGI("store", "using %s, %lu bytes reserved, %lu byte slots",
-         s_hal.name,
-         (unsigned long)s_hal.capacity,
-         (unsigned long)slot_size);
+    s_ready = true;
+    s_diag.ready = true;
+    LOGI("store", "record backend ready; %u units", (unsigned)STORE_UNIT_COUNT);
     return STORE_STATUS_OK;
 }
 
@@ -371,7 +361,8 @@ store_status_t store_engine_mark_dirty(store_unit_t unit) {
 
 store_commit_result_t store_engine_commit_binding(
     const store_unit_binding_t *binding,
-    storage_journal_t *journal,
+    storage_backend_t *backend,
+    uint16_t id,
     uint8_t *payload,
     size_t payload_cap) {
     store_commit_result_t result = {
@@ -379,7 +370,7 @@ store_commit_result_t store_engine_commit_binding(
         .flash_busy = false,
     };
     if (binding == 0 || binding->ops == 0 ||
-        binding->ops->serialize == 0 || journal == 0 || payload == 0) {
+        binding->ops->serialize == 0 || backend == 0 || backend->write == 0 || payload == 0) {
         return result;
     }
     size_t len = 0u;
@@ -388,12 +379,11 @@ store_commit_result_t store_engine_commit_binding(
         result.status = STORE_STATUS_STORAGE_ERROR;
         return result;
     }
-    storage_journal_write_result_t write_result =
-        storage_journal_write_detailed(journal, payload, len);
-    result.status = write_result == STORAGE_JOURNAL_WRITE_OK
+    storage_record_result_t write_result = backend->write(backend, id, payload, len);
+    result.status = write_result == STORAGE_RECORD_OK
                         ? STORE_STATUS_OK
                         : STORE_STATUS_STORAGE_ERROR;
-    result.flash_busy = write_result == STORAGE_JOURNAL_WRITE_BUSY;
+    result.flash_busy = write_result == STORAGE_RECORD_BUSY;
     return result;
 }
 
@@ -410,25 +400,69 @@ static store_commit_result_t commit_unit(store_unit_t unit) {
     if (binding == 0 || binding->ops == 0 || binding->ops->serialize == 0) {
         return result;
     }
-    return store_engine_commit_binding(binding, &s_journals[unit],
+    return store_engine_commit_binding(binding, &s_backend, unit_id_for_index(unit),
                                        s_payload, sizeof(s_payload));
 }
 
-static void load_unit(store_unit_t unit) {
+static bool load_unit(store_unit_t unit) {
     const store_unit_binding_t *binding = store_engine_unit_binding(unit);
     size_t len = 0;
-    bool found = storage_journal_read_latest(&s_journals[unit], s_payload,
-                                             sizeof(s_payload), &len, 0);
-    if (found) {
+    storage_record_result_t result = s_backend.read(&s_backend, unit_id_for_index(unit),
+                                                     s_payload, sizeof(s_payload), &len);
+    if (result == STORAGE_RECORD_OK) {
         if (binding->ops->apply(binding->instance, s_payload, len)) {
-            return;
+            return true;
         }
         LOGW("store", "ignored corrupt %s unit %u", binding->ops->name,
              (unsigned)unit);
+    } else if (result != STORAGE_RECORD_NOT_FOUND) {
+        return false;
     }
     if (binding->ops->fallback_missing_or_corrupt != 0) {
         binding->ops->fallback_missing_or_corrupt(binding->instance);
     }
+    return true;
+}
+
+static bool import_legacy(void) {
+    nvm_hal_t legacy;
+    if (nvm_flash_hal_init(&legacy) != NVM_STATUS_OK) {
+        return false;
+    }
+    /* The old media stays read-only. A reset before the final marker repeats
+     * this whole import; after the marker no old record can be resurrected. */
+    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+        storage_journal_t journal;
+        const store_unit_binding_t *binding = store_engine_unit_binding(unit);
+        if (!storage_journal_init(&journal, &legacy, unit_id_for_index(unit),
+                                  (uint32_t)unit * 2u * STORAGE_JOURNAL_SLOT_SIZE,
+                                  STORAGE_JOURNAL_SLOT_SIZE)) {
+            return false;
+        }
+        size_t len = 0;
+        bool loaded = storage_journal_read_latest(&journal, s_payload, sizeof(s_payload), &len, NULL) &&
+                      binding->ops->apply(binding->instance, s_payload, len);
+        if (!loaded && binding->ops->fallback_missing_or_corrupt != NULL) {
+            binding->ops->fallback_missing_or_corrupt(binding->instance);
+        }
+    }
+    store_warranty_post_load();
+    store_calls_migrate_life_timer(store_warranty_legacy_life_timer());
+    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+        const store_unit_binding_t *binding = store_engine_unit_binding(unit);
+        store_commit_result_t result = store_engine_commit_binding(
+            binding, &s_backend, unit_id_for_index(unit), s_payload, sizeof(s_payload));
+        if (result.status != STORE_STATUS_OK) {
+            return false;
+        }
+    }
+    if (s_backend.write(&s_backend, STORE_MIGRATION_ID, MIGRATION_DONE,
+                         sizeof(MIGRATION_DONE)) != STORAGE_RECORD_OK) {
+        return false;
+    }
+    memset(s_dirty_units, 0, sizeof(s_dirty_units));
+    LOGI("store", "legacy import complete; old journal retained read-only");
+    return true;
 }
 
 static uint16_t unit_id_for_index(store_unit_t unit) {

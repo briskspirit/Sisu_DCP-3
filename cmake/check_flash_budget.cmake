@@ -2,8 +2,8 @@
 # init) must not grow into the NVM storage region reserved at the top of flash.
 # Storage lives in the last NVM_RESERVED_BYTES of PICO_FLASH_SIZE_BYTES (see
 # src/storage/nvm_flash_hal.c); code grows up from XIP_BASE. If they ever meet,
-# a flashed build would silently corrupt saved settings/SMS/etc -- so fail the
-# build instead. Keep the two numbers below in sync with nvm_flash_hal.c.
+# a flashed build would silently corrupt saved records -- so fail the
+# build instead. Keep these values in sync with storage/storage_layout.h.
 #
 # Invoked as a POST_BUILD step with -DELF=<path> -DNM=<arm-none-eabi-nm>.
 
@@ -38,7 +38,7 @@ if(BIN_END GREATER_EQUAL STORAGE_START)
     message(FATAL_ERROR
         "Firmware overflows into the NVM storage region!\n"
         "  flash image ends at ${BIN_END}, storage starts at ${STORAGE_START}.\n"
-        "  Reduce code/rodata or shrink NVM_FLASH_RESERVED_BYTES (fewer store units).")
+        "  Reduce code/rodata or review the partition layout; do not overwrite stored records.")
 endif()
 
 math(EXPR USED_KB "${USED} / 1024")

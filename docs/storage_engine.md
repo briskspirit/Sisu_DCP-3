@@ -1,11 +1,13 @@
 # Storage Engine
 
-## littlefs Qualification Region
+## Flash Layout and Transactions
 
 The 128 KiB immediately below the deployed journal (`0x101c0000` through
-`0x101dffff`) is reserved for littlefs qualification. The legacy journal stays
+`0x101dffff`) holds the littlefs record store. The legacy journal stays
 at `0x101e0000` through `0x101fffff`. The build guard protects both regions.
-Normal persistence still uses the journal at this qualification stage.
+All sixteen persistent units now use littlefs; the legacy region is read-only
+input for a one-time import. Phonebook contacts and ordinary SMS bodies remain
+modem-backed in this stage.
 
 littlefs v2.11.3 is vendored unchanged with its BSD-3-Clause license. Its adapter
 uses static buffers, 4 KiB erase blocks, 256-byte program/cache units, and the
@@ -15,7 +17,9 @@ disabled. Core0 is the sole filesystem owner; no filesystem calls run in IRQs.
 
 `storage_backend.h` exposes opaque semantic records, not filenames or littlefs
 types. Replacements write and close a temporary record before atomic rename.
-Each record has a versioned ID/length/CRC envelope. The adapter remounts after
+Each record has a versioned ID/length/CRC envelope. Every mount completes pending
+littlefs consistency work before exposing reads: an interrupted cross-pair
+rename must not be mistaken for a missing record. The adapter remounts after
 I/O failures before retrying. Only wholly erased media can be autoformatted;
 a corrupt filesystem is never silently replaced with defaults. An interrupted
 initial format that cannot mount requires explicit recovery, not autoformat.
@@ -26,12 +30,32 @@ and reports elapsed time, allocated blocks, and flash-park diagnostics.
 It must not be used during ordinary phone use: it intentionally bypasses the
 normal audio deferral to exercise the flash/DMA handshake.
 
-Host tests exercise torn operations, full media, repeated remounts, allocation
+Host tests interrupt each program/erase boundary before, halfway through, and
+after the media change. They cover inline records, empty records, maximum-sized
+records, grow/shrink replacements, cuts during recovery, and all sixteen legacy
+units during import. Other cases cover full media, repeated remounts, allocation
 churn, transient busy/error recovery, corruption handling, HAL bounds and
 critical-section ordering. Physical power removal remains a separate bench
 test; host interruption tests do not reproduce electrical brownout behavior.
 
-The C firmware uses a Nokia-like local NVM service instead of a filesystem.
+## Migration
+
+On the first boot, the engine loads each legacy unit using its existing codec,
+applies the existing defaults/schema migrations, and writes all sixteen units
+to littlefs. Record `ffff` is a migration-complete marker, published last. A
+reset before that marker repeats the import from the unchanged source. A valid
+marker makes littlefs authoritative permanently: missing or damaged new data
+does not resurrect stale charge latches, SOC anchors, or user settings from
+the old journal. An unreadable/invalid marker fails initialization.
+
+An unused flash range may still contain bytes from an older, larger firmware.
+After installing firmware whose build guard protects this region, provision
+the new region explicitly if needed: erase **only** `0x101c0000..0x101e0000`
+(exclusive end) with the device in BOOTSEL, then boot to format/import. Never
+erase the legacy region as part of this step. Do not boot older firmware after
+migration expecting it to see new settings: it only understands the old store.
+
+The C firmware exposes a typed local NVM service backed by littlefs.
 Phonebook and ordinary SMS contents remain modem-backed, but preferences, profile state,
 clock/alarm preferences, speed dials, call-register lists, T9 learned words,
 saved and pending picture messages, own-tone/composer drafts, call-divert editing
@@ -39,13 +63,14 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
 
 ## Layers
 
-- `nvm_hal`: raw byte backend. The backend is internal RP2354 flash. The HAL
-  interface is generic, but this firmware standardizes on reserved internal
-  flash.
-- `storage_journal`: two-slot journal per storage unit. Writes go to the
-  inactive slot, with CRC validation, so a failed write keeps the previous slot
-  readable.
-- `store_service.c`: journal orchestration, immutable unit registry, commit
+- `nvm_hal`: raw media operations and geometry, with the RP2354 flash safety
+  handshake implemented in `nvm_flash_hal.c`.
+- `storage_lfs`: filesystem/block-device adapter and atomic opaque records.
+- `storage_backend`: record read/write contract and board composition point.
+  It contains no domain schemas. A future FRAM implementation can use this
+  contract without exposing FRAM or filesystem calls to applications/codecs.
+- `storage_journal`: legacy reader used only during import in production.
+- `store_service.c`: record orchestration, immutable unit registry, commit
   scheduling, failure isolation, and diagnostics. It owns the single shared
   payload buffer but no domain state.
 - `store_settings.c` and `store_calls.c`: the keyed settings/default table and
@@ -54,13 +79,13 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
 - `store_t9.c`, `store_pictures.c`, `store_tones.c`, `store_divert.c`,
   `store_warranty.c`, `store_battery_learning.c`, and
   `store_battery_charge_supervisor.c`: one state owner and wire codec per
-  semantic journal unit.
+  semantic persistence unit.
   All domains publish the same typed application API from `store_service.h` and
   register private reset/serialize/apply operations with the engine.
 
 ## Storage Units
 
-Each unit owns two 4 KB journal slots:
+Each unit is one independently replaced record:
 
 - settings: phonebook
 - settings: SMS
@@ -88,21 +113,19 @@ Each unit owns two 4 KB journal slots:
 
 The non-resettable Life timer lives in the settings/calls unit beside the four
 ordinary duration counters. This matches v6.00's call-accounting ownership and
-lets a completed call persist all five values in one journal update.
+lets a completed call persist all five values in one record update.
 
-The internal flash backend reserves 128 KiB at the end of flash. The flash
-layout uses the complete region (16 units x two 4 KiB slots); no unassigned
-journal pair remains. **Build-time guards protect the region:** a post-build check
-(`cmake/check_flash_budget.cmake`) fails the build if code/rodata grows into
-the storage region (last 128 KB), while `_Static_assert`s in `store_service.c`
-pin the reviewed unit count, the 128 KiB requirement and ceiling, and the
-16-bit diagnostic-mask capacity.
+The flash budget guard protects the combined 256 KiB reservation: 128 KiB
+littlefs plus 128 KiB legacy import source. Expanding/reclaiming these regions
+is a separate migration, not part of the current change. The unit-count guard
+preserves the legacy ID/order contract and 16-bit diagnostics mask. Small
+records share filesystem metadata blocks instead of owning 8 KiB sector pairs.
 
 The removed SMS-status journal was unit 14. Removing it did not change the
 index, unit ID, or flash offset of any older live setting, call log, or semantic
 blob. Battery learning later reused that pair with a distinct payload magic, so
 an upgraded phone rejects stale SMS-status bytes before its first learner write.
-The charge supervisor occupies the formerly unassigned unit 15 pair. Its stop
+The charge supervisor retains legacy unit ID 15. Its stop
 latch is read before the first charger-enable output is driven after boot, so a
 reset cannot silently restart a software-terminated charge. Its fixed 128-byte
 `CGS4` payload persists maintenance rearm state, the automatic-rearm loop guard,
@@ -115,7 +138,7 @@ records remain unqualified.
 
 The warranty record's 15-byte serial field is the phone's board identity. On
 erased flash it is blank. The first successful Telit initialization reads
-`AT+CGSN`, accepts only a 15-digit Luhn-valid IMEI, and journals it through the
+`AT+CGSN`, accepts only a 15-digit Luhn-valid IMEI, and persists it through the
 dedicated write-once API. Later boots skip that init query and both `*#06#` and
 the `*#92702689#` Serial No. page read the persisted value; ordinary warranty
 updates cannot replace it. Net Monitor may still query the module identity as
@@ -128,7 +151,7 @@ Firmware predating the calls-domain Life timer stored a donor value at offset
 8 of the warranty payload and deferred its flash write until 30 accumulated
 call minutes. On upgrade, the store seeds the new lifetime counter from the
 largest of the new value, the legacy donor, and the surviving All-calls total.
-The donor slot remains read-only for migration safety because the two journals
+The donor slot remains read-only for migration safety because the two records
 cannot be committed atomically. Clear timers resets Last/All/Received/Dialled
 only; it never resets the service Life timer.
 
@@ -186,7 +209,7 @@ meaning of the important fields:
 - T9 user dictionary mirrors the behavior traced around `0x0751/0x0752`: Spell
   and Insert word promote learned words to the front and persist them.
 - Picture messages follow key `0x0757`'s shared template/saved-picture semantics,
-  expanded from four to seven slots. The same journal also holds two pending
+  expanded from four to seven slots. The same record also holds two pending
   receptions. SMS transport encoding remains outside the storage layer; the
   picture store uses the pure decoder to validate/reassemble received content.
 - Own tones mirror key `0x0748`: the composer saves a melody (ASCII notes + the

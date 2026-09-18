@@ -229,6 +229,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/storage/nvm_flash_hal.c
     src/storage/storage_journal.c
     src/storage/storage_lfs.c
+    src/storage/storage_backend.c
     third_party/littlefs/lfs.c
     third_party/littlefs/lfs_util.c
     src/storage/store_calls.c
@@ -384,6 +385,17 @@ add_custom_command(TARGET ${SISU_FIRMWARE_TARGET} POST_BUILD
         ${CMAKE_CURRENT_BINARY_DIR}/${SISU_FIRMWARE_TARGET}.stack.txt
     VERBATIM
     COMMENT "Checking core stack budgets")
+
+# Record dispatch and littlefs media callbacks are indirect calls. Bound their
+# entry paths separately, reserving 1 KiB for callers and 512 B for the HAL.
+add_custom_command(TARGET ${SISU_FIRMWARE_TARGET} POST_BUILD
+    COMMAND ${SISU_PYTHON3}
+        ${CMAKE_CURRENT_LIST_DIR}/tools/check_stack_budget.py
+        --input-dir ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${SISU_FIRMWARE_TARGET}.dir
+        --root record-write=record_write --root record-read=record_read
+        --stack-size 4096 --irq-reserve 512 --uncertainty-reserve 1536
+    VERBATIM
+    COMMENT "Checking indirect storage stack budgets")
 
 if(RELEASE)
     add_custom_command(TARGET ${SISU_FIRMWARE_TARGET} POST_BUILD

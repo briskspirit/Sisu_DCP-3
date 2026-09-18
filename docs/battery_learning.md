@@ -36,8 +36,8 @@ the hardware without being misreported to the learner as natural EMPTY.
 - `app_status_runtime`: supplies confirmed charger completion, fuses physical
   endpoint/load evidence with anchored remaining charge, and owns the existing
   notification and shutdown sequence.
-- `store_battery_learning`: fixed versioned wire codec and dedicated two-slot
-  journal unit.
+- `store_battery_learning`: fixed versioned wire codec and independently
+  replaced persistence record.
 - Net Monitor page 47: read-only evidence.
 
 The sidecar is called from the existing battery poll. It adds no timer and no
@@ -365,13 +365,10 @@ refused.
 
 ## Persistence
 
-`STORE_UNIT_BATTERY_LEARNING` remains unit 14, after every older live store
-unit, so no live unit ID or offset moved. It deliberately reused the retired
-SMS-status pair; its distinct payload magic rejects those stale records before
-the first learner write replaces them. The charge-supervisor transition record
-now occupies the previously unassigned unit 15 pair. Together the sixteen units
-reserve the complete 128 KiB partition. A seventeenth unit requires a reviewed
-layout change, not another enum append.
+`STORE_UNIT_BATTERY_LEARNING` remains unit 14 and the charge supervisor unit 15.
+Both are opaque records on littlefs, with unchanged payload schemas. The old
+two-slot units are read once during migration and then left untouched. See
+[Storage engine](storage_engine.md) for the layout and migration authority.
 
 The current `BTL2` payload is exactly 96 bytes, little-endian, and contains
 magic, version, profile ID, flags, capacity history/counters, three resistance
@@ -379,8 +376,8 @@ bins/counters, pack generation, full-anchor evidence, the natural-EMPTY marker,
 and the SOC origin/capacity/factor/provenance/confidence fields. The decoder
 still accepts the deployed 64-byte `BTL1` record. A qualified BTL1 full anchor
 migrates exactly; no provisional SOC is invented during migration. The generic
-journal adds sequence, length, and CRC and writes the inactive slot before
-replacing the old copy.
+record layer adds ID, version, length, and CRC, syncs a replacement file and
+atomically renames it over the previous record.
 
 Writes are requested only for rare semantic changes:
 

@@ -24,4 +24,7 @@ struct storage_backend {
                                      const uint8_t *src, size_t len);
 };
 
+/* Board composition point. Domain owners never select media themselves. */
+storage_record_result_t storage_backend_open(storage_backend_t *backend);
+
 #endif

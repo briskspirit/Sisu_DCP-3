@@ -7,7 +7,7 @@
 #include <string.h>
 
 #include "storage/store_service.h"
-#include "storage/storage_journal.h"
+#include "storage/storage_backend.h"
 
 #define STORE_PAYLOAD_VERSION 1u
 
@@ -70,7 +70,8 @@ extern const store_unit_ops_t g_store_battery_charge_supervisor_unit_ops;
 const store_unit_binding_t *store_engine_unit_binding(store_unit_t unit);
 store_commit_result_t store_engine_commit_binding(
     const store_unit_binding_t *binding,
-    storage_journal_t *journal,
+    storage_backend_t *backend,
+    uint16_t id,
     uint8_t *payload,
     size_t payload_cap);
 store_status_t store_engine_mark_dirty(store_unit_t unit);

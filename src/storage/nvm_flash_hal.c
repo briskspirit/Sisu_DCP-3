@@ -60,8 +60,8 @@ static int nvm_safe_exec(void (*fn)(void *), void *op) {
          * every tick, and retrying FOREVER pins core0 at ~100 ms/tick -- this was the
          * back half of the remote-hangup freeze (the bounded DMA-abort in the I2S
          * HALs is the front half). Bounded here too: after a streak of failures,
-         * reboot instead of live-locking. The dual-slot CRC journal recovers the last
-         * consistent state, so an uncommitted unit is simply lost, not corrupted. */
+         * reboot instead of live-locking. Transaction recovery belongs to the
+         * storage backend; this HAL must not proceed without the park handshake. */
         if (++s_park_fail_streak >= NVM_FLASH_PARK_FAIL_REBOOT) {
             watchdog_reboot(0, 0, 0);
         }

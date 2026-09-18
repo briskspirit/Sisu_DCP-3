@@ -97,6 +97,17 @@ static storage_record_result_t result_for(record_fs_t *fs, int result) {
     return fs->io_busy ? STORAGE_RECORD_BUSY : STORAGE_RECORD_ERROR;
 }
 
+static int mount_consistent(record_fs_t *fs) {
+    int rc = lfs_mount(&fs->fs, &fs->cfg);
+    if (rc != 0) {
+        return rc;
+    }
+    fs->mounted = true;
+    /* Finish interrupted moves before any read can be interpreted as a missing
+     * record. Mount alone defers this recovery until the first writable open. */
+    return lfs_fs_mkconsistent(&fs->fs);
+}
+
 static int prepare(record_fs_t *fs) {
     fs->io_busy = false;
     if (!fs->mounted && !fs->needs_remount) {
@@ -107,12 +118,11 @@ static int prepare(record_fs_t *fs) {
             lfs_unmount(&fs->fs);
         }
         fs->mounted = false;
-        int rc = lfs_mount(&fs->fs, &fs->cfg);
+        int rc = mount_consistent(fs);
         if (rc != 0) {
             /* Keep retrying a failed remount on the next operation. */
             return rc;
         }
-        fs->mounted = true;
         fs->needs_remount = false;
     }
     return 0;
@@ -231,8 +241,8 @@ storage_record_result_t storage_lfs_init(storage_backend_t *backend, nvm_hal_t *
         .lookahead_buffer = fs->lookahead, .name_max = 16u,
         .file_max = STORAGE_RECORD_MAX_PAYLOAD + RECORD_HEADER,
     };
-    int rc = lfs_mount(&fs->fs, &fs->cfg);
-    if (rc == LFS_ERR_CORRUPT) {
+    int rc = mount_consistent(fs);
+    if (rc == LFS_ERR_CORRUPT && !fs->mounted) {
         /* Never turn mount failure into silent data loss. First-use formatting
          * requires proof that the ENTIRE dedicated region is erased. */
         for (uint32_t off = 0; off < hal->capacity; off += CACHE_SIZE) {
@@ -247,7 +257,7 @@ storage_record_result_t storage_lfs_init(storage_backend_t *backend, nvm_hal_t *
         }
         rc = lfs_format(&fs->fs, &fs->cfg);
         if (rc == 0) {
-            rc = lfs_mount(&fs->fs, &fs->cfg);
+            rc = mount_consistent(fs);
         }
     }
     if (rc != 0) {

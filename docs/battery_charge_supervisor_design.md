@@ -471,8 +471,9 @@ successful discharge capacity alone cannot prove the pack was not overcharged.
 
 ## Persistence
 
-The dedicated `STORE_UNIT_BATTERY_CHARGE_SUPERVISOR` is the sixteenth and final
-unit in the current 128 KiB NVM layout. Store-size assertions pin that layout.
+The dedicated `STORE_UNIT_BATTERY_CHARGE_SUPERVISOR` retains unit ID 15 and is
+an independently replaced littlefs record. The old journal is read only for
+the one-time import described in [Storage engine](storage_engine.md).
 The payload is versioned and explicitly encoded; no C struct is an on-flash ABI.
 
 The supervisor persists only transitions and configuration:

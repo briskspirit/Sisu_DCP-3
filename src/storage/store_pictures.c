@@ -13,8 +13,8 @@
 #define PICTURE_SLOT_BYTES (6u + STORE_PICTURE_BITMAP_BYTES + STORE_PICTURE_TEXT_MAX + 1u)
 #define PICTURE_PENDING_BYTES (22u + MODEM_SMS_SENDER_MAX + 1u + MODEM_SMS_TIMESTAMP_MAX + 1u + MODEM_SMS_BINARY_MAX)
 #define PICTURE_PAYLOAD_BYTES (12u + STORE_PICTURE_SLOT_COUNT * (PICTURE_SLOT_BYTES + MODEM_SMS_SENDER_MAX + 1u) + STORE_PICTURE_PENDING_COUNT * PICTURE_PENDING_BYTES)
-_Static_assert(PICTURE_PAYLOAD_BYTES <= STORAGE_JOURNAL_MAX_PAYLOAD,
-               "pictures and pending receptions must fit one journal payload");
+_Static_assert(PICTURE_PAYLOAD_BYTES <= STORAGE_RECORD_MAX_PAYLOAD,
+               "pictures and pending receptions must fit one record payload");
 
 typedef struct {
     uint32_t id;

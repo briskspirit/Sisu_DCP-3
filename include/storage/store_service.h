@@ -47,7 +47,7 @@ typedef enum {
     STORE_STATUS_CONFLICT,
 } store_status_t;
 
-/* Independently journaled persistence units. Exposed so diagnostics can name
+/* Independently committed persistence units. Exposed so diagnostics can name
  * the exact unit that is dirty or failing without knowing store internals. */
 typedef enum {
     STORE_UNIT_SETTINGS_PHONEBOOK = 0,

@@ -14,12 +14,15 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <assert.h>
+#include <setjmp.h>
 
 #include "services/backlight_service.h"
 #include "services/lcd_calibration.h"
 #include "storage/nvm_hal.h"
 #include "storage/store_service.h"
 #include "storage/storage_journal.h" /* STORAGE_JOURNAL_SLOT_SIZE for the poison window */
+#include "storage/storage_lfs.h"
 #include "storage/store_service_internal.h"
 
 /* --------------------------------------------------------------------------
@@ -71,6 +74,9 @@ void rtc_alarm_hal_get_datetime(rtc_datetime_t *datetime) {
 
 #define FAKE_NVM_CAPACITY (256u * 1024u)
 static uint8_t s_fake_nvm[FAKE_NVM_CAPACITY];
+static storage_backend_t s_real_backend;
+static jmp_buf s_power_cut;
+static unsigned s_cut_at, s_media_ops, s_cut_mode;
 
 /* Poison window: writes in [s_poison_lo, s_poison_hi) are stored CORRUPTED so the
  * journal verify fails (a degraded sector). s_poison_erases counts commit
@@ -85,7 +91,7 @@ static uint32_t s_fake_busy_ops;
 static bool s_fake_op_busy = false;
 
 static nvm_status_t fake_read(nvm_hal_t *hal, uint32_t offset, void *dst, size_t len) {
-    (void)hal;
+    offset += (uint32_t)(uintptr_t)hal->ctx;
     if ((uint64_t)offset + len > FAKE_NVM_CAPACITY) {
         return NVM_STATUS_OUT_OF_RANGE;
     }
@@ -94,7 +100,7 @@ static nvm_status_t fake_read(nvm_hal_t *hal, uint32_t offset, void *dst, size_t
 }
 
 static nvm_status_t fake_erase(nvm_hal_t *hal, uint32_t offset, size_t len) {
-    (void)hal;
+    offset += (uint32_t)(uintptr_t)hal->ctx;
     if ((uint64_t)offset + len > FAKE_NVM_CAPACITY) {
         return NVM_STATUS_OUT_OF_RANGE;
     }
@@ -105,12 +111,18 @@ static nvm_status_t fake_erase(nvm_hal_t *hal, uint32_t offset, size_t len) {
     if (s_poison_hi > s_poison_lo && offset >= s_poison_lo && offset < s_poison_hi) {
         s_poison_erases++;
     }
-    memset(&s_fake_nvm[offset], 0xff, len);
+    s_media_ops++;
+    bool cut = s_cut_at != 0 && s_media_ops == s_cut_at;
+    size_t changed = cut ? (s_cut_mode == 0 ? 0 : s_cut_mode == 1 ? len / 2 : len) : len;
+    memset(&s_fake_nvm[offset], 0xff, changed);
+    if (cut) {
+        longjmp(s_power_cut, 1);
+    }
     return NVM_STATUS_OK;
 }
 
 static nvm_status_t fake_write(nvm_hal_t *hal, uint32_t offset, const void *src, size_t len) {
-    (void)hal;
+    offset += (uint32_t)(uintptr_t)hal->ctx;
     if ((uint64_t)offset + len > FAKE_NVM_CAPACITY) {
         return NVM_STATUS_OUT_OF_RANGE;
     }
@@ -125,7 +137,16 @@ static nvm_status_t fake_write(nvm_hal_t *hal, uint32_t offset, const void *src,
         s_poison_writes++;
         return NVM_STATUS_OK; /* HAL "succeeds"; the journal's own verify catches it */
     }
-    memcpy(&s_fake_nvm[offset], src, len);
+    s_media_ops++;
+    bool cut = s_cut_at != 0 && s_media_ops == s_cut_at;
+    size_t changed = cut ? (s_cut_mode == 0 ? 0 : s_cut_mode == 1 ? len / 2 : len) : len;
+    for (size_t i = 0; i < changed; i++) {
+        assert((s_fake_nvm[offset + i] & ((const uint8_t *)src)[i]) == ((const uint8_t *)src)[i]);
+        s_fake_nvm[offset + i] &= ((const uint8_t *)src)[i];
+    }
+    if (cut) {
+        longjmp(s_power_cut, 1);
+    }
     return NVM_STATUS_OK;
 }
 
@@ -142,7 +163,7 @@ nvm_status_t nvm_flash_hal_init(nvm_hal_t *hal) {
     }
     hal->name = "fake-ram";
     hal->ctx = 0;
-    hal->capacity = FAKE_NVM_CAPACITY;
+    hal->capacity = FAKE_NVM_CAPACITY / 2u;
     hal->erase_block = 4096u;
     hal->write_block = 256u;
     hal->erase_required = true;
@@ -150,6 +171,37 @@ nvm_status_t nvm_flash_hal_init(nvm_hal_t *hal) {
     hal->erase = fake_erase;
     hal->write = fake_write;
     return NVM_STATUS_OK;
+}
+
+/* Inject a failing semantic record to test scheduler isolation. Physical
+ * torn-program and corrupt-media behavior is covered by test_storage_lfs. */
+static storage_record_result_t fault_write(storage_backend_t *backend, uint16_t id,
+                                            const uint8_t *src, size_t len) {
+    uint32_t logical_offset = (uint32_t)(id - 0x3210u) * 8192u;
+    if (s_poison_hi > s_poison_lo && logical_offset >= s_poison_lo &&
+        logical_offset < s_poison_hi) {
+        if (s_fake_op_busy) {
+            s_fake_busy_ops++;
+            return STORAGE_RECORD_BUSY;
+        }
+        s_poison_erases++;
+        return STORAGE_RECORD_ERROR;
+    }
+    return s_real_backend.write(backend, id, src, len);
+}
+
+storage_record_result_t storage_backend_open(storage_backend_t *backend) {
+    static nvm_hal_t hal;
+    if (nvm_flash_hal_init(&hal) != NVM_STATUS_OK) {
+        return STORAGE_RECORD_ERROR;
+    }
+    hal.ctx = (void *)(uintptr_t)(FAKE_NVM_CAPACITY / 2u);
+    storage_record_result_t result = storage_lfs_init(&s_real_backend, &hal);
+    if (result == STORAGE_RECORD_OK) {
+        *backend = s_real_backend;
+        backend->write = fault_write;
+    }
+    return result;
 }
 
 /* --------------------------------------------------------------------------
@@ -196,21 +248,16 @@ static bool open_unit_journal(store_unit_t unit,
 static bool write_unit_fixture(store_unit_t unit,
                                const uint8_t *payload,
                                size_t payload_len) {
-    nvm_hal_t hal;
-    storage_journal_t journal;
-    return open_unit_journal(unit, &hal, &journal) &&
-           storage_journal_write(&journal, payload, payload_len);
+    return s_real_backend.write(&s_real_backend, (uint16_t)(0x3210u + unit),
+                                 payload, payload_len) == STORAGE_RECORD_OK;
 }
 
 static bool read_unit_payload(store_unit_t unit,
                               uint8_t *payload,
                               size_t payload_cap,
                               size_t *payload_len) {
-    nvm_hal_t hal;
-    storage_journal_t journal;
-    return open_unit_journal(unit, &hal, &journal) &&
-           storage_journal_read_latest(&journal, payload, payload_cap,
-                                       payload_len, 0);
+    return s_real_backend.read(&s_real_backend, (uint16_t)(0x3210u + unit),
+                                payload, payload_cap, payload_len) == STORAGE_RECORD_OK;
 }
 
 static uint64_t fnv1a64(const uint8_t *data, size_t len) {
@@ -1221,8 +1268,6 @@ static void test_call_divert(void) {
 }
 
 static void write_legacy_warranty_fixture(void) {
-    nvm_hal_t hal;
-    storage_journal_t journal;
     uint8_t payload[47];
     memset(payload, 0, sizeof(payload));
 
@@ -1246,16 +1291,7 @@ static void write_legacy_warranty_fixture(void) {
     payload[41] = 4u;
     memcpy(&payload[42], "0626", 4u);
 
-    assert_true(nvm_flash_hal_init(&hal) == NVM_STATUS_OK,
-                "legacy warranty fixture gets NVM");
-    uint32_t base = (uint32_t)STORE_UNIT_SERVICE_WARRANTY * 2u *
-                    STORAGE_JOURNAL_SLOT_SIZE;
-    assert_true(storage_journal_init(
-                    &journal, &hal,
-                    (uint16_t)(0x3210u + STORE_UNIT_SERVICE_WARRANTY), base,
-                    STORAGE_JOURNAL_SLOT_SIZE),
-                "legacy warranty fixture initializes journal");
-    assert_true(storage_journal_write(&journal, payload, sizeof(payload)),
+    assert_true(write_unit_fixture(STORE_UNIT_SERVICE_WARRANTY, payload, sizeof(payload)),
                 "legacy warranty fixture writes v1 payload");
 }
 
@@ -2206,6 +2242,76 @@ static void test_persistent_wire_contract(void) {
     }
 }
 
+static void verify_migrated_wire(void) {
+    uint8_t payload[STORAGE_RECORD_MAX_PAYLOAD];
+    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+        size_t len = 0;
+        assert(read_unit_payload(unit, payload, sizeof(payload), &len));
+        assert(len == WIRE_EXPECTED[unit].length);
+        assert(fnv1a64(payload, len) == WIRE_EXPECTED[unit].fnv64);
+    }
+}
+
+static void test_legacy_import_power_cuts(void) {
+    static uint8_t snapshot[FAKE_NVM_CAPACITY];
+    uint8_t payload[STORAGE_RECORD_MAX_PAYLOAD];
+    fresh_store();
+    populate_wire_fixture();
+    flush_commits();
+    /* Generate a deployed A/B image from independently pinned wire fixtures. */
+    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+        size_t len = 0;
+        nvm_hal_t hal;
+        storage_journal_t journal;
+        assert(read_unit_payload(unit, payload, sizeof(payload), &len));
+        assert(open_unit_journal(unit, &hal, &journal));
+        assert(storage_journal_write(&journal, payload, len));
+    }
+    storage_lfs_deinit();
+    memset(s_fake_nvm + FAKE_NVM_CAPACITY / 2u, 0xff, FAKE_NVM_CAPACITY / 2u);
+    storage_backend_t backend;
+    assert(storage_backend_open(&backend) == STORAGE_RECORD_OK);
+    memcpy(snapshot, s_fake_nvm, sizeof(snapshot));
+    s_media_ops = 0;
+    assert(store_service_init() == STORE_STATUS_OK);
+    unsigned operation_count = s_media_ops;
+    verify_migrated_wire();
+    assert(operation_count > 0);
+    for (unsigned point = 1; point <= operation_count; point++) {
+        for (unsigned mode = 0; mode < 3; mode++) {
+            storage_lfs_deinit();
+            memcpy(s_fake_nvm, snapshot, sizeof(snapshot));
+            s_media_ops = 0;
+            s_cut_at = point;
+            s_cut_mode = mode;
+            if (setjmp(s_power_cut) == 0) {
+                store_service_init();
+                assert(!"migration cut must execute");
+            }
+            s_cut_at = 0;
+            assert(memcmp(s_fake_nvm, snapshot, FAKE_NVM_CAPACITY / 2u) == 0);
+            assert(store_service_init() == STORE_STATUS_OK);
+            verify_migrated_wire();
+            assert(store_service_init() == STORE_STATUS_OK);
+            verify_migrated_wire();
+        }
+    }
+    /* Once authority moved, old media cannot undo new user settings. */
+    assert(store_setting_set_u8(STORE_SETTING_SMS_VALIDITY, 1u) == STORE_STATUS_OK);
+    assert(store_service_flush_all());
+    assert(store_service_init() == STORE_STATUS_OK);
+    uint8_t validity;
+    assert(store_setting_get_u8(STORE_SETTING_SMS_VALIDITY, &validity) == STORE_STATUS_OK);
+    assert(validity == 1u);
+    assert(memcmp(s_fake_nvm, snapshot, FAKE_NVM_CAPACITY / 2u) == 0);
+    const uint8_t bad_marker[] = {'B', 'A', 'D'};
+    assert(s_real_backend.write(&s_real_backend, 0xffffu, bad_marker, sizeof(bad_marker)) == STORAGE_RECORD_OK);
+    assert(store_service_init() == STORE_STATUS_STORAGE_ERROR);
+    assert(!store_service_ready());
+    printf("legacy import: %u operation boundaries x 3 torn-write modes; all 16 wire fixtures preserved\n",
+           operation_count);
+}
+
 static void test_corrupt_picture_payload_uses_seeded_fallback(void) {
     static const uint8_t corrupt_payload[] = {0x50u, 0x49u, 0x43u};
     fresh_store();
@@ -2488,7 +2594,7 @@ static void test_serializer_failure_is_not_stale_busy(void) {
 
     uint8_t payload[16];
     store_commit_result_t result = store_engine_commit_binding(
-        &FAILING_BINDING, &journal, payload, sizeof(payload));
+        &FAILING_BINDING, &s_real_backend, 0x321du, payload, sizeof(payload));
     assert_true(result.status == STORE_STATUS_STORAGE_ERROR,
                 "serializer failure reports storage error");
     assert_true(!result.flash_busy,
@@ -2671,6 +2777,7 @@ static void test_picture_legacy_migration(void) {
 }
 
 int main(void) {
+    test_legacy_import_power_cuts();
     log_set_level(0);
     test_unit_handler_registry();
     test_exact_dirty_unit_mapping();

@@ -86,9 +86,10 @@ also wakes for USB; the release image deliberately does not. Power-off
 progresses from a functional soft-off state into POWMAN P1.7 after all fallible
 shutdown work and wake-source checks complete.
 
-Settings and phone-local records use a CRC-protected two-slot journal in the
-last 128 KiB of internal flash. Phonebook entries and SMS bodies remain
-modem-backed and are read lazily.
+Settings and phone-local records use CRC-protected atomic records on a 128 KiB
+littlefs partition. The previous 128 KiB journal is retained for one-time
+migration. Phonebook entries and SMS bodies remain modem-backed and are read
+lazily. See [Storage engine](docs/storage_engine.md) for the flash layout.
 
 ## License
 
