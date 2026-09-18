@@ -35,6 +35,7 @@
 #include "services/sms_picture_codec.h"
 #include "services/board_diag_service.h"
 #include "storage/store_service.h"
+#include "storage/storage_lfs.h"
 #include "services/timebase.h"
 #include "services/usb_service.h"
 #include "pico/stdio.h"
@@ -233,6 +234,41 @@ static void handle_line(app_t *app, char *line) {
         command_status();
     } else if (strcmp(cmd, "hw") == 0) {
         command_hw(app);
+    } else if (strcmp(cmd, "storetest") == 0) {
+        char *confirm = next_token(&cursor);
+        if (confirm == NULL || strcmp(confirm, "confirm") != 0 || next_token(&cursor) != NULL) {
+            printf("[storetest] usage: storetest confirm (writes only scratch record fffe)\n");
+            return;
+        }
+        static nvm_hal_t test_hal;
+        static storage_backend_t test_backend;
+        static uint8_t test_data[STORAGE_RECORD_MAX_PAYLOAD];
+        static uint8_t test_read[STORAGE_RECORD_MAX_PAYLOAD];
+        static core1_services_diag_t before, after;
+        core1_services_get_diag(&before);
+        bool ok = nvm_record_flash_hal_init(&test_hal) == NVM_STATUS_OK &&
+                  storage_lfs_init(&test_backend, &test_hal) == STORAGE_RECORD_OK;
+        unsigned completed = 0;
+        uint32_t started = time_ms();
+        for (unsigned pass = 0; ok && pass < 8u; pass++) {
+            for (size_t i = 0; i < sizeof(test_data); i++) {
+                test_data[i] = (uint8_t)(i * 17u + pass + started);
+            }
+            size_t len = 0;
+            ok = test_backend.write(&test_backend, 0xfffeu, test_data, sizeof(test_data)) == STORAGE_RECORD_OK &&
+                 storage_lfs_init(&test_backend, &test_hal) == STORAGE_RECORD_OK &&
+                 test_backend.read(&test_backend, 0xfffeu, test_read, sizeof(test_read), &len) == STORAGE_RECORD_OK &&
+                 len == sizeof(test_data) && memcmp(test_data, test_read, len) == 0;
+            completed += ok;
+        }
+        core1_services_get_diag(&after);
+        printf("[storetest] ok=%u replacements/remounts=%u ms=%lu blocks=%ld park=%lu timeout=%lu resume_timeout=%lu flags=%02lx\n",
+               ok, completed, (unsigned long)(time_ms() - started),
+               (long)storage_lfs_used_blocks(),
+               (unsigned long)(after.flash_pause_successes - before.flash_pause_successes),
+               (unsigned long)(after.flash_pause_timeouts - before.flash_pause_timeouts),
+               (unsigned long)(after.flash_resume_timeouts - before.flash_resume_timeouts),
+               (unsigned long)after.flash_park_last_flags);
     } else if (strcmp(cmd, "wake") == 0) {
         command_wake();
     } else if (strcmp(cmd, "wdhang") == 0) {
@@ -629,6 +665,7 @@ static void print_help(void) {
     printf("[debug]   status\n");
     printf("[debug]   hw                        ; battery/charger/headset snapshot\n");
     printf("[debug]   wake                      ; last-boot wake evidence + scratch probe\n");
+    printf("[debug]   storetest confirm         ; littlefs scratch-record replacement/remount test\n");
     printf("[debug]   wdhang <main|flash> confirm ; intentional watchdog reset test\n");
     printf("[debug]   clocks                    ; clock freqs + wake/sleep/enabled gate masks\n");
     printf("[debug]   ltcalert                  ; force one LTC voltage threshold alert\n");

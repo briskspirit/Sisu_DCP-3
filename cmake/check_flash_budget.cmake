@@ -9,7 +9,7 @@
 
 set(XIP_BASE 0x10000000)
 set(PICO_FLASH_SIZE 0x200000)   # 2 MiB (RP2354B stacked flash)
-set(NVM_RESERVED  0x20000)      # 128 KiB storage region
+set(NVM_RESERVED  0x40000)      # 128 KiB littlefs + 128 KiB legacy journal
 
 math(EXPR STORAGE_START "${XIP_BASE} + ${PICO_FLASH_SIZE} - ${NVM_RESERVED}" OUTPUT_FORMAT HEXADECIMAL)
 

@@ -1,5 +1,36 @@
 # Storage Engine
 
+## littlefs Qualification Region
+
+The 128 KiB immediately below the deployed journal (`0x101c0000` through
+`0x101dffff`) is reserved for littlefs qualification. The legacy journal stays
+at `0x101e0000` through `0x101fffff`. The build guard protects both regions.
+Normal persistence still uses the journal at this qualification stage.
+
+littlefs v2.11.3 is vendored unchanged with its BSD-3-Clause license. Its adapter
+uses static buffers, 4 KiB erase blocks, 256-byte program/cache units, and the
+same HAL core1/DMA park, IRQ masking, and watchdog leases as journal commits.
+Programming stages each page in RAM; no caller's XIP buffer is read with XIP
+disabled. Core0 is the sole filesystem owner; no filesystem calls run in IRQs.
+
+`storage_backend.h` exposes opaque semantic records, not filenames or littlefs
+types. Replacements write and close a temporary record before atomic rename.
+Each record has a versioned ID/length/CRC envelope. The adapter remounts after
+I/O failures before retrying. Only wholly erased media can be autoformatted;
+a corrupt filesystem is never silently replaced with defaults. An interrupted
+initial format that cannot mount requires explicit recovery, not autoformat.
+
+The service-console command `storetest confirm` writes only reserved scratch
+record `fffe`, performs eight maximum-sized replacements and remount/readbacks,
+and reports elapsed time, allocated blocks, and flash-park diagnostics.
+It must not be used during ordinary phone use: it intentionally bypasses the
+normal audio deferral to exercise the flash/DMA handshake.
+
+Host tests exercise torn operations, full media, repeated remounts, allocation
+churn, transient busy/error recovery, corruption handling, HAL bounds and
+critical-section ordering. Physical power removal remains a separate bench
+test; host interruption tests do not reproduce electrical brownout behavior.
+
 The C firmware uses a Nokia-like local NVM service instead of a filesystem.
 Phonebook and ordinary SMS contents remain modem-backed, but preferences, profile state,
 clock/alarm preferences, speed dials, call-register lists, T9 learned words,

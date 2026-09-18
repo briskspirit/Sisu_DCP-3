@@ -6,6 +6,8 @@ domain under the [Unlicense](COPYING). Contribution terms are in
 
 ## Third-party components
 
+- `third_party/littlefs` - littlefs v2.11.3, BSD-3-Clause. See its retained
+  `LICENSE.md` for the upstream copyright and license terms.
 - `src/audio/audio_i2s.pio` — derived from the MicroPython RP2 `machine.I2S`
   implementation. MIT License, Copyright (c) 2021 Mike Teachman. The MIT
   notice is retained in the file header and applies to that file.

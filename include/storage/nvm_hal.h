@@ -34,5 +34,6 @@ struct nvm_hal {
 };
 
 nvm_status_t nvm_flash_hal_init(nvm_hal_t *hal);
+nvm_status_t nvm_record_flash_hal_init(nvm_hal_t *hal);
 
 #endif

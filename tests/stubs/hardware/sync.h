@@ -10,6 +10,10 @@
 
 #include <stdint.h>
 
+#ifdef TEST_NVM_IRQ_ORDER
+uint32_t save_and_disable_interrupts(void);
+void restore_interrupts(uint32_t state);
+#else
 static inline uint32_t save_and_disable_interrupts(void) {
     return 0u;
 }
@@ -17,5 +21,6 @@ static inline uint32_t save_and_disable_interrupts(void) {
 static inline void restore_interrupts(uint32_t state) {
     (void)state;
 }
+#endif
 
 #endif

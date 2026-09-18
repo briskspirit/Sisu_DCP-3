@@ -228,6 +228,9 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/usb_service.c
     src/storage/nvm_flash_hal.c
     src/storage/storage_journal.c
+    src/storage/storage_lfs.c
+    third_party/littlefs/lfs.c
+    third_party/littlefs/lfs_util.c
     src/storage/store_calls.c
     src/storage/store_battery_learning.c
     src/storage/store_battery_charge_supervisor.c
@@ -270,6 +273,10 @@ add_custom_target(sisu_build_info
 add_dependencies(${SISU_FIRMWARE_TARGET} sisu_build_info)
 
 target_compile_definitions(${SISU_FIRMWARE_TARGET} PRIVATE
+    LFS_NO_MALLOC
+    LFS_NO_DEBUG
+    LFS_NO_WARN
+    LFS_NO_ERROR
     # Hardware-revision name shown on the *#0000# version screen -- a build
     # identity fact beside SISU_BUILD_HASH/DATE, so the app needs no HAL header.
     SISU_HW_REV_NAME="RevB2"
@@ -346,7 +353,12 @@ endif()
 pico_enable_stdio_uart(${SISU_FIRMWARE_TARGET} 0)
 pico_add_extra_outputs(${SISU_FIRMWARE_TARGET})
 
-# Fail the build if code grows into the NVM storage region (last 128 KiB).
+target_include_directories(${SISU_FIRMWARE_TARGET} PRIVATE third_party/littlefs)
+# Upstream's assertion-only helper is unused in NDEBUG builds.
+set_source_files_properties(third_party/littlefs/lfs.c PROPERTIES
+    COMPILE_OPTIONS "-Wno-unused-function")
+
+# Protect both the new littlefs region and the legacy journal (last 256 KiB).
 add_custom_command(TARGET ${SISU_FIRMWARE_TARGET} POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         -DELF=$<TARGET_FILE:${SISU_FIRMWARE_TARGET}>

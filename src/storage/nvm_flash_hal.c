@@ -1,4 +1,5 @@
 #include "storage/nvm_hal.h"
+#include "storage/storage_layout.h"
 
 #include <string.h>
 
@@ -17,16 +18,12 @@
 #define NVM_FLASH_PARK_FAIL_REBOOT 20u
 #endif
 
-#ifndef NVM_FLASH_RESERVED_BYTES
-#define NVM_FLASH_RESERVED_BYTES (128u * 1024u)
-#endif
-
 #if PICO_FLASH_SIZE_BYTES != (2u * 1024u * 1024u)
 #error "Sisu DCP-3 storage expects the RP2354B 2 MB flash map; rebuild with PICO_BOARD=sisu_sse_revb2"
 #endif
 
-#if (NVM_FLASH_RESERVED_BYTES % FLASH_SECTOR_SIZE) != 0
-#error "NVM_FLASH_RESERVED_BYTES must be flash-sector aligned"
+#if (STORAGE_RESERVED_BYTES % FLASH_SECTOR_SIZE) != 0
+#error "Storage must be flash-sector aligned"
 #endif
 
 #include "services/core1_services.h"
@@ -95,18 +92,20 @@ static nvm_status_t flash_write(nvm_hal_t *hal, uint32_t offset, const void *src
 static void flash_op_execute(void *param);
 static bool valid_range(const nvm_hal_t *hal, uint32_t offset, size_t len);
 
-static flash_hal_ctx_t s_flash_ctx;
+static flash_hal_ctx_t s_flash_ctx[2];
 
-nvm_status_t nvm_flash_hal_init(nvm_hal_t *hal) {
-    if (hal == 0 || PICO_FLASH_SIZE_BYTES <= NVM_FLASH_RESERVED_BYTES) {
+static nvm_status_t init_region(nvm_hal_t *hal, unsigned region,
+                                 uint32_t offset, uint32_t capacity) {
+    if (hal == 0 || offset > PICO_FLASH_SIZE_BYTES ||
+        capacity > PICO_FLASH_SIZE_BYTES - offset) {
         return NVM_STATUS_INVALID_ARGUMENT;
     }
     memset(hal, 0, sizeof(*hal));
-    s_flash_ctx.flash_offset = (uint32_t)(PICO_FLASH_SIZE_BYTES - NVM_FLASH_RESERVED_BYTES);
+    s_flash_ctx[region].flash_offset = offset;
 
     hal->name = "internal-flash";
-    hal->ctx = &s_flash_ctx;
-    hal->capacity = (uint32_t)NVM_FLASH_RESERVED_BYTES;
+    hal->ctx = &s_flash_ctx[region];
+    hal->capacity = capacity;
     hal->erase_block = FLASH_SECTOR_SIZE;
     hal->write_block = FLASH_PAGE_SIZE;
     hal->erase_required = true;
@@ -114,6 +113,16 @@ nvm_status_t nvm_flash_hal_init(nvm_hal_t *hal) {
     hal->erase = flash_erase;
     hal->write = flash_write;
     return NVM_STATUS_OK;
+}
+
+nvm_status_t nvm_flash_hal_init(nvm_hal_t *hal) {
+    return init_region(hal, 0u, PICO_FLASH_SIZE_BYTES - STORAGE_LEGACY_BYTES,
+                       STORAGE_LEGACY_BYTES);
+}
+
+nvm_status_t nvm_record_flash_hal_init(nvm_hal_t *hal) {
+    return init_region(hal, 1u, PICO_FLASH_SIZE_BYTES - STORAGE_RESERVED_BYTES,
+                       STORAGE_RECORD_BYTES);
 }
 
 static nvm_status_t flash_read(nvm_hal_t *hal, uint32_t offset, void *dst, size_t len) {
@@ -144,11 +153,16 @@ static nvm_status_t flash_erase(nvm_hal_t *hal, uint32_t offset, size_t len) {
         .kind = FLASH_OP_ERASE,
         .flash_offset = ctx->flash_offset + offset,
         .data = 0,
-        .len = len,
+        .len = FLASH_SECTOR_SIZE,
     };
-    int rc = nvm_safe_exec(flash_op_execute, &op);
-    return rc == PICO_OK ? NVM_STATUS_OK :
-           rc == PICO_ERROR_TIMEOUT ? NVM_STATUS_BUSY : NVM_STATUS_IO_ERROR;
+    for (size_t done = 0; done < len; done += FLASH_SECTOR_SIZE) {
+        op.flash_offset = ctx->flash_offset + offset + (uint32_t)done;
+        int rc = nvm_safe_exec(flash_op_execute, &op);
+        if (rc != PICO_OK) {
+            return rc == PICO_ERROR_TIMEOUT ? NVM_STATUS_BUSY : NVM_STATUS_IO_ERROR;
+        }
+    }
+    return NVM_STATUS_OK;
 }
 
 static nvm_status_t flash_write(nvm_hal_t *hal, uint32_t offset, const void *src, size_t len) {
@@ -162,15 +176,24 @@ static nvm_status_t flash_write(nvm_hal_t *hal, uint32_t offset, const void *src
         return NVM_STATUS_ALIGNMENT;
     }
     const flash_hal_ctx_t *ctx = (const flash_hal_ctx_t *)hal->ctx;
+    /* Never hand an XIP-resident caller buffer to the ROM while XIP is down.
+     * One page per critical section also bounds IRQ/watchdog blackout. */
+    uint8_t page[FLASH_PAGE_SIZE];
     flash_op_t op = {
         .kind = FLASH_OP_PROGRAM,
         .flash_offset = ctx->flash_offset + offset,
-        .data = (const uint8_t *)src,
-        .len = len,
+        .data = page,
+        .len = sizeof(page),
     };
-    int rc = nvm_safe_exec(flash_op_execute, &op);
-    return rc == PICO_OK ? NVM_STATUS_OK :
-           rc == PICO_ERROR_TIMEOUT ? NVM_STATUS_BUSY : NVM_STATUS_IO_ERROR;
+    for (size_t done = 0; done < len; done += sizeof(page)) {
+        memcpy(page, (const uint8_t *)src + done, sizeof(page));
+        op.flash_offset = ctx->flash_offset + offset + (uint32_t)done;
+        int rc = nvm_safe_exec(flash_op_execute, &op);
+        if (rc != PICO_OK) {
+            return rc == PICO_ERROR_TIMEOUT ? NVM_STATUS_BUSY : NVM_STATUS_IO_ERROR;
+        }
+    }
+    return NVM_STATUS_OK;
 }
 
 static void flash_op_execute(void *param) {
