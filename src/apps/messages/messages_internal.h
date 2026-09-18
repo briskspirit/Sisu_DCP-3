@@ -17,6 +17,7 @@ void messages_picture_draw_received_preview(framebuffer_t *fb,
                                             const store_picture_message_t *picture);
 bool messages_picture_handle_key(app_t *app, uint16_t key, uint32_t now);
 bool messages_picture_poll_send(app_t *app, uint32_t now);
+bool messages_picture_poll_storage(app_t *app, uint32_t now);
 void messages_picture_save_received(app_t *app,
                                     const store_picture_message_t *picture,
                                     uint32_t now);

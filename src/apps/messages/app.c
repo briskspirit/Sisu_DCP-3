@@ -752,6 +752,37 @@ bool poll_sms(app_t *app, uint32_t now) {
     bool changed = false;
     modem_status_t status;
     modem_service_get_status(&status);
+    store_status_t picture_store = store_picture_commit_status();
+    bool picture_failed = picture_store == STORE_STATUS_STORAGE_ERROR;
+    if (picture_failed && !app->picture_storage_failed) app->picture_storage_warning = true;
+    app->picture_storage_failed = picture_failed;
+    if (picture_store == STORE_STATUS_OK && app->route != APP_ROUTE_POWER_OFF &&
+        app->route != APP_ROUTE_POWERUP) {
+        uint32_t picture_id = store_picture_pending_first();
+        if (picture_id != 0u && picture_id != app->picture_last_notice_id) {
+            app->picture_last_notice_id = picture_id;
+            app->picture_notice_id = picture_id;
+            play_message_alert(app, &status, now);
+            changed = true;
+        } else if (picture_id == 0u && app->picture_notice_id != 0u) {
+            app->picture_notice_id = 0u;
+            changed = true;
+        }
+    }
+    changed |= messages_picture_poll_storage(app, now);
+    if (status.picture_receive_errors != app->picture_receive_errors_seen) {
+        app->picture_receive_warning |= status.picture_receive_errors > app->picture_receive_errors_seen;
+        app->picture_receive_errors_seen = status.picture_receive_errors;
+    }
+    if ((app->picture_receive_warning || app->picture_storage_warning) && app->route == APP_ROUTE_STANDBY &&
+        app->input_len == 0u && !app->keyguard_locked) {
+        app->picture_receive_warning = false;
+        open_display_sid(app, 0u, app->picture_storage_warning ? 0x3b3u : 0x210u,
+                         app->picture_storage_warning ? "Not\nsaved" : "Not\ndone",
+                         APP_ROUTE_STANDBY, now);
+        app->picture_storage_warning = false;
+        changed = true;
+    }
     if (status.sms_received_count < app->last_modem_sms_received_count) {
         /* modem_status_t is reset when the module powers down while app_t stays
          * alive in soft-off. Rebase the monotonic service epoch before starting

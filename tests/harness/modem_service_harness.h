@@ -356,6 +356,15 @@ static char s_mh_board_imei[STORE_WARRANTY_SERIAL_MAX + 1u];
 static const char *s_mh_cgsn_response;
 static size_t s_mh_recovery_store_tx_count;
 bool store_service_ready(void) { return s_mh_store_ready; }
+static unsigned s_mh_picture_parts;
+store_status_t store_picture_receive_pdu(const char *pdu, uint32_t now_ms) {
+    (void)now_ms;
+    sms_codec_message_t part;
+    if (!sms_pdu_decode(pdu, &part) || !part.has_ports ||
+        part.dest_port != SMS_CODEC_PICTURE_PORT) return STORE_STATUS_NOT_FOUND;
+    s_mh_picture_parts++;
+    return STORE_STATUS_OK;
+}
 bool store_service_flush_all(void) {
     if (!s_mh_store_flush_ok) return false;
     if (!s_mh_store_flush_leaves_dirty) s_mh_store_dirty = false;

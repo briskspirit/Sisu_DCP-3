@@ -61,6 +61,10 @@ void start_sms_send(app_t *app,
                     uint32_t now);
 void messages_submit_picture_recipient(app_t *app, uint32_t now);
 void messages_cancel_picture_recipient(app_t *app, uint32_t now);
+bool messages_picture_open_received(app_t *app, uint32_t now);
+void messages_picture_ask_save(app_t *app);
+void messages_picture_confirm_save(app_t *app, bool save, uint32_t now);
+void messages_picture_draw_notice(framebuffer_t *fb);
 bool sms_t9_insert_text(app_t *app, const char *text, bool replace_active, bool add_user_word);
 
 #endif

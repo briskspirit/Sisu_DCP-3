@@ -84,6 +84,7 @@ static const display_record_meta_t DISPLAY_RECORDS[] = {
     {31u, DISPLAY_TEXT_WIN12, DISPLAY_GFX_NONE,                 DISPLAY_TONE_SILENT,  0u,  0u},
     {32u, DISPLAY_TEXT_WIN13, DISPLAY_GFX_NONE,                 DISPLAY_TONE_SILENT,  0u,  0u},
     {35u, DISPLAY_TEXT_PROGRESS, DISPLAY_GFX_ANIM_STRIPE,       DISPLAY_TONE_SILENT,  0u,  0u},
+    {36u, DISPLAY_TEXT_PROGRESS, DISPLAY_GFX_ANIM_STRIPE,       DISPLAY_TONE_SILENT,  0u,  0u},
     {CALL_DIVERT_REQUEST_RECORD_ID,
           DISPLAY_TEXT_PROGRESS, DISPLAY_GFX_ANIM_STRIPE,       DISPLAY_TONE_SILENT,  0u,  0u},
     {42u, DISPLAY_TEXT_WIN12, DISPLAY_GFX_BITMAP,               DISPLAY_TONE_SILENT,  49u, 1536u},
@@ -245,19 +246,20 @@ void render_display_message(const app_t *app, framebuffer_t *fb) {
         fb_bitmap(fb, bitmap, 62, 0, true, true);
     }
     const font_t *font = asset_font(FONT_FS0);
-    /* Window 12 is the full-width box (RE: x0 y0 w84 h48); the graphic is a
-     * SEPARATE right/top-aligned overlay (window 3, a 22x26 bitmap at x62 y0),
-     * not a width reservation, and the ROM's text renderer wraps to the full
-     * 84 px. So we do too: the old 61 px cap was a clone-only narrowing that
-     * force-split short notes the original keeps on one line AND clipped the
-     * RUSS "Clock hidden" (0x249) 3rd line ("на дисплее") into a dropped 4th
-     * row. A long single line may tuck a pixel under the icon exactly as the
-     * original does; a 3rd line (y29) clears the 26 px-tall graphic entirely. */
-    int text_width = FB_WIDTH;
+    /* ROM 0x22e6cc narrows each text row against neighboring graphic bounds
+     * (0x22ea62..0x22eaee). Rows below the graphic regain the full width. */
+    int widths[3] = {FB_WIDTH, FB_WIDTH, FB_WIDTH};
+    const bitmap_t *graphic = bitmap != 0u ? asset_bitmap(bitmap) : NULL;
+    for (uint8_t i = 0u; i < 3u; i++) {
+        if (graphic != NULL && 3 + i * 13 < graphic->height) {
+            widths[i] = 62;
+        }
+    }
     char lines[3][32];
-    uint8_t count = wrap_text_lines_ex(font, app->display_text, text_width, (char *)lines, 32u, 3u);
+    uint8_t count = wrap_text_lines_widths(font, app->display_text, widths,
+                                         (char *)lines, 32u, 3u);
     for (uint8_t i = 0; i < count; i++) {
-        fb_text(fb, font, lines[i], 0, 3 + i * 13, true, text_width);
+        fb_text(fb, font, lines[i], 0, 3 + i * 13, true, widths[i]);
     }
 }
 
@@ -714,6 +716,12 @@ bool handle_editor_key(app_t *app, uint16_t key, event_type_t event_type, uint32
 }
 
 bool handle_confirm_key(app_t *app, uint16_t key, uint32_t now) {
+    if (app->confirm_context == CONFIRM_CONTEXT_PICTURE_MESSAGE_SAVE_FIRST) {
+        if (key == KEY_C || key == KEY_NAVI) {
+            messages_picture_confirm_save(app, key == KEY_NAVI, now);
+        }
+        return true;
+    }
     if (key == KEY_C) {
         if (app->confirm_context == CONFIRM_CONTEXT_PHONEBOOK_ERASE) {
             app->route = APP_ROUTE_PHONEBOOK_LIST;
@@ -766,7 +774,7 @@ bool handle_confirm_key(app_t *app, uint16_t key, uint32_t now) {
         app->messages_kind = MESSAGES_KIND_PICTURES;
         app->messages_mode = MESSAGES_MODE_LIST;
         app->confirm_context = CONFIRM_CONTEXT_NONE;
-        open_display_sid(app, 3u, 0x172u, "Picture message erased", APP_ROUTE_MESSAGES_LIST, now);
+        open_display_sid(app, 6u, 0x172u, "Picture message erased", APP_ROUTE_MESSAGES_LIST, now);
     } else if (app->confirm_context == CONFIRM_CONTEXT_TONES_RINGING_VOLUME) {
         tones_confirm_ringing_volume(app, true, now);
     }

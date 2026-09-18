@@ -504,7 +504,8 @@ static bool telit_sms_response(const char *command) {
         }
         return true;
     }
-    if (strcmp(command, "AT+CMGF=1") == 0) {
+    if (strcmp(command, "AT+CMGF=1") == 0 ||
+        strcmp(command, "AT+CMGF=1;+CSMP=17,167,0,0") == 0) {
         if (s_sms_cmgf_text_error_budget != 0u) {
             s_sms_cmgf_text_error_budget--;
             s_mh_final = MH_FINAL_ERROR;
@@ -3064,7 +3065,7 @@ static void test_sms_binary_send_contract(void) {
         .number = number,
         .payload = payload,
         .payload_len = sizeof(payload),
-        .dest_port = 0x158au,
+        .dest_port = 0x1234u,
         .source_port = 0u,
         .mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
         .segment = 1u,
@@ -3078,7 +3079,7 @@ static void test_sms_binary_send_contract(void) {
           "one-segment binary golden builds independently");
     uint32_t sent_before = mh_status().sms_sent_count;
     check(modem_service_request_send_binary_sms(
-              number, payload, sizeof(payload), 0x158au, 0u),
+              number, payload, sizeof(payload), 0x1234u, 0u),
           "one-segment binary SMS is admitted");
     mh_settle();
     char cmgs[24];
@@ -3112,7 +3113,7 @@ static void test_sms_binary_send_contract(void) {
         .number = number,
         .payload = multipart,
         .payload_len = sizeof(multipart),
-        .dest_port = 0x158au,
+        .dest_port = 0x1234u,
         .source_port = 0u,
         .mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
         .segment = 1u,
@@ -3130,7 +3131,7 @@ static void test_sms_binary_send_contract(void) {
           "multipart binary goldens advance one shared reference monotonically");
     sent_before = mh_status().sms_sent_count;
     check(modem_service_request_send_binary_sms(
-              number, multipart, sizeof(multipart), 0x158au, 0u),
+              number, multipart, sizeof(multipart), 0x1234u, 0u),
           "multipart binary SMS is admitted");
     mh_settle();
     char cmgs1[24];
@@ -3204,7 +3205,7 @@ static void test_sms_binary_failures_and_prompt_settle(void) {
         uint32_t sent_before = mh_status().sms_sent_count;
         s_sms_flow_fault = cases[i].fault;
         check(modem_service_request_send_binary_sms(
-                  "5550101", payload, sizeof(payload), 0x158au, 0u),
+                  "5550101", payload, sizeof(payload), 0x1234u, 0u),
               "binary failure case is admitted");
         mh_settle();
         if (cases[i].timeout_ms != 0u) {
@@ -3243,7 +3244,7 @@ static void test_sms_binary_failures_and_prompt_settle(void) {
     s_sms_flow_fault = SMS_FLOW_FAULT_CMGS_PROMPT_TIMEOUT;
     s_sms_esc_returns_final = true;
     check(modem_service_request_send_binary_sms(
-              "5550101", payload, sizeof(payload), 0x158au, 0u),
+              "5550101", payload, sizeof(payload), 0x1234u, 0u),
           "lost binary prompt is admitted");
     mh_settle();
     check(modem_service_request_debug_at("AT+CSQ"),
@@ -3287,7 +3288,7 @@ static bool request_sms_operation_for_transport_case(unsigned operation) {
         return modem_service_request_send_sms("5550102", "CTS text");
     case 1u:
         return modem_service_request_send_binary_sms(
-            "5550102", binary, sizeof(binary), 0x158au, 0u);
+            "5550102", binary, sizeof(binary), 0x1234u, 0u);
     case 2u:
         return modem_service_request_save_sms("5550102", "CTS draft");
     case 3u:
@@ -6976,6 +6977,70 @@ static void test_direct_controls_skip_storage(void) {
           "filtered delivery disarms the body timeout");
 }
 
+static void test_picture_text_send_and_local_receive(void) {
+    if (!begin_sms_operation_fixture("picture text-mode fixture boots")) return;
+    uint8_t payload[276];
+    for (unsigned i = 0u; i < sizeof(payload); i++) payload[i] = (uint8_t)i;
+    check(modem_service_request_send_binary_sms("5550101", payload, sizeof(payload), 0x158au, 0u),
+          "production picture send admitted");
+    mh_settle();
+    modem_sms_send_result_t result;
+    check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_OK &&
+              mh_tx_count_exact("AT+CMGF=0") == 0u &&
+              mh_tx_count_exact("AT+CMGF=1;+CSMP=81,167,0,4") == 1u &&
+              mh_tx_count_exact("AT+CMGS=\"5550101\"") == 3u &&
+              mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == 1u,
+          "three picture parts send without entering lossy native PDU receive mode");
+    mh_clear_tx_capture();
+    unsigned received = s_mh_picture_parts;
+    uint32_t ordinary_received = mh_status().sms_received_count;
+    feed_direct("+CMT: \"12025550123\",\"\",\"20260918102440\",129,4101,1,0,15",
+                "0B0504158A158A000302030242494E");
+    check(s_mh_picture_parts == received + 1u &&
+              mh_status().sms_received_count == ordinary_received &&
+              mh_tx_count_exact("AT+CMGF=0") == 0u &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u,
+          "native WEMT picture part goes to local storage, never through ME/Inbox");
+}
+
+static void test_picture_settings_repair_blocks_sms_not_calls(void) {
+    if (!begin_sms_operation_fixture("picture repair fixture boots")) return;
+    static const uint8_t payload[] = {0x30u, 0x00u, 0x00u};
+    s_sms_cmgf_text_error_budget = 10u;
+    check(modem_service_request_send_binary_sms("5550101", payload, sizeof(payload), 0x158au, 0u),
+          "picture with failed cleanup is admitted");
+    mh_settle();
+    modem_sms_send_result_t result;
+    check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_OK,
+          "accepted picture is not reported failed merely because cleanup failed");
+    for (unsigned i = 0u; i < 6u; i++) mh_advance(100u);
+    check(service_probe().sms_mode_restore_pending &&
+              mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == 4u,
+          "failed parameter repair pauses after three retries without forgetting dirty settings");
+    check(modem_service_request_send_sms("5550102", "normal text"),
+          "text send request can report a bounded failure during repair");
+    mh_settle();
+    check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_ERROR &&
+              mh_tx_count_exact("AT+CMGS=\"5550102\"") == 0u,
+          "ordinary text cannot be sent with binary picture parameters");
+    check(modem_service_request_debug_at("AT+CGMM"), "unrelated AT work admitted during repair backoff");
+    mh_settle();
+    check(mh_tx_count_exact("AT+CGMM") == 1u,
+          "repair backoff does not monopolize UART");
+    mh_feed("RING");
+    mh_feed("+CLIP: \"5550103\",129,,,,0");
+    mh_feed("#ECAM: 0,6,1,,,");
+    check(modem_service_request_answer(), "call answer admitted despite dirty SMS settings");
+    s_clcc_row = "+CLCC: 1,1,0,0,0,\"5550103\",129";
+    for (unsigned i = 0u; i < 5u; i++) mh_advance(100u);
+    check(mh_tx_count_exact("ATA") == 1u, "call answer retains priority over SMS repair");
+    s_sms_cmgf_text_error_budget = 0u;
+    mh_advance(31000u);
+    mh_settle();
+    check(!service_probe().sms_mode_restore_pending,
+          "later successful parameter repair clears the obligation");
+}
+
 static void test_slow_call_forwarding_keeps_receiving(void) {
     for (unsigned reject = 0u; reject < 2u; reject++) {
         begin_telit(true);
@@ -8006,6 +8071,8 @@ int main(void) {
     test_sms_binary_send_contract();
     test_direct_delivery_is_restored_as_a_pdu();
     test_direct_controls_skip_storage();
+    test_picture_text_send_and_local_receive();
+    test_picture_settings_repair_blocks_sms_not_calls();
     test_direct_delivery_mid_command_and_qcmti();
     test_slow_call_forwarding_keeps_receiving();
     test_direct_delivery_retries_after_store_failure();

@@ -186,6 +186,9 @@ static bool apply_encoding(uint32_t tele_id, uint32_t enc, uint32_t length,
             return false;
         }
         out->dcs = 0x04u;
+        /* WEMT text delivery retains the port/concatenation UDH for octet
+         * messages too. Native PDU delivery has already stripped it. */
+        out->udhi = text_form && tele_id == TELIT_TELE_WEMT && length != 0u;
         out->wdp = tele_id == TELIT_TELE_WAP;
         break;
     case ENC_LATIN1:

@@ -1088,7 +1088,7 @@ static void test_t9_user_words(void) {
 static void test_picture_messages(void) {
     fresh_store();
     /* Fresh flash seeds all 4 default slots as used. */
-    assert_eq_u32(STORE_PICTURE_SLOT_COUNT, store_picture_message_count(), "default picture slots seeded");
+    assert_eq_u32(4u, store_picture_message_count(), "four original templates seeded; extra slots remain free");
     store_picture_message_t msg;
     assert_true(store_picture_message_get(0u, &msg) == STORE_STATUS_OK, "get seeded slot 0");
     assert_true(msg.used, "seeded slot used");
@@ -1099,7 +1099,7 @@ static void test_picture_messages(void) {
     /* Clear slot 0 then get -> NOT_FOUND, count drops. */
     assert_true(store_picture_message_clear(0u) == STORE_STATUS_OK, "clear slot 0");
     assert_true(store_picture_message_get(0u, &msg) == STORE_STATUS_NOT_FOUND, "cleared slot NOT_FOUND");
-    assert_eq_u32(STORE_PICTURE_SLOT_COUNT - 1u, store_picture_message_count(), "count after clear");
+    assert_eq_u32(3u, store_picture_message_count(), "count after clear");
 
     /* Set a custom message, width/height 0 -> defaults applied. */
     store_picture_message_t set;
@@ -1519,7 +1519,7 @@ static const wire_expectation_t WIRE_EXPECTED[STORE_UNIT_COUNT] = {
     [STORE_UNIT_CALLS_RECEIVED] = {86u, UINT64_C(0xeccbd2835e818e41)},
     [STORE_UNIT_CALLS_DIALLED] = {86u, UINT64_C(0x5defde58a2af983b)},
     [STORE_UNIT_T9_USER_DICT] = {76u, UINT64_C(0x48a39e50599417d3)},
-    [STORE_UNIT_PICTURE_MESSAGES] = {1524u, UINT64_C(0xdf1bfc239889425a)},
+    [STORE_UNIT_PICTURE_MESSAGES] = {3824u, UINT64_C(0xde94c68eff59b554)},
     [STORE_UNIT_OWN_TONES] = {1120u, UINT64_C(0xc374477106e5bbfb)},
     [STORE_UNIT_CALL_DIVERT] = {178u, UINT64_C(0x42696acc31545aa2)},
     [STORE_UNIT_SERVICE_WARRANTY] = {47u, UINT64_C(0x5f7a97e531cb6c07)},
@@ -2214,7 +2214,7 @@ static void test_corrupt_picture_payload_uses_seeded_fallback(void) {
                 "write corrupt picture journal");
     assert_true(store_service_init() == STORE_STATUS_OK,
                 "re-init with corrupt picture payload");
-    assert_eq_u32(STORE_PICTURE_SLOT_COUNT, store_picture_message_count(),
+    assert_eq_u32(4u, store_picture_message_count(),
                   "corrupt picture payload seeds built-in slots");
 }
 
@@ -2501,6 +2501,175 @@ static void test_serializer_failure_is_not_stale_busy(void) {
                 "re-init after serializer-failure test");
 }
 
+static void picture_part(sms_codec_message_t *part, const uint8_t *payload,
+                         uint16_t len, uint8_t seq, uint16_t ref) {
+    memset(part, 0, sizeof(*part));
+    part->binary = part->has_ports = part->has_concat = true;
+    part->dcs = 4u;
+    part->dest_port = SMS_CODEC_PICTURE_PORT;
+    part->source_port = 0u;
+    part->concat_ref = ref;
+    part->concat_total = (uint8_t)((len + 127u) / 128u);
+    part->concat_seq = seq;
+    strcpy(part->address, "+12025550123");
+    strcpy(part->timestamp, "26/09/18,12:00:00");
+    uint16_t offset = (uint16_t)(seq - 1u) * 128u;
+    part->binary_len = len - offset > 128u ? 128u : len - offset;
+    memcpy(part->binary_data, payload + offset, part->binary_len);
+}
+
+static void test_picture_receive_journal(void) {
+    fresh_store();
+    store_picture_message_t source, received;
+    assert_true(store_picture_message_get(0u, &source) == STORE_STATUS_OK, "receive fixture template");
+    uint8_t payload[MODEM_SMS_BINARY_MAX], chunks = 0u;
+    uint16_t len = 0u;
+    assert_true(sms_picture_payload_encode(&source, "Received picture", payload, sizeof(payload), &len, &chunks),
+                "encode receive fixture");
+    assert_eq_u32(3u, chunks, "fixture has three parts");
+    sms_codec_message_t part;
+    picture_part(&part, payload, len, 3u, 17u);
+    assert_true(store_picture_receive(&part, 100u) == STORE_STATUS_OK, "out of order final part staged");
+    picture_part(&part, payload, len, 1u, 17u);
+    assert_true(store_picture_receive(&part, 101u) == STORE_STATUS_OK, "first part staged");
+    flush_commits();
+    assert_true(store_service_init() == STORE_STATUS_OK, "restart during assembly");
+    assert_eq_u32(0u, store_picture_pending_first(), "incomplete picture is not announced");
+    picture_part(&part, payload, len, 2u, 17u);
+    assert_true(store_picture_receive(&part, 102u) == STORE_STATUS_OK, "assembly resumes after restart");
+    assert_eq_u32(0u, store_picture_pending_first(), "RAM completion is not durable publication");
+    flush_commits();
+    uint32_t id = store_picture_pending_first();
+    assert_true(id != 0u && store_picture_pending_get(id, &received, NULL, 0u) == STORE_STATUS_OK &&
+                strcmp(received.text, "Received picture") == 0 &&
+                memcmp(received.bitmap, source.bitmap, sizeof(source.bitmap)) == 0,
+                "complete picture and caption survive ordered assembly");
+    assert_true(store_picture_receive(&part, 103u) == STORE_STATUS_OK &&
+                store_picture_commit_status() == STORE_STATUS_OK,
+                "duplicate part is idempotent without flash wear");
+    part.binary_data[0] ^= 1u;
+    assert_true(store_picture_receive(&part, 104u) == STORE_STATUS_CONFLICT &&
+                store_picture_pending_first() == id, "conflicting duplicate cannot destroy complete picture");
+    for (uint8_t seq = 1u; seq <= chunks; seq++) {
+        picture_part(&part, payload, len, seq, 18u);
+        assert_true(store_picture_receive(&part, 110u + seq) == STORE_STATUS_OK, "second pending picture");
+    }
+    flush_commits();
+    picture_part(&part, payload, len, 1u, 19u);
+    assert_true(store_picture_receive(&part, 120u) == STORE_STATUS_STORAGE_ERROR &&
+                store_picture_pending_first() == id, "full receive queue never evicts a pending picture");
+    assert_true(store_picture_pending_save(id, 6u) == STORE_STATUS_OK, "atomic save requested");
+    s_fake_op_busy = true;
+    flush_commits();
+    assert_true(store_picture_commit_status() == STORE_STATUS_NOT_READY, "busy flash is not a successful save");
+    s_fake_op_busy = false;
+    assert_true(store_service_init() == STORE_STATUS_OK && store_picture_pending_first() == id &&
+                store_picture_message_get(6u, &received) == STORE_STATUS_NOT_FOUND,
+                "power loss before save commit retains pending picture and old gallery");
+    assert_true(store_picture_pending_save(id, 6u) == STORE_STATUS_OK, "retry atomic save");
+    flush_commits();
+    assert_true(store_service_init() == STORE_STATUS_OK &&
+                store_picture_message_get(6u, &received) == STORE_STATUS_OK &&
+                strcmp(received.text, "Received picture") == 0,
+                "saved picture durable in expanded gallery");
+    char sender[33];
+    assert_true(store_picture_message_sender(6u, sender, sizeof(sender)) == STORE_STATUS_OK &&
+                strcmp(sender, "+12025550123") == 0, "saved sender retained");
+    assert_true(store_picture_message_set_text(6u, "Edited caption") == STORE_STATUS_OK,
+                "caption edit accepted");
+    flush_commits();
+    assert_true(store_service_init() == STORE_STATUS_OK &&
+                store_picture_message_sender(6u, sender, sizeof(sender)) == STORE_STATUS_OK &&
+                strcmp(sender, "+12025550123") == 0, "caption edit preserves sender across reboot");
+    assert_true(store_picture_message_set(6u, &source) == STORE_STATUS_OK &&
+                store_picture_message_sender(6u, sender, sizeof(sender)) == STORE_STATUS_OK &&
+                sender[0] == '\0', "replacing a bitmap does not inherit the previous sender");
+    flush_commits();
+    uint32_t second = store_picture_pending_first();
+    assert_true(second != 0u && second != id, "next reception remains pending after atomic save");
+    picture_part(&part, payload, len, 2u, 17u);
+    assert_true(store_picture_receive(&part, 130u) == STORE_STATUS_OK &&
+                store_picture_pending_first() == second, "consumed duplicate does not resurrect saved picture");
+    assert_true(store_picture_pending_discard(second) == STORE_STATUS_OK, "discard requested");
+    flush_commits();
+    assert_true(store_service_init() == STORE_STATUS_OK && store_picture_pending_first() == 0u,
+                "discard persists across reboot");
+    picture_part(&part, payload, len, 1u, 22u);
+    assert_true(store_picture_receive(&part, 140u) == STORE_STATUS_OK, "consumed queue slot reusable");
+    part.binary_data[0] ^= 1u;
+    assert_true(store_picture_receive(&part, 141u) == STORE_STATUS_CONFLICT, "incomplete conflict quarantined");
+    picture_part(&part, payload, len, 2u, 22u);
+    assert_true(store_picture_receive(&part, 142u) == STORE_STATUS_CONFLICT, "conflicting assembly cannot complete");
+    picture_part(&part, payload, len, 1u, 22u);
+    assert_true(store_picture_receive(&part, 1800200u) == STORE_STATUS_OK, "expired incomplete assembly can restart");
+}
+
+static void test_picture_reference_reuse_after_reboot(void) {
+    fresh_store();
+    store_picture_message_t source;
+    assert_true(store_picture_message_get(0u, &source) == STORE_STATUS_OK, "reference fixture");
+    uint8_t payload[MODEM_SMS_BINARY_MAX], chunks = 0u;
+    uint16_t len = 0u;
+    assert_true(sms_picture_payload_encode(&source, "Same picture", payload,
+                                         sizeof(payload), &len, &chunks), "reference payload");
+    sms_codec_message_t part;
+    for (uint8_t seq = 1u; seq <= chunks; seq++) {
+        picture_part(&part, payload, len, seq, 1u);
+        part.timestamp[16] = (char)('0' + seq);
+        assert_true(store_picture_receive(&part, seq) == STORE_STATUS_OK,
+                    "parts can have adjacent SMSC seconds");
+    }
+    flush_commits();
+    uint32_t old = store_picture_pending_first();
+    assert_true(old != 0u && store_picture_pending_save(old, 6u) == STORE_STATUS_OK,
+                "save original reference");
+    flush_commits();
+    assert_true(store_service_init() == STORE_STATUS_OK, "reboot with saved duplicate marker");
+    picture_part(&part, payload, len, 2u, 1u);
+    part.timestamp[16] = '2';
+    assert_true(store_picture_receive(&part, 10u) == STORE_STATUS_OK &&
+                store_picture_commit_status() == STORE_STATUS_OK && store_picture_pending_first() == 0u,
+                "true old duplicate remains suppressed after reboot without flash wear");
+    for (uint8_t seq = chunks; seq > 0u; seq--) {
+        picture_part(&part, payload, len, seq, 1u);
+        strcpy(part.timestamp, "26/09/18,12:31:00");
+        part.timestamp[16] = (char)('0' + seq);
+        assert_true(store_picture_receive(&part, 20u + chunks - seq) == STORE_STATUS_OK,
+                    "later reference reuse accepted despite fresh uptime and identical bytes");
+    }
+    flush_commits();
+    uint32_t current = store_picture_pending_first();
+    assert_true(current != 0u && current != old,
+                "later identical picture is a new durable reception, not a day-wide duplicate");
+}
+
+static void test_picture_legacy_migration(void) {
+    uint8_t legacy[1524] = {0};
+    put_u32_le(legacy, 0x50494331u);
+    put_u16_le(legacy + 4u, 1u);
+    legacy[6] = 1u;
+    legacy[8] = 1u; legacy[9] = 72u; legacy[10] = 28u;
+    put_u16_le(legacy + 11u, 252u);
+    legacy[13] = 6u;
+    legacy[14] = 0xa5u;
+    memcpy(legacy + 266u, "Legacy", 6u);
+    fresh_store();
+    assert_true(write_unit_fixture(STORE_UNIT_PICTURE_MESSAGES, legacy, sizeof(legacy)), "write legacy four-slot fixture");
+    assert_true(store_service_init() == STORE_STATUS_OK, "load old picture schema");
+    store_picture_message_t picture;
+    assert_true(store_picture_message_get(0u, &picture) == STORE_STATUS_OK &&
+                picture.bitmap[0] == 0xa5u && strcmp(picture.text, "Legacy") == 0,
+                "migration preserves old bitmap and caption");
+    assert_eq_u32(1u, store_picture_message_count(), "migration does not reseed erased slots");
+    assert_true(store_picture_message_get(6u, &picture) == STORE_STATUS_NOT_FOUND,
+                "expanded slots start empty");
+    assert_true(store_picture_message_set(6u, &picture) == STORE_STATUS_OK, "new schema mutation");
+    flush_commits();
+    assert_true(store_service_init() == STORE_STATUS_OK &&
+                store_picture_message_get(0u, &picture) == STORE_STATUS_OK && strcmp(picture.text, "Legacy") == 0,
+                "migration remains readable after new-format commit");
+}
+
 int main(void) {
     log_set_level(0);
     test_unit_handler_registry();
@@ -2534,6 +2703,9 @@ int main(void) {
     test_contact_tone_persistence();
     test_t9_user_words();
     test_picture_messages();
+    test_picture_receive_journal();
+    test_picture_reference_reuse_after_reboot();
+    test_picture_legacy_migration();
     test_own_tones();
     test_call_divert();
     test_warranty_payload_apply_is_atomic();

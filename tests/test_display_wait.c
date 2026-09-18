@@ -25,6 +25,15 @@ static int s_failures;
 static unsigned s_tones_confirm_calls;
 static bool s_tones_confirm_accepted;
 static uint32_t s_tones_confirm_now;
+static unsigned s_picture_confirm_calls;
+static bool s_picture_confirm_save;
+
+void messages_picture_confirm_save(app_t *app, bool save, uint32_t now) {
+    (void)app;
+    (void)now;
+    s_picture_confirm_calls++;
+    s_picture_confirm_save = save;
+}
 
 static void check(bool condition, const char *message) {
     if (!condition) {
@@ -249,6 +258,16 @@ static void test_ringing_volume_confirmation_dispatch(void) {
 }
 
 int main(void) {
+    app_t picture = {0};
+    picture.confirm_context = CONFIRM_CONTEXT_PICTURE_MESSAGE_SAVE_FIRST;
+    (void)handle_confirm_key(&picture, KEY_DOWN, 10u);
+    check(s_picture_confirm_calls == 0u, "scroll does not accept save-first confirmation");
+    (void)handle_confirm_key(&picture, KEY_NAVI, 20u);
+    check(s_picture_confirm_calls == 1u && s_picture_confirm_save,
+          "save-first OK dispatches Save");
+    (void)handle_confirm_key(&picture, KEY_C, 30u);
+    check(s_picture_confirm_calls == 2u && !s_picture_confirm_save,
+          "save-first Exit dispatches discard");
     test_sms_read_progress_is_sticky();
     test_phonebook_abort_detaches_request_identity();
     test_editor_delete_keeps_codepoints_whole();

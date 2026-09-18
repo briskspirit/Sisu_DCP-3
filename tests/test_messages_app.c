@@ -49,6 +49,10 @@ static bool s_picture_used[STORE_PICTURE_SLOT_COUNT];
 static store_picture_message_t s_pictures[STORE_PICTURE_SLOT_COUNT];
 static unsigned s_picture_writes;
 static uint8_t s_picture_last_written_slot;
+static uint32_t s_pending_picture_id;
+static bool s_pending_picture_consumed;
+static store_picture_message_t s_pending_picture;
+static store_status_t s_picture_commit_status;
 static bool s_modem_sim_ready;
 static modem_call_state_t s_modem_call_state;
 static uint32_t s_modem_sms_received_count;
@@ -131,6 +135,10 @@ static void reset_fixture(void) {
     memset(s_pictures, 0, sizeof(s_pictures));
     s_picture_writes = 0u;
     s_picture_last_written_slot = 0xffu;
+    s_pending_picture_id = 0u;
+    s_pending_picture_consumed = false;
+    memset(&s_pending_picture, 0, sizeof(s_pending_picture));
+    s_picture_commit_status = STORE_STATUS_OK;
     s_modem_sim_ready = true;
     s_modem_call_state = MODEM_CALL_IDLE;
     s_modem_sms_received_count = 0u;
@@ -285,6 +293,44 @@ store_status_t store_picture_message_set(uint8_t slot, const store_picture_messa
     s_pictures[slot] = *message;
     s_picture_writes++;
     s_picture_last_written_slot = slot;
+    return STORE_STATUS_OK;
+}
+
+store_status_t store_picture_message_set_text(uint8_t slot, const char *text) {
+    if (slot >= STORE_PICTURE_SLOT_COUNT || !s_picture_used[slot]) return STORE_STATUS_NOT_FOUND;
+    copy_text(s_pictures[slot].text, sizeof(s_pictures[slot].text), text);
+    s_picture_writes++;
+    s_picture_last_written_slot = slot;
+    return STORE_STATUS_OK;
+}
+
+store_status_t store_picture_message_sender(uint8_t slot, char *dst, size_t cap) {
+    (void)slot;
+    if (cap != 0u) dst[0] = '\0';
+    return STORE_STATUS_OK;
+}
+store_status_t store_picture_commit_status(void) { return s_picture_commit_status; }
+uint32_t store_picture_pending_first(void) {
+    return s_picture_commit_status == STORE_STATUS_OK && !s_pending_picture_consumed
+        ? s_pending_picture_id : 0u;
+}
+store_status_t store_picture_pending_get(uint32_t id, store_picture_message_t *out,
+                                         char *sender, size_t cap) {
+    (void)sender; (void)cap;
+    if (id == 0u || id != s_pending_picture_id) return STORE_STATUS_NOT_FOUND;
+    *out = s_pending_picture;
+    return STORE_STATUS_OK;
+}
+store_status_t store_picture_pending_save(uint32_t id, uint8_t slot) {
+    if (id != s_pending_picture_id) return STORE_STATUS_NOT_FOUND;
+    s_picture_commit_status = STORE_STATUS_NOT_READY;
+    s_pending_picture_consumed = true;
+    return store_picture_message_set(slot, &s_pending_picture);
+}
+store_status_t store_picture_pending_discard(uint32_t id) {
+    if (id != s_pending_picture_id) return STORE_STATUS_NOT_FOUND;
+    s_picture_commit_status = STORE_STATUS_NOT_READY;
+    s_pending_picture_consumed = true;
     return STORE_STATUS_OK;
 }
 
@@ -647,9 +693,10 @@ void open_confirm_sid(app_t *app,
                       uint16_t sid,
                       const char *fallback,
                       int8_t first_y) {
-    (void)sid;
+    s_display_sid = sid;
     (void)fallback;
-    (void)first_y;
+    app->confirm_line_count = 3u;
+    app->confirm_first_y = first_y;
     app->confirm_context = context;
     app->route = APP_ROUTE_CONFIRM;
 }
@@ -1381,6 +1428,16 @@ static void test_picture_sparse_list_preview_and_options(void) {
     (void)handle_messages_list_key(&app, KEY_NAVI, 7070u);
     check(s_display_sid == 0x177u,
           "Details shows the saved-picture no-more-details note");
+
+    app.messages_mode = MESSAGES_MODE_DETAIL;
+    app.messages_detail_page = 0u;
+    (void)handle_messages_list_key(&app, KEY_DOWN, 7080u);
+    check(app.messages_detail_page == 0u,
+          "short picture sender details cannot scroll onto an empty page");
+    app.messages_detail_page = 1u;
+    (void)handle_messages_list_key(&app, KEY_UP, 7090u);
+    check(app.messages_detail_page == 0u,
+          "picture sender details scroll back toward the first row");
 }
 
 static void test_picture_edit_save_preview_and_limit(void) {
@@ -1428,7 +1485,7 @@ static void test_picture_edit_save_preview_and_limit(void) {
     check(s_picture_writes == 1u && s_picture_last_written_slot == 2u,
           "Save writes the bound physical picture slot exactly once");
     check_str(s_pictures[2].text, "saved caption", "Save persists the edited caption");
-    check(s_display_record == 3u && s_display_sid == 0x180u &&
+    check(s_display_record == 6u && s_display_sid == 0x180u &&
               s_display_return_route == APP_ROUTE_MESSAGES_LIST,
           "Save shows the v6.00 Picture message saved record");
 }
@@ -1457,7 +1514,7 @@ static void test_picture_send_contract(void) {
           "picture send publishes the codec payload length and segment count");
     check_str(s_encoded_text, "draft", "picture send encodes the pending draft caption");
     check_str(s_encoded_picture.text, "draft", "picture send applies the draft to the encoded record");
-    check(s_display_record == 46u && s_display_sid == 0x182u,
+    check(s_display_record == 36u && s_display_sid == 0x182u,
           "picture send shows the v6.00 Sending picture message record");
 
     s_send_result_ready = true;
@@ -1469,7 +1526,7 @@ static void test_picture_send_contract(void) {
     check(!app.messages_picture_send_waiting &&
               app.sms_recipient_prefill[0] == '\0',
           "successful picture send retires the wait and recipient prefill");
-    check(s_display_record == 3u && s_display_sid == 0x183u,
+    check(s_display_record == 6u && s_display_sid == 0x183u,
           "successful picture send shows Picture message sent");
 
     app.route = APP_ROUTE_EDITOR;
@@ -1481,12 +1538,12 @@ static void test_picture_send_contract(void) {
     app.messages_picture_send_started_ms = 10000u;
     app.messages_picture_send_request_id = UINT32_C(0x7777);
     app.route = APP_ROUTE_DISPLAY_MESSAGE;
-    app.display_record_id = 46u;
+    app.display_record_id = 36u;
     app.display_return_route = APP_ROUTE_MESSAGES_LIST;
     check(!messages_picture_poll_send(&app, 189999u),
           "picture send remains pending before its 180-second deadline");
     check(messages_picture_poll_send(&app, 190000u) &&
-              !app.messages_picture_send_waiting && s_display_sid == 0x359u,
+              !app.messages_picture_send_waiting && s_display_sid == 0x174u,
           "picture send times out exactly at 180 seconds with the failure note");
     uint16_t timeout_sid = s_display_sid;
     s_send_result_ready = true;
@@ -1524,7 +1581,7 @@ static void test_picture_send_contract(void) {
     app.messages_picture_send_request_id = UINT32_C(0x8888);
     app.messages_picture_send_started_ms = 200000u;
     app.route = APP_ROUTE_DISPLAY_MESSAGE;
-    app.display_record_id = 46u;
+    app.display_record_id = 36u;
     app.display_return_route = APP_ROUTE_MESSAGES_LIST;
     s_send_result_ready = true;
     s_send_result = (modem_sms_send_result_t){
@@ -1596,6 +1653,115 @@ static void test_incoming_picture_save_and_replace(void) {
           "replacement writes the selected physical slot");
     check_str(s_pictures[1].text, "replacement", "replacement stores the received picture");
     check(s_display_sid == 0x17du, "replacement shows Old picture replaced");
+}
+
+static void test_local_picture_receive_flow(void) {
+    reset_fixture();
+    app_t app = {0};
+    app.route = APP_ROUTE_STANDBY;
+    app.sms_boot_status_sync_done = true;
+    seed_picture(0u, "template", STORE_PICTURE_WIDTH, STORE_PICTURE_HEIGHT);
+    s_pending_picture = s_pictures[0];
+    copy_text(s_pending_picture.text, sizeof(s_pending_picture.text), "received caption");
+    s_pending_picture_id = 5u;
+    s_picture_commit_status = STORE_STATUS_NOT_READY;
+    (void)poll_sms(&app, 100u);
+    check(app.picture_notice_id == 0u && !messages_picture_open_received(&app, 100u),
+          "uncommitted reception is not announced or opened");
+    s_picture_commit_status = STORE_STATUS_OK;
+    app.route = APP_ROUTE_POWER_OFF;
+    (void)poll_sms(&app, 101u);
+    check(app.picture_notice_id == 0u && !app.backlight_activity_pending && s_post_count == 0u,
+          "recovered picture does not alert while the phone is off");
+    app.route = APP_ROUTE_POWERUP;
+    (void)poll_sms(&app, 102u);
+    check(app.picture_notice_id == 0u, "recovered picture waits through startup");
+    app.route = APP_ROUTE_STANDBY;
+    (void)poll_sms(&app, 110u);
+    check(app.picture_notice_id == 5u && !app.sms_received_pending,
+          "durable picture gets its own notice, not an Inbox entry");
+    check(messages_picture_open_received(&app, 120u) && app.picture_notice_id == 0u &&
+              app.messages_mode == MESSAGES_MODE_READ,
+          "View opens the pending bitmap and dismisses its notice");
+    framebuffer_t fb = {0};
+    messages_picture_render(&app, &fb);
+    check_str(s_softkey, "Save", "received preview has the original direct Save softkey");
+    (void)messages_picture_handle_key(&app, KEY_DOWN, 125u);
+    check(app.messages_read_page == 1u, "pending picture caption has a text page");
+    (void)messages_picture_handle_key(&app, KEY_C, 130u);
+    check(app.route == APP_ROUTE_CONFIRM && store_picture_pending_first() == 5u &&
+              app.confirm_context == CONFIRM_CONTEXT_PICTURE_MESSAGE_SAVE_FIRST &&
+              s_display_sid == 0x17fu,
+          "C opens the original Save picture message first question without discarding");
+    check(app.confirm_first_y == 2 + (35 - app.confirm_line_count * 9) / 2,
+          "save-first question uses the centered original window 0x2c");
+    messages_picture_confirm_save(&app, true, 160u);
+    check(app.picture_commit_waiting && s_picture_last_written_slot == 1u &&
+              app.route == APP_ROUTE_MESSAGES_LIST && app.picture_receive_id == 5u,
+          "Save uses a free shared slot and waits without an invented progress dialog");
+    messages_picture_open_menu(&app, 170u);
+    check(app.picture_receive_id == 5u && app.route == APP_ROUTE_MESSAGES_LIST &&
+              !messages_picture_poll_storage(&app, 180u),
+          "navigation cannot destroy an unfinished save or claim success early");
+    s_picture_commit_status = STORE_STATUS_OK;
+    check(messages_picture_poll_storage(&app, 190u) && !app.picture_commit_waiting &&
+              app.picture_receive_id == 0u && s_display_sid == 0x180u &&
+              s_display_record == 6u && app.display_return_route == APP_ROUTE_STANDBY,
+          "durable Save retires reception and displays Picture message saved");
+    check_str(s_pictures[1].text, "received caption", "Save retains the received caption");
+
+    s_pending_picture_id = 6u;
+    s_pending_picture_consumed = false;
+    check(messages_picture_open_received(&app, 200u), "next pending picture opens");
+    (void)messages_picture_handle_key(&app, KEY_C, 210u);
+    messages_picture_confirm_save(&app, false, 230u);
+    check(app.picture_commit_waiting && app.picture_commit_action == 3u,
+          "Discard also waits for durable consumption");
+    s_picture_commit_status = STORE_STATUS_STORAGE_ERROR;
+    check(messages_picture_poll_storage(&app, 240u) && app.picture_receive_id == 6u,
+          "failed Discard retains its identity for retry");
+    app.route = APP_ROUTE_MESSAGES_LIST;
+    (void)messages_picture_handle_key(&app, KEY_C, 245u);
+    messages_picture_confirm_save(&app, false, 250u);
+    check(app.picture_commit_waiting, "failed Discard can be retried");
+    app.route = APP_ROUTE_CALL;
+    s_picture_commit_status = STORE_STATUS_OK;
+    check(messages_picture_poll_storage(&app, 260u) && app.route == APP_ROUTE_CALL,
+          "durable completion cannot displace a call screen");
+
+    for (uint8_t slot = 0u; slot < STORE_PICTURE_SLOT_COUNT; slot++) {
+        seed_picture(slot, "occupied", STORE_PICTURE_WIDTH, STORE_PICTURE_HEIGHT);
+    }
+    s_pending_picture_id = 7u;
+    s_pending_picture_consumed = false;
+    check(messages_picture_open_received(&app, 300u), "full-gallery reception opens");
+    (void)messages_picture_handle_key(&app, KEY_NAVI, 310u);
+    check(app.messages_picture_save_pending && s_display_sid == 0x176u &&
+              s_display_record == 6u,
+          "full gallery asks for replacement without overwriting a picture");
+    (void)messages_picture_handle_key(&app, KEY_C, 330u);
+    check(app.picture_receive_id == 7u && !app.messages_picture_save_pending,
+          "replacement cancellation returns to the pending picture");
+    (void)messages_picture_handle_key(&app, KEY_NAVI, 340u);
+    (void)messages_picture_handle_key(&app, KEY_DOWN, 360u);
+    (void)messages_picture_handle_key(&app, KEY_NAVI, 370u);
+    check(app.picture_commit_waiting && app.picture_commit_action == 2u &&
+              s_picture_last_written_slot == 1u, "replacement waits for the selected slot commit");
+    s_picture_commit_status = STORE_STATUS_OK;
+    check(messages_picture_poll_storage(&app, 380u) && s_display_sid == 0x17du,
+          "durable replacement displays Old picture replaced");
+    app.route = APP_ROUTE_CALL;
+    s_picture_commit_status = STORE_STATUS_STORAGE_ERROR;
+    (void)poll_sms(&app, 390u);
+    check(app.route == APP_ROUTE_CALL && app.picture_storage_warning,
+          "failed picture persistence queues a warning without displacing a call");
+    app.route = APP_ROUTE_STANDBY;
+    (void)poll_sms(&app, 400u);
+    check(app.route == APP_ROUTE_DISPLAY_MESSAGE && !app.picture_storage_warning,
+          "picture persistence failure is reported at standby");
+    app.route = APP_ROUTE_STANDBY;
+    (void)poll_sms(&app, 410u);
+    check(app.route == APP_ROUTE_STANDBY, "same storage fault is not repeatedly announced");
 }
 
 static void test_mailbox_sort_and_lazy_read(void) {
@@ -2010,6 +2176,7 @@ int main(void) {
     test_picture_edit_save_preview_and_limit();
     test_picture_send_contract();
     test_incoming_picture_save_and_replace();
+    test_local_picture_receive_flow();
     test_mailbox_sort_and_lazy_read();
     test_outbox_send_uses_visible_draft();
     test_async_sms_request_ownership();

@@ -30,6 +30,11 @@ bool sms_submit_pdu_build(sms_submit_pdu_t *submit,
                           size_t hex_cap,
                           uint8_t *out_tpdu_len);
 
+/* Same segment/UDH as PDU mode, for +CMGS in text mode with DCS 4.
+ * Only the production picture framing (DCS04_PORT_FIRST) is accepted. */
+bool sms_submit_picture_text_build(sms_submit_pdu_t *submit,
+                                   char *hex, size_t hex_cap);
+
 /* Exposed as codec primitives so their 3GPP bounds and fixed vectors can be
  * tested without reaching through the modem service translation unit. */
 uint8_t sms_submit_gsm7_code(uint8_t ch);

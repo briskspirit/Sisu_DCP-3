@@ -34,6 +34,8 @@ typedef struct {
     /* AT+CMGF=0 crossed the UART and no AT+CMGF=1 has completed since: a
      * cancellation now may leave the module in PDU mode. */
     bool pdu_mode_possible;
+    bool picture_text_mode;
+    bool text_parameters_dirty;
     /* The final about to be handled by on_final() said the store is full. */
     bool final_storage_full;
 } modem_sms_protocol_state_t;
@@ -539,7 +541,9 @@ static void binary_restore_text(const modem_sms_protocol_hooks_t *hooks,
                                 modem_sms_outcome_t outcome) {
     s_protocol.binary_outcome = outcome;
     modem_sms_state_binary_set_send_ok(outcome == MODEM_SMS_OUTCOME_OK);
-    (void)emit_command(hooks, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1",
+    (void)emit_command(hooks, MODEM_SMS_COMMAND_CMGF_TEXT,
+                       s_protocol.picture_text_mode
+                           ? "AT+CMGF=1;+CSMP=17,167,0,0" : "AT+CMGF=1",
                        5000u, now_ms, false, false);
 }
 
@@ -586,21 +590,34 @@ static void binary_start(const modem_sms_protocol_request_t *request,
     s_protocol.send_confirmed = false;
     s_protocol.binary_segments_accepted = 0u;
     s_protocol.binary_outcome = MODEM_SMS_OUTCOME_NONE;
+    s_protocol.picture_text_mode = request->picture_text_mode &&
+        request->binary_mode == MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST &&
+        request->dest_port == SMS_CODEC_PICTURE_PORT;
     LOGI("modem", "binary SMS start bytes=%u segments=%u dest_port=0x%04x src_port=0x%04x mode=%u",
          (unsigned)request->binary_len, (unsigned)segment_total,
          (unsigned)request->dest_port, (unsigned)request->source_port,
          (unsigned)request->binary_mode);
-    (void)emit_command(hooks, MODEM_SMS_COMMAND_CMGF_PDU, "AT+CMGF=0",
+    (void)emit_command(hooks,
+                       s_protocol.picture_text_mode
+                           ? MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP
+                           : MODEM_SMS_COMMAND_CMGF_PDU,
+                       s_protocol.picture_text_mode
+                           ? "AT+CMGF=1;+CSMP=81,167,0,4" : "AT+CMGF=0",
                        5000u, now_ms, false, false);
 }
 
 static void binary_start_segment(
     const modem_sms_protocol_request_t *request,
     const modem_sms_protocol_hooks_t *hooks, uint32_t now_ms) {
-    if (!modem_sms_state_binary_build_segment(
+    bool built = s_protocol.picture_text_mode
+        ? modem_sms_state_picture_build_text_segment(
+            request->number, request->binary, request->binary_len,
+            request->dest_port, request->source_port)
+        : modem_sms_state_binary_build_segment(
             request->number, request->binary, request->binary_len,
             request->dest_port, request->source_port,
-            request->binary_mode)) {
+            request->binary_mode);
+    if (!built) {
         LOGW("modem", "binary SMS PDU build failed");
         binary_restore_text(
             hooks, now_ms,
@@ -611,9 +628,14 @@ static void binary_start_segment(
     }
     modem_sms_binary_segment_view_t segment;
     modem_sms_state_binary_segment_view(&segment);
-    char command[24];
-    snprintf(command, sizeof(command), "AT+CMGS=%u",
-             (unsigned)segment.tpdu_len);
+    char command[MODEM_SMS_SENDER_MAX + 48u];
+    if (s_protocol.picture_text_mode) {
+        sms_submit_format_text_command(command, sizeof(command), "AT+CMGS",
+                                        request->number, false);
+    } else {
+        snprintf(command, sizeof(command), "AT+CMGS=%u",
+                 (unsigned)segment.tpdu_len);
+    }
     (void)emit_command(hooks, MODEM_SMS_COMMAND_CMGS_PROMPT, command,
                        5000u, now_ms, true, true);
 }
@@ -675,6 +697,8 @@ bool modem_sms_protocol_begin(const modem_sms_protocol_request_t *request,
     s_protocol.stored_index = 0u;
     s_protocol.delivered_outcome = MODEM_SMS_OUTCOME_NONE;
     s_protocol.pdu_mode_possible = false;
+    s_protocol.picture_text_mode = false;
+    s_protocol.text_parameters_dirty = false;
     s_protocol.final_storage_full = false;
 
     modem_sms_protocol_action_t action;
@@ -846,10 +870,21 @@ void modem_sms_protocol_command_dispatched(modem_sms_command_kind_t kind) {
     if (kind == MODEM_SMS_COMMAND_CMGF_PDU) {
         s_protocol.pdu_mode_possible = true;
     }
+    if (kind == MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP) {
+        s_protocol.text_parameters_dirty = true;
+    }
 }
 
 bool modem_sms_protocol_pdu_mode_possible(void) {
     return s_protocol.pdu_mode_possible;
+}
+
+bool modem_sms_protocol_settings_restore_needed(void) {
+    return s_protocol.pdu_mode_possible || s_protocol.text_parameters_dirty;
+}
+
+bool modem_sms_protocol_text_parameters_dirty(void) {
+    return s_protocol.text_parameters_dirty;
 }
 
 static bool contains_ci(const char *haystack, const char *needle) {
@@ -980,6 +1015,7 @@ void modem_sms_protocol_on_final(
         s_protocol.pdu_mode_possible = false; /* rejected: mode unchanged */
     } else if (kind == MODEM_SMS_COMMAND_CMGF_TEXT && ok) {
         s_protocol.pdu_mode_possible = false; /* text mode confirmed */
+        s_protocol.text_parameters_dirty = false;
     }
     switch (kind) {
     case MODEM_SMS_COMMAND_CPMS:
@@ -1108,6 +1144,13 @@ void modem_sms_protocol_on_final(
             emit_complete(request, hooks, outcome,
                           outcome == MODEM_SMS_OUTCOME_OK);
         }
+        return;
+    case MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP:
+        if (!ok) {
+            binary_restore_text(hooks, now_ms, MODEM_SMS_OUTCOME_ERROR);
+            return;
+        }
+        binary_start_segment(request, hooks, now_ms);
         return;
     case MODEM_SMS_COMMAND_CMGF_PDU:
         if (ok && request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY) {
@@ -1355,7 +1398,8 @@ void modem_sms_protocol_on_timeout(
     }
 
     if (request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY &&
-        kind == MODEM_SMS_COMMAND_CMGF_PDU) {
+        (kind == MODEM_SMS_COMMAND_CMGF_PDU ||
+         kind == MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP)) {
         binary_restore_text(hooks, now_ms, MODEM_SMS_OUTCOME_TIMEOUT);
         return;
     }

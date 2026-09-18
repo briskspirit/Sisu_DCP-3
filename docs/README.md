@@ -49,6 +49,8 @@ claim is the current best understanding, not a measured fact.
 
 ## UI And Protocol Records
 
+- [Picture messages](picture_messages.md): Nokia-style receive/save/discard,
+  local flash layout, migration, and Telit transport limitations.
 - [Operator names](operator_names.md): serving-PLMN database, SIM-name fallback,
   numeric fallback, and mapping provenance.
 - [LCD calibration](lcd_calibration.md): Nokia controller ground truth,

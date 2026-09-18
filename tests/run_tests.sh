@@ -812,7 +812,7 @@ run test_menu_visible        src/ui/menu_visible.c
 run test_status_chrome       src/ui/status_chrome.c src/ui/framebuffer.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c"
 run test_signal_bars         src/ui/signal_bars.c
 run test_storage_journal     src/storage/storage_journal.c
-run test_store_service       src/storage/store_calls.c src/storage/store_battery_learning.c src/storage/store_battery_charge_supervisor.c src/storage/store_service.c src/storage/store_divert.c src/storage/store_pictures.c src/storage/store_settings.c src/storage/store_t9.c src/storage/store_tones.c src/storage/store_warranty.c src/storage/storage_journal.c src/services/battery_learning_logic.c src/services/battery_charge_supervisor_logic.c src/services/battery_charge_logic.c -I src
+run test_store_service       src/storage/store_calls.c src/storage/store_battery_learning.c src/storage/store_battery_charge_supervisor.c src/storage/store_service.c src/storage/store_divert.c src/storage/store_pictures.c src/storage/store_settings.c src/storage/store_t9.c src/storage/store_tones.c src/storage/store_warranty.c src/storage/storage_journal.c src/services/battery_learning_logic.c src/services/battery_charge_supervisor_logic.c src/services/battery_charge_logic.c src/services/sms_picture_codec.c -I src
 run test_t9_service          src/services/t9_service.c "$GENERATED_SRC_DIR/t9_ldb.c"
 run test_phone_match         src/services/phone_match.c
 run test_clock_alarm_logic   src/apps/clock_alarm_logic.c
@@ -890,6 +890,9 @@ run test_call_model_events   src/services/modem_call_model.c
 run test_strings             src/services/strings.c "$GENERATED_SRC_DIR/strings_data.c"
 run test_message_waiting_ui  src/services/strings.c "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
 run test_messages_app src/apps/messages/app.c src/apps/messages/composer.c src/apps/messages/picture.c src/services/key_utils.c src/ui/menu_visible.c src/ui/text_layout.c "${DEAD_CODE_FLAGS[@]}"
+if [ "$using_synthetic_assets" -eq 0 ]; then
+    run test_picture_ui src/apps/messages/picture.c src/apps/dialogs_app.c src/ui/ui.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c src/services/strings.c "$GENERATED_SRC_DIR/assets_data.c" "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
+fi
 check_assetgen               # asset-generation pipeline pure logic (python, no firmware needed)
 check_stack_budget           # GCC callgraph parser + core budget policy
 run test_small_utils         # includes the pure .c files directly (single TU, stubbed HALs)

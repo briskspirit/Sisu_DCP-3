@@ -9,6 +9,7 @@
 #include "services/battery_charge_supervisor_logic.h"
 #include "services/datetime_types.h"
 #include "services/picture_message_types.h"
+#include "services/sms_picture_codec.h"
 
 /* How long to hold off flash commits after audio/key activity, so a flash
  * erase (which parks core1) can't starve the audio DMA refill. Armed by
@@ -357,7 +358,20 @@ store_status_t store_t9_user_words_save(char words[][STORE_T9_WORD_MAX + 1u], ui
 uint8_t store_picture_message_count(void);
 store_status_t store_picture_message_get(uint8_t slot, store_picture_message_t *out_message);
 store_status_t store_picture_message_set(uint8_t slot, const store_picture_message_t *message);
+store_status_t store_picture_message_set_text(uint8_t slot, const char *text);
 store_status_t store_picture_message_clear(uint8_t slot);
+store_status_t store_picture_message_sender(uint8_t slot, char *dst, size_t cap);
+/* Receive only already-classified port-158A parts. No ME fallback on failure.
+ * OK means queued in RAM; publication waits for picture_commit_status == OK. */
+store_status_t store_picture_receive(const sms_codec_message_t *part, uint32_t now_ms);
+/* NOT_FOUND leaves ordinary SMS on their existing modem-storage path. */
+store_status_t store_picture_receive_pdu(const char *pdu, uint32_t now_ms);
+uint32_t store_picture_pending_first(void);
+store_status_t store_picture_pending_get(uint32_t id, store_picture_message_t *out,
+                                         char *sender, size_t sender_cap);
+store_status_t store_picture_pending_save(uint32_t id, uint8_t slot);
+store_status_t store_picture_pending_discard(uint32_t id);
+store_status_t store_picture_commit_status(void);
 
 store_status_t store_own_tone_get(uint8_t slot, store_own_tone_t *out_tone);
 store_status_t store_own_tone_set(uint8_t slot, const store_own_tone_t *tone);

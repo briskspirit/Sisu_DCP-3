@@ -298,8 +298,9 @@ bool ui_wrap_line_at(const font_t *font,
     }
 }
 
-uint8_t wrap_text_lines_ex(const font_t *font, const char *text, int width,
-                           char *lines, size_t stride, uint8_t max_lines) {
+static uint8_t wrap_text_rows(const font_t *font, const char *text, int width,
+                             const int *widths, char *lines, size_t stride,
+                             uint8_t max_lines) {
     if (font == NULL || text == NULL || lines == NULL || stride == 0u ||
         max_lines == 0u) {
         return 0u;
@@ -309,8 +310,11 @@ uint8_t wrap_text_lines_ex(const font_t *font, const char *text, int width,
         lines[(size_t)i * stride] = '\0';
     }
     uint8_t count = 0u;
-    while (count < max_lines &&
-           word_wrap_next(&iter, lines + (size_t)count * stride, stride)) {
+    while (count < max_lines) {
+        iter.width = widths != NULL ? widths[count] : width;
+        if (!word_wrap_next(&iter, lines + (size_t)count * stride, stride)) {
+            break;
+        }
         count++;
     }
     if (iter.failed) {
@@ -320,6 +324,19 @@ uint8_t wrap_text_lines_ex(const font_t *font, const char *text, int width,
         return 0u;
     }
     return count;
+}
+
+uint8_t wrap_text_lines_ex(const font_t *font, const char *text, int width,
+                           char *lines, size_t stride, uint8_t max_lines) {
+    return wrap_text_rows(font, text, width, NULL, lines, stride, max_lines);
+}
+
+uint8_t wrap_text_lines_widths(const font_t *font, const char *text, const int *widths,
+                              char *lines, size_t stride, uint8_t max_lines) {
+    if (widths == NULL) {
+        return 0u;
+    }
+    return wrap_text_rows(font, text, 0, widths, lines, stride, max_lines);
 }
 
 void draw_right_text_box(framebuffer_t *fb, const font_t *font, const char *text, int x, int y, int width) {

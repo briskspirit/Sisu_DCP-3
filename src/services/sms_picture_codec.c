@@ -105,6 +105,7 @@ bool sms_picture_payload_decode(const uint8_t *payload,
     memset(&decoded, 0, sizeof(decoded));
     size_t pos = 1u;
     bool have_picture = false;
+    bool have_text = false;
     while (pos + 3u <= payload_len) {
         uint8_t kind = payload[pos++];
         uint16_t len = (uint16_t)(((uint16_t)payload[pos] << 8) | payload[pos + 1u]);
@@ -113,18 +114,23 @@ bool sms_picture_payload_decode(const uint8_t *payload,
             return false;
         }
         if (kind == SMS_PICTURE_CHUNK_TEXT) {
-            size_t copy_len = len < STORE_PICTURE_TEXT_MAX ? len : STORE_PICTURE_TEXT_MAX;
-            memcpy(decoded.text, &payload[pos], copy_len);
-            decoded.text[copy_len] = '\0';
+            if (have_text || len > STORE_PICTURE_TEXT_MAX || memchr(&payload[pos], '\0', len) != NULL) {
+                return false;
+            }
+            memcpy(decoded.text, &payload[pos], len);
+            decoded.text[len] = '\0';
+            have_text = true;
         } else if (kind == SMS_PICTURE_CHUNK_BITMAP) {
-            if (len < 4u || payload[pos] != SMS_PICTURE_CHUNK_MARKER ||
+            if (have_picture || len < 4u || payload[pos] != SMS_PICTURE_CHUNK_MARKER ||
                 payload[pos + 3u] != SMS_PICTURE_FORMAT) {
                 return false;
             }
             decoded.width = payload[pos + 1u];
             decoded.height = payload[pos + 2u];
             uint16_t expected = picture_bitmap_bytes(decoded.width, decoded.height);
-            if (expected == 0u || expected > STORE_PICTURE_BITMAP_BYTES || len - 4u < expected) {
+            if (expected == 0u || decoded.width > STORE_PICTURE_WIDTH ||
+                decoded.height > STORE_PICTURE_HEIGHT ||
+                expected > STORE_PICTURE_BITMAP_BYTES || len - 4u != expected) {
                 return false;
             }
             decoded.bitmap_len = expected;
@@ -133,7 +139,7 @@ bool sms_picture_payload_decode(const uint8_t *payload,
         }
         pos += len;
     }
-    if (!have_picture) {
+    if (!have_picture || pos != payload_len) {
         return false;
     }
     decoded.used = true;

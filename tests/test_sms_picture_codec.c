@@ -1034,6 +1034,18 @@ static void test_picture_payload_malformed(void) {
                            STORE_PICTURE_HEIGHT, 0x99u, 0x00u, 0x00u};
     assert_true(!sms_picture_payload_decode(bad_fmt, sizeof(bad_fmt), &out),
                 "bitmap bad format byte rejected");
+    uint8_t tiny[] = {0x30u, 0x02u, 0x00u, 0x05u, 0x00u, 8u, 1u, 1u, 0x80u, 0xffu};
+    assert_true(sms_picture_payload_decode(tiny, sizeof(tiny) - 1u, &out), "small complete picture valid");
+    assert_true(!sms_picture_payload_decode(tiny, sizeof(tiny), &out), "trailing partial chunk rejected");
+    tiny[3] = 6u;
+    assert_true(!sms_picture_payload_decode(tiny, sizeof(tiny), &out), "bitmap length must match geometry");
+    tiny[3] = 5u;
+    uint8_t duplicate[17];
+    memcpy(duplicate, tiny, 9u);
+    memcpy(duplicate + 9u, tiny + 1u, 8u);
+    assert_true(!sms_picture_payload_decode(duplicate, sizeof(duplicate), &out), "multiple bitmaps are not silently replaced");
+    uint8_t tall[12] = {0x30u, 0x02u, 0x00u, 8u, 0u, 1u, 29u, 1u};
+    assert_true(!sms_picture_payload_decode(tall, sizeof(tall), &out), "unsupported geometry is not silently cropped");
 }
 
 /* picture payload encode: empty text (text_len==0) must still encode a valid

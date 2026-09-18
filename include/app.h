@@ -281,6 +281,15 @@ typedef struct {
     uint8_t messages_picture_save_return_selected;
     char messages_picture_draft[STORE_PICTURE_TEXT_MAX + 1u];
     store_picture_message_t messages_picture_save_candidate;
+    uint32_t picture_notice_id;
+    uint32_t picture_last_notice_id;
+    uint32_t picture_receive_id;
+    uint8_t picture_commit_action; /* 1 save, 2 replacement, 3 discard */
+    bool picture_commit_waiting;
+    uint32_t picture_receive_errors_seen;
+    bool picture_receive_warning;
+    bool picture_storage_failed;
+    bool picture_storage_warning;
     bool messages_picture_send_waiting;
     uint32_t messages_picture_send_started_ms;
     uint32_t messages_picture_send_request_id;

@@ -161,6 +161,19 @@ bool handle_standby_key(app_t *app, const input_event_t *event) {
         return true;
     }
 
+    if (app->picture_notice_id != 0u && app->input_len == 0u) {
+        if (key == KEY_NAVI) {
+            (void)messages_picture_open_received(app, now);
+            return true;
+        }
+        if (key == KEY_C) {
+            if (messages_picture_open_received(app, now)) {
+                messages_picture_ask_save(app);
+            }
+            return true;
+        }
+    }
+
     if (app->sms_received_pending && app->input_len == 0u) {
         if (key == KEY_NAVI) {
             app->sms_received_pending = false;
@@ -538,6 +551,8 @@ void render_standby(const app_t *app, framebuffer_t *fb) {
         char notice[48];
         format_message_waiting_notice(app, notice, sizeof(notice));
         draw_notice(fb, asset_font(FONT_FS2), notice);
+    } else if (app->picture_notice_id != 0u) {
+        messages_picture_draw_notice(fb);
     } else if (app->sms_received_pending) {
         char notice[48];
         uint8_t count = app->sms_received_pending_count == 0u ? 1u : app->sms_received_pending_count;
@@ -580,6 +595,8 @@ void render_standby(const app_t *app, framebuffer_t *fb) {
     } else if (standby_message_waiting_notice(app) !=
                MODEM_MESSAGE_WAITING_ALL) {
         draw_softkey(fb, "Exit");
+    } else if (app->picture_notice_id != 0u) {
+        draw_softkey(fb, "View");
     } else if (app->sms_received_pending) {
         draw_softkey(fb, "Read");
     } else {

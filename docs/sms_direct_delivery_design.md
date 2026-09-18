@@ -28,7 +28,9 @@ quarantine, UI) is built on 3GPP TS 23.040 PDUs read from the ME store.
 ## Decision
 
 One receive route for every carrier: direct delivery, classify complete
-controls, then re-store user messages.
+controls, route recognized pictures to local flash, then re-store ordinary user
+messages in ME. [Picture messages](picture_messages.md) describes the separate
+pending-reception/gallery workflow and its transport limits.
 
 ```
 modem  --+CMT header/payload-->  modem_sms_direct (generic collector)
@@ -39,6 +41,8 @@ modem  --+CMT header/payload-->  modem_sms_direct (generic collector)
                                      v
                        sms_control_filter -> known controls consumed in RAM
                                      v (keep)
+                       picture port 0x158A -> host picture journal / View / Save
+                                     v (other messages)
                        STORE_DELIVERED protocol op: AT+CMGF=0, AT+CMGW=<len>,0,
                        <pdu>^Z, AT+CMGF=1  ->  +CMGW: <idx>
                                      v
@@ -101,11 +105,13 @@ Therefore:
 - init keeps `AT+CMGF=1`, adds `AT+CSDH=1`, and replaces
   `AT+CNMI=1,1,0,0,0` with `AT+CNMI=2,2,0,0,0` (mode 2 buffers URCs while
   the link is reserved and flushes them afterwards);
-- the send, save, read and delete flows are untouched (they still flip to
-  PDU mode transiently and restore text mode);
+- production picture sending stays in text mode with temporary 8-bit/UDHI
+  CSMP settings, then restores normal text settings. Existing ME save/read/scan
+  operations still use transient PDU mode;
 - a `+CMT` that lands inside a transient PDU window is parsed in its PDU form
   (3GPP: standard SMS-DELIVER, pass-through; 3GPP2: Telit PDU, UDH already
-  stripped by the module - accepted, rare, logged).
+  stripped by the module). Lost headers cannot be reconstructed reliably;
+  this remains a transport limitation, not a lossless fallback.
 
 ### Acknowledgement
 

@@ -2167,6 +2167,11 @@ static void command_status(void) {
            (unsigned long)status.sms_filtered_type0,
            (unsigned long)status.sms_filtered_vvm,
            (unsigned long)status.sms_filtered_oma_dm);
+    printf("[debug] pictures parts=%lu errors=%lu pending=%lu store=%u\n",
+           (unsigned long)status.picture_parts_received,
+           (unsigned long)status.picture_receive_errors,
+           (unsigned long)store_picture_pending_first(),
+           (unsigned)store_picture_commit_status());
     const char *operator_source =
         status.operator_name_source == MODEM_OPERATOR_NAME_DATABASE ? "db" :
         status.operator_name_source == MODEM_OPERATOR_NAME_SIM ? "sim" :
@@ -2574,7 +2579,41 @@ static void command_ui(app_t *app, char *args) {
     char *cursor = args;
     char *name = next_token(&cursor);
     if (name == 0) {
-        printf("[debug] usage: ui <standby|number|keyguard|call|callopts|incoming>\n");
+        printf("[debug] usage: ui <dump|key navi/c/up/down/0..9/*/#|standby|number|keyguard|call|callopts|incoming>\n");
+        return;
+    }
+    if (strcmp(name, "dump") == 0 && next_token(&cursor) == NULL) {
+        static framebuffer_t snapshot;
+        fb_clear(&snapshot, false);
+        app_render(app, &snapshot);
+        printf("[ui] route=%u kind=%u mode=%u selected=%u notice=%lu receive=%lu commit=%u slots=%u\n",
+               (unsigned)app->route, (unsigned)app->messages_kind,
+               (unsigned)app->messages_mode, (unsigned)app->messages_selected,
+               (unsigned long)app->picture_notice_id, (unsigned long)app->picture_receive_id,
+               app->picture_commit_waiting ? 1u : 0u, (unsigned)store_picture_message_count());
+        for (unsigned i = 0u; i < FB_SIZE; i += 42u) {
+            printf("[fb] %03u:", i);
+            for (unsigned j = i; j < i + 42u && j < FB_SIZE; j++) printf("%02x", snapshot.data[j]);
+            printf("\n");
+        }
+        return;
+    }
+    if (strcmp(name, "key") == 0) {
+        char *key = next_token(&cursor);
+        uint16_t code = key == NULL ? 0u :
+            strcmp(key, "navi") == 0 ? KEY_NAVI : strcmp(key, "c") == 0 ? KEY_C :
+            strcmp(key, "up") == 0 ? KEY_UP : strcmp(key, "down") == 0 ? KEY_DOWN : 0u;
+        if (code == 0u && key != NULL && key[0] != '\0' && key[1] == '\0') {
+            code = debug_keycal_key(key[0]);
+        }
+        if (code == 0u || next_token(&cursor) != NULL) {
+            printf("[ui] usage: ui key <navi|c|up|down|0..9|*|#>\n");
+            return;
+        }
+        input_event_t event = {.type = EVENT_KEY_DOWN, .code = code, .when_ms = time_ms()};
+        bool handled = app_handle_event(app, &event);
+        if (handled) app->dirty = true;
+        printf("[ui] key=%s handled=%u route=%u\n", key, handled ? 1u : 0u, (unsigned)app->route);
         return;
     }
 

@@ -1735,6 +1735,20 @@ static void test_direct_3gpp2_text_forms(void) {
           "concatenation survives");
 
     check(telit_translate_direct_sms(
+              "+CMT: \"12025550123\",\"\",\"20260918102440\",129,4101,1,0,15",
+              BYTES("0B0504158A158A000302030242494E"), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+              d.udhi && build_and_decode(&d, &m) && m.binary &&
+              m.has_ports && m.dest_port == 0x158au && m.source_port == 0x158au &&
+              m.has_concat && m.concat_ref == 2u && m.concat_total == 3u &&
+              m.concat_seq == 2u && m.binary_len == 3u &&
+              memcmp(m.binary_data, "BIN", 3u) == 0,
+          "WEMT octet picture retains ports, concatenation and payload");
+    check(telit_translate_direct_sms(
+              "+CMT: \"12025550123\",\"\",\"20260918102440\",129,4098,1,0,3",
+              BYTES("42494E"), &d) == MODEM_SMS_DIRECT_ACCEPTED && !d.udhi,
+          "ordinary octet data does not acquire a speculative header");
+
+    check(telit_translate_direct_sms(
               "+CMT: \"7866910488\",\"\",\"20260916105559\",129,4098,0,4,2",
               BYTES("D83EDD2A"), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
               d.dcs == 0x08u && d.udl == 4u && d.ud_len == 4u,

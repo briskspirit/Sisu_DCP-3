@@ -23,10 +23,10 @@ static bool mode_gsm7_text(modem_binary_sms_mode_t mode) {
     return mode == MODEM_BINARY_SMS_MODE_GSM7_TEXT;
 }
 
-bool sms_submit_pdu_build(sms_submit_pdu_t *submit,
+static bool build_segment(sms_submit_pdu_t *submit,
                           char *hex,
                           size_t hex_cap,
-                          uint8_t *out_tpdu_len) {
+                          uint8_t *out_tpdu_len, bool user_data_only) {
     if (submit == NULL || hex == NULL || hex_cap == 0u ||
         out_tpdu_len == NULL || submit->number == NULL ||
         submit->payload == NULL || submit->payload_len == 0u ||
@@ -91,6 +91,7 @@ bool sms_submit_pdu_build(sms_submit_pdu_t *submit,
         pdu[pos++] = 0xa7u; /* Relative VP matching text-mode setup. */
     }
     pdu[pos++] = udl;
+    size_t user_data_start = pos;
 
     if (pos + udh_total + user_data_len > sizeof(pdu)) {
         return false;
@@ -130,7 +131,7 @@ bool sms_submit_pdu_build(sms_submit_pdu_t *submit,
     }
 
     size_t hex_pos = 0u;
-    for (size_t i = 0u; i < pos; i++) {
+    for (size_t i = user_data_only ? user_data_start : 0u; i < pos; i++) {
         if (!sms_submit_append_hex_byte(hex, hex_cap, &hex_pos, pdu[i])) {
             return false;
         }
@@ -140,6 +141,19 @@ bool sms_submit_pdu_build(sms_submit_pdu_t *submit,
     submit->position = (uint16_t)(submit->position + chunk_len);
     submit->segment++;
     return true;
+}
+
+bool sms_submit_pdu_build(sms_submit_pdu_t *submit, char *hex,
+                          size_t hex_cap, uint8_t *out_tpdu_len) {
+    return build_segment(submit, hex, hex_cap, out_tpdu_len, false);
+}
+
+bool sms_submit_picture_text_build(sms_submit_pdu_t *submit, char *hex,
+                                   size_t hex_cap) {
+    uint8_t ignored;
+    return submit != NULL && submit->mode == MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST &&
+           (submit->dest_port != 0u || submit->source_port != 0u) &&
+           build_segment(submit, hex, hex_cap, &ignored, true);
 }
 
 bool sms_submit_pack_gsm7(const uint8_t *src,

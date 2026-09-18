@@ -1537,7 +1537,50 @@ static void test_store_delivered_timeouts(void) {
           "empty pdu_hex is rejected");
 }
 
+static void test_picture_text_send(void) {
+    reset_fixture();
+    static const uint8_t payload[] = {0x10u, 0x20u, 0x30u};
+    modem_sms_protocol_request_t request = {
+        .request_id = 99u, .operation = MODEM_SMS_PROTOCOL_SEND_BINARY,
+        .number = "5550100", .binary = payload, .binary_len = sizeof(payload),
+        .dest_port = 0x158au, .source_port = 0u,
+        .binary_mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
+        .picture_text_mode = true,
+    };
+    check(modem_sms_protocol_begin(&request, &s_hooks, 100u), "picture text send begins");
+    check_command(0u, MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP, "AT+CMGF=1;+CSMP=81,167,0,4",
+                  5000u, false, false, "picture send keeps native reception in text mode");
+    check(modem_sms_protocol_text_parameters_dirty(), "dispatched CSMP needs cleanup");
+    clear_actions();
+    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP, true, &request, &s_hooks, 110u);
+    check(strcmp(s_actions[0].command, "AT+CMGS=\"5550100\"") == 0,
+          "picture opens addressed text-mode prompt");
+    clear_actions();
+    check(modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 120u),
+          "picture text prompt accepted");
+    check(s_actions[0].body_len == 20u && memcmp(s_actions[0].body, "060504158A0000102030", 20u) == 0,
+          "picture text body contains exact port UDH and octets, not a whole PDU");
+    clear_actions();
+    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGS_FINAL, true, &request, &s_hooks, 130u);
+    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0",
+                  5000u, false, false, "picture restores ordinary text parameters");
+    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, false, &request, &s_hooks, 140u);
+    check(modem_sms_protocol_text_parameters_dirty() && modem_sms_protocol_settings_restore_needed() &&
+              !modem_sms_protocol_pdu_mode_possible(),
+          "failed cleanup remains repairable after an accepted send");
+
+    reset_fixture();
+    check(modem_sms_protocol_begin(&request, &s_hooks, 200u), "picture setup timeout fixture");
+    clear_actions();
+    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP, &request, &s_hooks, 210u);
+    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0",
+                  5000u, false, false, "partial compound setup is cleaned up after timeout");
+    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 220u);
+    check(!modem_sms_protocol_settings_restore_needed(), "confirmed cleanup clears repair obligation");
+}
+
 int main(void) {
+    test_picture_text_send();
     test_text_send_and_sent_copy_failure();
     test_binary_prompt_timeout_restore();
     test_binary_cleanup_duplicate_wedge();

@@ -108,6 +108,9 @@ bool modem_sms_state_binary_build_segment(
     const char *number, const uint8_t *payload, uint16_t payload_len,
     uint16_t dest_port, uint16_t source_port,
     modem_binary_sms_mode_t mode);
+bool modem_sms_state_picture_build_text_segment(
+    const char *number, const uint8_t *payload, uint16_t payload_len,
+    uint16_t dest_port, uint16_t source_port);
 void modem_sms_state_binary_segment_view(
     modem_sms_binary_segment_view_t *out);
 bool modem_sms_state_binary_has_more(uint16_t payload_len);

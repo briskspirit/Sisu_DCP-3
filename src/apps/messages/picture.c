@@ -23,14 +23,44 @@ static const char *const PICTURE_OPTIONS[] = {
     "Edit text", "Erase", "Use number", "Forward", "Details",
 };
 static const uint16_t PICTURE_OPTIONS_SID[] = {
-    0x16fu, 0u, 0u, 0u, 0u,
+    0x16fu, 0x170u, 0x186u, 0x175u, 0x16eu,
 };
 static const char *const PICTURE_EDITOR_OPTIONS[] = {
     "Send", "Save", "Clear text", "Preview", "Exit",
 };
 static const uint16_t PICTURE_EDITOR_OPTIONS_SID[] = {
-    0u, 0x17eu, 0x16du, 0x17bu, 0x173u,
+    0x181u, 0x17eu, 0x16du, 0x17bu, 0x173u,
 };
+
+static void picture_format(char *dst, size_t cap, const char *format,
+                            char token, const char *value) {
+    size_t used = 0u;
+    while (*format != '\0' && used + 1u < cap) {
+        if (format[0] == '%' && format[1] == token) {
+            copy_text(dst + used, cap - used, value);
+            used += strlen(dst + used);
+            format += 2;
+        } else {
+            const char *next = format;
+            asset_next_codepoint(&next);
+            size_t bytes = (size_t)(next - format);
+            if (used + bytes >= cap) break;
+            memcpy(dst + used, format, bytes);
+            used += bytes;
+            format = next;
+        }
+    }
+    if (cap != 0u) dst[used] = '\0';
+}
+
+static void picture_sender_text(uint8_t slot, char *text, size_t cap) {
+    char sender[MODEM_SMS_SENDER_MAX + 1u] = {0};
+    char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    (void)store_picture_message_sender(slot, sender, sizeof(sender));
+    resolve_contact_name(sender, name, sizeof(name));
+    picture_format(text, cap, ts_or(0x35cu, "Sender:\n%S"),
+                   'S', name[0] != '\0' ? name : sender);
+}
 
 static bool picture_by_ordinal(uint8_t ordinal,
                                uint8_t *out_slot,
@@ -45,6 +75,11 @@ static void picture_apply_draft(const app_t *app,
                                 store_picture_message_t *message);
 static void picture_draw_preview(framebuffer_t *fb,
                                  const store_picture_message_t *message);
+static void picture_draw_read(const app_t *app, framebuffer_t *fb,
+                               const store_picture_message_t *picture);
+static void picture_draw_text_page(framebuffer_t *fb, const char *text,
+                                   uint16_t scroll, int y);
+static void picture_scroll(app_t *app, uint16_t key, const char *text);
 static void picture_begin_edit(app_t *app, uint32_t now);
 static void picture_save_draft(app_t *app, uint32_t now);
 static void picture_clear_draft(app_t *app, uint32_t now);
@@ -62,9 +97,12 @@ static uint8_t picture_count(void) {
 }
 
 void messages_picture_open_menu(app_t *app, uint32_t now) {
+    if (app->picture_commit_waiting) return;
+    if (messages_picture_open_received(app, now)) return;
+    app->picture_receive_id = 0u;
     if (picture_count() == 0u) {
         open_display_sid(app,
-                         2u,
+                         6u,
                          0x178u,
                          "No picture\nmessages\navailable",
                          APP_ROUTE_MAIN_MENU,
@@ -79,6 +117,8 @@ void messages_picture_open_menu(app_t *app, uint32_t now) {
 }
 
 void messages_picture_open_list(app_t *app) {
+    if (app->picture_commit_waiting) return;
+    app->picture_receive_id = 0u;
     app->messages_kind = MESSAGES_KIND_PICTURES;
     app->messages_mode = MESSAGES_MODE_LIST;
     app->messages_selected = 0u;
@@ -94,6 +134,11 @@ void messages_picture_open_list(app_t *app) {
 }
 
 void messages_picture_render(const app_t *app, framebuffer_t *fb) {
+    if (app->picture_receive_id != 0u && !app->messages_picture_save_pending) {
+        picture_draw_read(app, fb, &app->messages_picture_save_candidate);
+        draw_softkey(fb, "Save");
+        return;
+    }
     if (app->messages_mode == MESSAGES_MODE_OPTIONS) {
         const char *labels[ARRAY_COUNT(PICTURE_OPTIONS)];
         for (uint8_t i = 0u; i < ARRAY_COUNT(PICTURE_OPTIONS); i++) {
@@ -115,7 +160,7 @@ void messages_picture_render(const app_t *app, framebuffer_t *fb) {
             return;
         }
         picture_apply_draft(app, slot, &picture);
-        picture_draw_preview(fb, &picture);
+        picture_draw_read(app, fb, &picture);
         draw_softkey(fb, "Options");
         return;
     }
@@ -126,16 +171,10 @@ void messages_picture_render(const app_t *app, framebuffer_t *fb) {
         if (slot >= STORE_PICTURE_SLOT_COUNT) {
             return;
         }
-        char text[64];
-        snprintf(text,
-                 sizeof(text),
-                 "Picture:\n%ux%u\nSlot %u",
-                 (unsigned)(picture.width == 0u ? STORE_PICTURE_WIDTH : picture.width),
-                 (unsigned)(picture.height == 0u ? STORE_PICTURE_HEIGHT : picture.height),
-                 (unsigned)(slot + 1u));
-        draw_text_block(fb, asset_font(FONT_FS2), text,
-                        0, 0, FB_WIDTH, 9, 4u);
-        draw_softkey(fb, "Back");
+        char text[160];
+        picture_sender_text(slot, text, sizeof(text));
+        picture_draw_text_page(fb, text, app->messages_detail_page, 0);
+        draw_softkey(fb, "OK");
         return;
     }
 
@@ -161,10 +200,13 @@ void messages_picture_render(const app_t *app, framebuffer_t *fb) {
             if (picture.text[0] != '\0') {
                 copy_text(labels[i], sizeof(labels[i]), picture.text);
             } else {
-                snprintf(labels[i], sizeof(labels[i]), "Picture %u", (unsigned)(slot + 1u));
+                char number[4];
+                snprintf(number, sizeof(number), "%u", (unsigned)(slot + 1u));
+                picture_format(labels[i], sizeof(labels[i]), ts_or(0x179u, "Picture %N"),
+                               'N', number);
             }
         } else {
-            copy_text(labels[i], sizeof(labels[i]), "Picture");
+            labels[i][0] = '\0';
         }
         label_ptrs[i] = labels[i];
     }
@@ -184,7 +226,28 @@ void messages_picture_draw_received_preview(framebuffer_t *fb,
     picture_draw_preview(fb, picture);
 }
 
+void messages_picture_draw_notice(framebuffer_t *fb) {
+    const char *text = ts_or(0x17cu, "Picture message received");
+    uint16_t lines = ui_wrap_line_count(asset_font(FONT_FS2), text, 72);
+    if (lines > 3u) lines = 3u;
+    /* v6.00 notice format 0x0e: window 0x40, <FS2><EV>. */
+    draw_text_block(fb, asset_font(FONT_FS2), text,
+                    6, 7 + (30 - (int)lines * 9) / 2, 72, 9, 3u);
+}
+
 bool messages_picture_handle_key(app_t *app, uint16_t key, uint32_t now) {
+    if (app->picture_commit_waiting) return true;
+    if (app->picture_receive_id != 0u && !app->messages_picture_save_pending) {
+        if (key == KEY_NAVI) {
+            messages_picture_save_received(app, &app->messages_picture_save_candidate, now);
+        } else if (key == KEY_C) {
+            messages_picture_ask_save(app);
+        } else {
+            picture_scroll(app, key, app->messages_picture_save_candidate.text);
+        }
+        app->dirty = true;
+        return true;
+    }
     if (app->messages_mode == MESSAGES_MODE_OPTIONS) {
         uint8_t count = (uint8_t)ARRAY_COUNT(PICTURE_OPTIONS);
         if (key == KEY_UP) {
@@ -208,9 +271,17 @@ bool messages_picture_handle_key(app_t *app, uint16_t key, uint32_t now) {
         if (key == KEY_UP && app->messages_detail_page > 0u) {
             app->messages_detail_page--;
             app->dirty = true;
-        } else if (key == KEY_DOWN && app->messages_detail_page < 2u) {
-            app->messages_detail_page++;
-            app->dirty = true;
+        } else if (key == KEY_DOWN) {
+            uint8_t slot;
+            char text[160];
+            if (picture_by_ordinal(app->messages_selected, &slot, NULL)) {
+                picture_sender_text(slot, text, sizeof(text));
+                if (app->messages_detail_page + 4u <
+                    ui_wrap_line_count(asset_font(FONT_FS2), text, FB_WIDTH)) {
+                    app->messages_detail_page++;
+                    app->dirty = true;
+                }
+            }
         } else if (key == KEY_C || key == KEY_NAVI) {
             app->messages_mode = MESSAGES_MODE_OPTIONS;
             app->dirty = true;
@@ -226,6 +297,14 @@ bool messages_picture_handle_key(app_t *app, uint16_t key, uint32_t now) {
         } else if (key == KEY_C) {
             app->messages_mode = MESSAGES_MODE_LIST;
             app->dirty = true;
+        } else if (key == KEY_UP || key == KEY_DOWN) {
+            store_picture_message_t picture;
+            uint8_t slot = picture_selected_slot(app, &picture);
+            if (slot < STORE_PICTURE_SLOT_COUNT) {
+                picture_apply_draft(app, slot, &picture);
+                picture_scroll(app, key, picture.text);
+                app->dirty = true;
+            }
         }
         return true;
     }
@@ -293,7 +372,7 @@ bool messages_picture_poll_send(app_t *app, uint32_t now) {
     bool detached = false;
     if (ui_owned &&
         (app->route != APP_ROUTE_DISPLAY_MESSAGE ||
-         app->display_record_id != 46u ||
+         app->display_record_id != 36u ||
          app->display_return_route != APP_ROUTE_MESSAGES_LIST)) {
         app->messages_picture_send_waiting = false;
         ui_owned = false;
@@ -320,7 +399,7 @@ bool messages_picture_poll_send(app_t *app, uint32_t now) {
         }
         if (result.outcome == MODEM_SMS_OUTCOME_OK) {
             open_display_sid(app,
-                             3u,
+                             6u,
                              0x183u,
                              "Picture\nmessage\nsent",
                              APP_ROUTE_MESSAGES_LIST,
@@ -334,9 +413,9 @@ bool messages_picture_poll_send(app_t *app, uint32_t now) {
                              now);
         } else {
             open_display_sid(app,
-                             0u,
-                             0x359u,
-                             "Message\nsending\nfailed",
+                             6u,
+                             0x174u,
+                             "Picture message sending failed",
                              APP_ROUTE_MESSAGES_LIST,
                              now);
         }
@@ -347,9 +426,9 @@ bool messages_picture_poll_send(app_t *app, uint32_t now) {
                               PICTURE_SMS_SEND_TIMEOUT_MS) >= 0) {
         app->messages_picture_send_waiting = false;
         open_display_sid(app,
-                         0u,
-                         0x359u,
-                         "Message\nsending\nfailed",
+                         6u,
+                         0x174u,
+                         "Picture message sending failed",
                          APP_ROUTE_MESSAGES_LIST,
                          now);
         return true;
@@ -361,13 +440,7 @@ void messages_picture_save_received(app_t *app,
                                     const store_picture_message_t *picture,
                                     uint32_t now) {
     if (picture == NULL) {
-        open_display(app,
-                     0u,
-                     "Message",
-                     "function",
-                     "failed",
-                     APP_ROUTE_MESSAGES_LIST,
-                     now);
+        open_display_sid(app, 0u, 0x210u, "Not\ndone", APP_ROUTE_MESSAGES_LIST, now);
         return;
     }
     for (uint8_t slot = 0u; slot < STORE_PICTURE_SLOT_COUNT; slot++) {
@@ -386,6 +459,79 @@ void messages_picture_save_received(app_t *app,
     app->messages_selected = 0u;
     app->route = APP_ROUTE_MESSAGES_LIST;
     app->dirty = true;
+    open_display_sid(app, 6u, 0x176u, "No space\nfor new\npictures",
+                     APP_ROUTE_MESSAGES_LIST, now);
+}
+
+bool messages_picture_open_received(app_t *app, uint32_t now) {
+    (void)now;
+    uint32_t id = store_picture_pending_first();
+    if (id == 0u || app->picture_commit_waiting ||
+        store_picture_pending_get(id, &app->messages_picture_save_candidate, NULL, 0u) != STORE_STATUS_OK) return false;
+    app->picture_receive_id = id;
+    app->picture_notice_id = 0u;
+    app->messages_picture_save_pending = false;
+    app->messages_kind = MESSAGES_KIND_PICTURES;
+    app->messages_mode = MESSAGES_MODE_READ;
+    app->messages_read_page = 0u;
+    app->messages_read_scroll = 0u;
+    app->route = APP_ROUTE_MESSAGES_LIST;
+    app->dirty = true;
+    return true;
+}
+
+void messages_picture_ask_save(app_t *app) {
+    if (app->picture_receive_id == 0u || app->picture_commit_waiting) return;
+    /* v6.00 object 0x2d7f68: window 0x2c, FS2/EV/MT2/TLS2. */
+    open_confirm_sid(app, CONFIRM_CONTEXT_PICTURE_MESSAGE_SAVE_FIRST,
+                     0x17fu, "Save picture message first?", 2);
+    app->confirm_first_y = 2 + (35 - app->confirm_line_count * 9) / 2;
+}
+
+void messages_picture_confirm_save(app_t *app, bool save, uint32_t now) {
+    if (app->picture_receive_id == 0u || app->picture_commit_waiting) return;
+    if (save) {
+        app->confirm_context = CONFIRM_CONTEXT_NONE;
+        messages_picture_save_received(app, &app->messages_picture_save_candidate, now);
+    } else if (store_picture_pending_discard(app->picture_receive_id) == STORE_STATUS_OK) {
+        app->picture_commit_action = 3u;
+        app->picture_commit_waiting = true;
+    } else {
+        app->confirm_context = CONFIRM_CONTEXT_NONE;
+        open_display_sid(app, 0u, 0x210u, "Not\ndone", APP_ROUTE_MESSAGES_LIST, now);
+    }
+}
+
+bool messages_picture_poll_storage(app_t *app, uint32_t now) {
+    if (!app->picture_commit_waiting) return false;
+    store_status_t status = store_picture_commit_status();
+    if (status == STORE_STATUS_NOT_READY) return false;
+    bool owns_ui = (app->route == APP_ROUTE_MESSAGES_LIST &&
+                   app->messages_kind == MESSAGES_KIND_PICTURES) ||
+        (app->route == APP_ROUTE_CONFIRM &&
+         app->confirm_context == CONFIRM_CONTEXT_PICTURE_MESSAGE_SAVE_FIRST);
+    uint8_t action = app->picture_commit_action;
+    app->picture_commit_waiting = false;
+    if (owns_ui) app->confirm_context = CONFIRM_CONTEXT_NONE;
+    if (status != STORE_STATUS_OK) {
+        if (owns_ui) open_display_sid(app, 0u, action == 3u ? 0x210u : 0x3b3u,
+                                     action == 3u ? "Not\ndone" : "Not\nsaved",
+                                     APP_ROUTE_MESSAGES_LIST, now);
+        return true;
+    }
+    app->picture_receive_id = 0u;
+    app->messages_picture_save_pending = false;
+    if (!owns_ui) return true; /* A call or alarm displaced the picture flow. */
+    app_route_t next = messages_picture_open_received(app, now)
+        ? APP_ROUTE_MESSAGES_LIST : APP_ROUTE_STANDBY;
+    app->route = next;
+    app->dirty = true;
+    if (action != 3u) {
+        open_display_sid(app, 6u, action == 2u ? 0x17du : 0x180u,
+                         action == 2u ? "Old picture\nreplaced" : "Picture message\nsaved",
+                         next, now);
+    }
+    return true;
 }
 
 uint16_t messages_picture_composer_max_len(const app_t *app) {
@@ -597,18 +743,49 @@ static void picture_draw_preview(framebuffer_t *fb,
             }
             if ((message->bitmap[byte_index] &
                  (uint8_t)(1u << (7u - (bit & 7u)))) != 0u) {
-                fb_pixel(fb, 6 + x, 2 + y, true);
+                fb_pixel(fb, (FB_WIDTH - width) / 2 + x, y, true);
             }
         }
     }
     if (message->text[0] != '\0') {
-        fb_text(fb,
-                asset_font(FONT_FS2),
-                message->text,
-                2,
-                32,
-                true,
-                80);
+        /* Window 0x23 is attached below 0x22, with its own MT1 margin. */
+        draw_text_block(fb, asset_font(FONT_FS2), message->text,
+                        0, height + 1, FB_WIDTH, 9, 1u);
+    }
+}
+
+static void picture_draw_read(const app_t *app, framebuffer_t *fb,
+                               const store_picture_message_t *picture) {
+    if (app->messages_read_page == 0u) {
+        picture_draw_preview(fb, picture);
+        return;
+    }
+    fb_clear(fb, false);
+    /* Scrolling opens the runtime window-0x24 dialog, not inline window 0x23. */
+    picture_draw_text_page(fb, picture->text, app->messages_read_scroll, 0);
+}
+
+static void picture_draw_text_page(framebuffer_t *fb, const char *text,
+                                   uint16_t scroll, int y) {
+    char line[UI_WRAP_LINE_BYTES];
+    for (uint8_t i = 0u; i < 4u; i++) {
+        if (ui_wrap_line_at(asset_font(FONT_FS2), text, FB_WIDTH,
+                            scroll + i, line, sizeof(line))) {
+            fb_text(fb, asset_font(FONT_FS2), line, 0, y + i * 9, true, FB_WIDTH);
+        }
+    }
+}
+
+static void picture_scroll(app_t *app, uint16_t key, const char *text) {
+    if (key == KEY_DOWN && text[0] != '\0') {
+        if (app->messages_read_page == 0u) app->messages_read_page = 1u;
+        else if (app->messages_read_scroll + 4u <
+                 ui_wrap_line_count(asset_font(FONT_FS2), text, FB_WIDTH)) {
+            app->messages_read_scroll++;
+        }
+    } else if (key == KEY_UP) {
+        if (app->messages_read_scroll != 0u) app->messages_read_scroll--;
+        else app->messages_read_page = 0u;
     }
 }
 
@@ -644,7 +821,10 @@ static void picture_save_draft(app_t *app, uint32_t now) {
     copy_text(picture.text,
               sizeof(picture.text),
               app->messages_picture_draft);
-    (void)store_picture_message_set(slot, &picture);
+    if (store_picture_message_set_text(slot, picture.text) != STORE_STATUS_OK) {
+        open_display_sid(app, 0u, 0x3b3u, "Not\nsaved", APP_ROUTE_SMS_COMPOSER, now);
+        return;
+    }
     app->messages_picture_text_editing = false;
     app->messages_picture_pending_valid = true;
     app->messages_picture_pending_slot = slot;
@@ -652,7 +832,7 @@ static void picture_save_draft(app_t *app, uint32_t now) {
     app->messages_mode = MESSAGES_MODE_READ;
     app->route = APP_ROUTE_MESSAGES_LIST;
     open_display_sid(app,
-                     3u,
+                     6u,
                      0x180u,
                      "Picture\nmessage\nsaved",
                      APP_ROUTE_MESSAGES_LIST,
@@ -686,13 +866,7 @@ static void picture_start_send(app_t *app,
                                     sizeof(payload),
                                     &payload_len,
                                     &chunks)) {
-        open_display(app,
-                     0u,
-                     "Message",
-                     "function",
-                     "failed",
-                     APP_ROUTE_MESSAGES_LIST,
-                     now);
+        open_display_sid(app, 0u, 0x210u, "Not\ndone", APP_ROUTE_MESSAGES_LIST, now);
         return;
     }
     app->messages_picture_payload_len = payload_len;
@@ -733,7 +907,7 @@ static void picture_start_send(app_t *app,
     app->messages_kind = MESSAGES_KIND_PICTURES;
     app->messages_mode = MESSAGES_MODE_READ;
     open_display_sid(app,
-                     46u,
+                     36u,
                      0x182u,
                      "Sending\npicture message",
                      APP_ROUTE_MESSAGES_LIST,
@@ -772,14 +946,27 @@ static void picture_select_saved_option(app_t *app, uint32_t now) {
                          "Erase picture\nmessage?",
                          2);
     } else if (strcmp(label, "Details") == 0) {
-        open_display_sid(app,
-                         2u,
+        char sender[MODEM_SMS_SENDER_MAX + 1u];
+        if (store_picture_message_sender(slot, sender, sizeof(sender)) == STORE_STATUS_OK && sender[0] != '\0') {
+            app->messages_mode = MESSAGES_MODE_DETAIL;
+            app->messages_detail_page = 0u;
+            app->dirty = true;
+        } else open_display_sid(app,
+                         6u,
                          0x177u,
                          "No more\ndetails\navailable",
                          APP_ROUTE_MESSAGES_LIST,
                          now);
     } else if (strcmp(label, "Use number") == 0) {
-        open_display_sid(app,
+        char sender[MODEM_SMS_SENDER_MAX + 1u];
+        if (store_picture_message_sender(slot, sender, sizeof(sender)) == STORE_STATUS_OK && sender[0] != '\0') {
+            copy_text(app->input_text, sizeof(app->input_text), sender);
+            app->input_len = (uint8_t)strlen(app->input_text);
+            app->input_action = APP_STANDBY_ACTION_CALL;
+            app->star_cycle_until_ms = 0u;
+            app->route = APP_ROUTE_STANDBY;
+            app->dirty = true;
+        } else open_display_sid(app,
                          2u,
                          0x33au,
                          "No number\nfound\non this screen",
@@ -795,10 +982,12 @@ static void picture_store_in_slot(app_t *app,
                                   const store_picture_message_t *picture,
                                   bool replacement,
                                   uint32_t now) {
+    bool incoming = app->picture_receive_id != 0u;
     if (slot >= STORE_PICTURE_SLOT_COUNT || picture == NULL ||
-        store_picture_message_set(slot, picture) != STORE_STATUS_OK) {
+        (incoming ? store_picture_pending_save(app->picture_receive_id, slot)
+                  : store_picture_message_set(slot, picture)) != STORE_STATUS_OK) {
         open_display_sid(app,
-                         2u,
+                         6u,
                          0x176u,
                          "No space\nfor new\npictures",
                          APP_ROUTE_MESSAGES_LIST,
@@ -808,6 +997,7 @@ static void picture_store_in_slot(app_t *app,
     app->messages_picture_save_pending = false;
     app->messages_picture_pending_valid = true;
     app->messages_picture_pending_slot = slot;
+    copy_text(app->messages_picture_draft, sizeof(app->messages_picture_draft), picture->text);
     app->messages_kind = MESSAGES_KIND_PICTURES;
     app->messages_mode = MESSAGES_MODE_READ;
     app->messages_selected = 0u;
@@ -823,16 +1013,21 @@ static void picture_store_in_slot(app_t *app,
         }
         seen++;
     }
-    if (replacement) {
+    if (incoming) {
+        app->picture_commit_action = replacement ? 2u : 1u;
+        app->picture_commit_waiting = true;
+        app->route = APP_ROUTE_MESSAGES_LIST;
+        app->dirty = true;
+    } else if (replacement) {
         open_display_sid(app,
-                         3u,
+                         6u,
                          0x17du,
                          "Old picture\nreplaced",
                          APP_ROUTE_MESSAGES_LIST,
                          now);
     } else {
         open_display_sid(app,
-                         3u,
+                         6u,
                          0x180u,
                          "Picture message\nsaved",
                          APP_ROUTE_MESSAGES_LIST,

@@ -104,6 +104,8 @@ typedef struct {
     uint32_t sms_filtered_type0;
     uint32_t sms_filtered_vvm;
     uint32_t sms_filtered_oma_dm;
+    uint32_t picture_parts_received;
+    uint32_t picture_receive_errors;
     uint16_t sms_storage_used;      /* receive-store occupancy (CPMS mem3), for the memory-full notice */
     uint16_t sms_storage_total;
     uint32_t sms_storage_full_events; /* rising-edge count: store went full -> app shows "No space for new messages" (1:1 SID 453) */

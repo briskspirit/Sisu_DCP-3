@@ -154,5 +154,8 @@ bool ui_wrap_line_at(const font_t *font,
  * never a hidden byte-based wrap or partial codepoint. */
 uint8_t wrap_text_lines_ex(const font_t *font, const char *text, int width,
                            char *lines, size_t stride, uint8_t max_lines);
+/* One width per row, for text flowing alongside a graphic. */
+uint8_t wrap_text_lines_widths(const font_t *font, const char *text, const int *widths,
+                              char *lines, size_t stride, uint8_t max_lines);
 
 #endif

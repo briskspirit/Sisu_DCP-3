@@ -153,6 +153,7 @@ typedef enum {
     MODEM_AT_SMS_CMGS_FINAL,
     MODEM_AT_SMS_CMGW_PROMPT,
     MODEM_AT_SMS_CMGW_FINAL,
+    MODEM_AT_SMS_PICTURE_TEXT_SETUP,
     MODEM_AT_PHONEBOOK_CPBS,
     MODEM_AT_PHONEBOOK_CPBR,
     MODEM_AT_PHONEBOOK_CPBW,
@@ -590,11 +591,14 @@ static uint32_t s_sms_wake_activation_deadline_ms;
 static sms_wake_resume_t s_sms_wake_resume;
 static uint8_t s_sms_wake_retries;
 static bool s_cpms_check_needed;
-/* A cancelled SMS operation had issued AT+CMGF=0 without a completed
- * AT+CMGF=1: the idle scheduler restores text mode, bounded like a store. */
+/* Repair SMS format/parameters after an interrupted operation. Calls retain
+ * priority; text sends must not run with picture-mode CSMP settings. */
 static bool s_sms_mode_restore_pending;
+static bool s_sms_text_parameters_dirty;
 static uint8_t s_sms_mode_restore_attempts;
+static uint32_t s_sms_mode_restore_retry_ms;
 #define MODEM_SMS_MODE_RESTORE_ATTEMPTS 3u
+#define MODEM_SMS_MODE_RESTORE_RETRY_MS 30000u
 static bool s_sms_setup_needed;
 static bool s_sms_wake_armed;
 static bool s_active_sms_wake_arm;
@@ -1173,7 +1177,9 @@ void modem_service_init(void) {
     modem_sms_protocol_reset_pending_arrivals();
     direct_ring_reset();
     s_sms_mode_restore_pending = false;
+    s_sms_text_parameters_dirty = false;
     s_sms_mode_restore_attempts = 0u;
+    s_sms_mode_restore_retry_ms = 0u;
     modem_phonebook_state_init();
     s_now_ms = time_ms();
     s_diag_transport_last_account_ms = s_now_ms;
@@ -3063,6 +3069,23 @@ static void direct_apply_step(modem_sms_direct_step_t step, uint8_t slot,
         break;
     case MODEM_SMS_DIRECT_STEP_READY:
         s_direct_body_deadline_armed = false;
+        /* Recognized pictures belong to the host's journal, including when
+         * the ordinary SMS ring/ME is full. Do not leak fragments into Inbox. */
+        store_status_t result = store_picture_receive_pdu(
+            slot < MODEM_DIRECT_RING_DEPTH ? s_direct_ring[slot].pdu_hex : s_direct_sink,
+            s_now_ms);
+        if (result != STORE_STATUS_NOT_FOUND) {
+            critical_section_enter_blocking(&s_status_lock);
+            uint32_t *counter = result == STORE_STATUS_OK
+                ? &s_status.picture_parts_received : &s_status.picture_receive_errors;
+            if (*counter != UINT32_MAX) (*counter)++;
+            critical_section_exit(&s_status_lock);
+            if (result != STORE_STATUS_OK) {
+                LOGW("modem", "picture receive failed: %u", (unsigned)result);
+                direct_count_error_locked_free();
+            }
+            break;
+        }
         if (slot >= MODEM_DIRECT_RING_DEPTH) {
             /* Built into the sink: nowhere to hold it. */
             LOGW("modem", "direct SMS dropped: ring full");
@@ -3159,22 +3182,28 @@ static uint8_t direct_oldest_slot(void) {
     return oldest;
 }
 
-/* Idle "SMS mode restore": AT+CMGF=1 when a cancelled SMS operation may have
- * left the module in PDU mode (see sms_cancel_protocol). Same gate as the
- * ring drain; cleared on OK, retried next idle tick on ERROR/timeout up to
- * MODEM_SMS_MODE_RESTORE_ATTEMPTS. Returns true only when it sent the command. */
+/* Retry CSMP repair in bounded bursts, without monopolizing the AT channel.
+ * PDU-only repair retains its existing bounded retry policy. */
 static bool sms_mode_restore_start(uint32_t now_ms) {
     if (!s_sms_mode_restore_pending || s_operation != MODEM_OP_NONE || s_active ||
-        s_dtr_wake_pending) {
+        s_dtr_wake_pending || (s_sms_mode_restore_retry_ms != 0u &&
+        time_diff_ms(now_ms, s_sms_mode_restore_retry_ms) < 0)) {
         return false;
     }
     if (s_sms_mode_restore_attempts >= MODEM_SMS_MODE_RESTORE_ATTEMPTS) {
+        if (s_sms_text_parameters_dirty) {
+            LOGW("modem", "SMS parameter repair deferred; SMS work remains blocked");
+            s_sms_mode_restore_attempts = 0u;
+            s_sms_mode_restore_retry_ms = now_ms + MODEM_SMS_MODE_RESTORE_RETRY_MS;
+            return false;
+        }
         LOGW("modem", "SMS text-mode restore gave up after %u attempts",
              (unsigned)s_sms_mode_restore_attempts);
         s_sms_mode_restore_pending = false;
         return false;
     }
-    send_command(MODEM_AT_SMS_MODE_RESTORE, "AT+CMGF=1", 5000u, now_ms);
+    send_command(MODEM_AT_SMS_MODE_RESTORE, s_sms_text_parameters_dirty
+                     ? "AT+CMGF=1;+CSMP=17,167,0,0" : "AT+CMGF=1", 5000u, now_ms);
     return true;
 }
 
@@ -3183,7 +3212,7 @@ static bool sms_mode_restore_start(uint32_t now_ms) {
  * touches DTR/RI. Returns true only when a request was queued. */
 static bool direct_ring_start(uint32_t now_ms) {
     if (s_operation != MODEM_OP_NONE || s_active || s_dtr_wake_pending ||
-        !status_sim_ready_snapshot()) {
+        s_sms_text_parameters_dirty || !status_sim_ready_snapshot()) {
         return false;
     }
     if (s_direct_store_blocked) {
@@ -3275,6 +3304,7 @@ static void process_line(char *line) {
         }
         if (s_active && s_operation == MODEM_OP_SEND_BINARY_SMS &&
             (s_active_kind == MODEM_AT_SMS_CMGF_PDU ||
+             s_active_kind == MODEM_AT_SMS_PICTURE_TEXT_SETUP ||
              s_active_kind == MODEM_AT_SMS_CMGS_PROMPT ||
              s_active_kind == MODEM_AT_SMS_CMGS_FINAL ||
              s_active_kind == MODEM_AT_SMS_CMGF_TEXT)) {
@@ -4061,6 +4091,8 @@ static void advance_state(uint32_t now_ms) {
             /* The first serving-cell sample resolves both network identity and
              * signal before mailbox/supplementary work. No extra COPS query. */
             (void)signal_start_query(now_ms);
+        } else if (s_sms_text_parameters_dirty && sms_mode_restore_start(now_ms)) {
+            /* Repair picture-send parameters before another SMS request. */
         } else if (s_operation == MODEM_OP_NONE && pop_request(&s_current_request)) {
             start_next_request(now_ms);
         } else if (call_model_background_work_blocked(&s_call_model)) {
@@ -4961,7 +4993,9 @@ static void finish_command_result(bool ok, const char *line) {
     } else if (kind == MODEM_AT_SMS_MODE_RESTORE) {
         if (ok) {
             s_sms_mode_restore_pending = false;
+            s_sms_text_parameters_dirty = false;
             s_sms_mode_restore_attempts = 0u;
+            s_sms_mode_restore_retry_ms = 0u;
             LOGI("modem", "SMS text mode restored after a cancelled operation");
         } else {
             s_sms_mode_restore_attempts++; /* retried from the next idle tick */
@@ -5645,7 +5679,8 @@ static bool at_kind_is_operation(modem_at_kind_t kind) {
            kind == MODEM_AT_SMS_CMGD || kind == MODEM_AT_SMS_CMGF_PDU ||
            kind == MODEM_AT_SMS_CMGF_TEXT || kind == MODEM_AT_SMS_CMGS_PROMPT ||
            kind == MODEM_AT_SMS_CMGS_FINAL || kind == MODEM_AT_SMS_CMGW_PROMPT ||
-           kind == MODEM_AT_SMS_CMGW_FINAL || kind == MODEM_AT_PHONEBOOK_CPBS ||
+           kind == MODEM_AT_SMS_CMGW_FINAL || kind == MODEM_AT_SMS_PICTURE_TEXT_SETUP ||
+           kind == MODEM_AT_PHONEBOOK_CPBS ||
            kind == MODEM_AT_PHONEBOOK_CPBR || kind == MODEM_AT_PHONEBOOK_CPBW ||
            kind == MODEM_AT_POWER_OFF || kind == MODEM_AT_DEBUG ||
            kind == MODEM_AT_MAINTENANCE;
@@ -6623,6 +6658,7 @@ static bool sms_protocol_command_from_at(modem_at_kind_t at_kind,
     case MODEM_AT_SMS_CMGS_FINAL:      *out = MODEM_SMS_COMMAND_CMGS_FINAL; return true;
     case MODEM_AT_SMS_CMGW_PROMPT:     *out = MODEM_SMS_COMMAND_CMGW_PROMPT; return true;
     case MODEM_AT_SMS_CMGW_FINAL:      *out = MODEM_SMS_COMMAND_CMGW_FINAL; return true;
+    case MODEM_AT_SMS_PICTURE_TEXT_SETUP: *out = MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP; return true;
     default: return false;
     }
 }
@@ -6642,6 +6678,7 @@ static modem_at_kind_t sms_protocol_command_to_at(
     case MODEM_SMS_COMMAND_CMGS_FINAL:      return MODEM_AT_SMS_CMGS_FINAL;
     case MODEM_SMS_COMMAND_CMGW_PROMPT:     return MODEM_AT_SMS_CMGW_PROMPT;
     case MODEM_SMS_COMMAND_CMGW_FINAL:      return MODEM_AT_SMS_CMGW_FINAL;
+    case MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP: return MODEM_AT_SMS_PICTURE_TEXT_SETUP;
     default:                                return MODEM_AT_NONE;
     }
 }
@@ -6684,6 +6721,7 @@ static bool sms_protocol_request_view(modem_sms_protocol_request_t *out) {
     out->dest_port = s_current_request.dest_port;
     out->source_port = s_current_request.source_port;
     out->binary_mode = (modem_binary_sms_mode_t)s_current_request.binary_mode;
+    out->picture_text_mode = true;
     out->mailbox = s_current_request.index ==
             (uint16_t)MODEM_SMS_MAILBOX_OUTBOX
         ? MODEM_SMS_MAILBOX_OUTBOX : MODEM_SMS_MAILBOX_INBOX;
@@ -6784,11 +6822,13 @@ static bool sms_publish_terminal_for_request(
 }
 
 static void sms_cancel_protocol(void) {
-    if (modem_sms_protocol_pdu_mode_possible()) {
-        /* AT+CMGF=0 crossed the wire and no AT+CMGF=1 completed: the module
-         * may rest in PDU mode. Restore text mode from the idle scheduler. */
+    if (modem_sms_protocol_settings_restore_needed()) {
+        s_sms_text_parameters_dirty |= modem_sms_protocol_text_parameters_dirty();
+        /* A format/parameter command crossed the wire without confirmed
+         * cleanup. Restore the normal receive/send settings when idle. */
         s_sms_mode_restore_pending = true;
         s_sms_mode_restore_attempts = 0u;
+        s_sms_mode_restore_retry_ms = 0u;
     }
     modem_sms_protocol_cancel();
     s_sms_terminal_published = false;
@@ -6837,7 +6877,7 @@ static bool sms_protocol_emit(const modem_sms_protocol_action_t *action) {
         s_command_deadline_ms = action->data.body.now_ms +
             action->data.body.timeout_ms;
         if (action->data.body.binary) {
-            LOGI("modem", "binary SMS PDU sent segment=%u/%u tpdu=%u hex=%u",
+            LOGI("modem", "binary SMS body sent segment=%u/%u tpdu=%u hex=%u",
                  (unsigned)action->data.body.segment,
                  (unsigned)action->data.body.segment_total,
                  (unsigned)action->data.body.tpdu_len,
@@ -7049,12 +7089,14 @@ static bool sms_protocol_emit(const modem_sms_protocol_action_t *action) {
             action->data.complete.outcome == MODEM_SMS_OUTCOME_OK) {
             direct_store_unblock("a delete completed");
         }
-        if (modem_sms_protocol_pdu_mode_possible()) {
+        if (modem_sms_protocol_settings_restore_needed()) {
+            s_sms_text_parameters_dirty |= modem_sms_protocol_text_parameters_dirty();
             /* The operation completed (its result is already published) but
-             * its AT+CMGF=1 never succeeded: the module may rest in PDU mode.
+             * its format/parameter cleanup never succeeded.
              * Every SMS operation, not only STORE_DELIVERED. */
             s_sms_mode_restore_pending = true;
             s_sms_mode_restore_attempts = 0u;
+            s_sms_mode_restore_retry_ms = 0u;
         }
         finish_operation(action->data.complete.command_ok);
         return true;
@@ -7086,6 +7128,11 @@ static bool sms_start_current_request(uint32_t now_ms) {
 
     s_sms_terminal_published = false;
     set_operation_busy(true);
+    if (s_sms_text_parameters_dirty) {
+        (void)sms_publish_terminal_for_request(&s_current_request, MODEM_SMS_OUTCOME_ERROR);
+        finish_operation(false);
+        return true;
+    }
     modem_sms_protocol_request_t request;
     if (!sms_protocol_request_view(&request) ||
         !modem_sms_protocol_begin(&request, &s_sms_protocol_hooks, now_ms)) {

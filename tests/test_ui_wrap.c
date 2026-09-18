@@ -635,7 +635,24 @@ static void test_flat_list_circular_view(void) {
                 "circular list keeps the selected logical scrollbar ordinal");
 }
 
+static void test_wrap_row_widths(void) {
+    const font_t *font = asset_font(FONT_FS0);
+    const int widths[] = {asset_text_width(font, "AB"), asset_text_width(font, "CD"),
+                          asset_text_width(font, "EF GH")};
+    char rows[3][32];
+    uint8_t count = wrap_text_lines_widths(font, "AB CD EF GH", widths,
+                                          (char *)rows, sizeof(rows[0]), 3u);
+    assert_eq_int(count, 3, "variable-width rows retain all words");
+    assert_true(strcmp(rows[0], "AB") == 0 && strcmp(rows[1], "CD") == 0 &&
+                strcmp(rows[2], "EF GH") == 0,
+                "row below graphic regains full width");
+    assert_eq_int(wrap_text_lines_widths(font, "AB", NULL, (char *)rows,
+                                         sizeof(rows[0]), 3u), 0,
+                  "missing widths are rejected");
+}
+
 int main(void) {
+    test_wrap_row_widths();
     test_format_named();
     test_circular_list_step_3rows();
     test_flat_list_circular_view();

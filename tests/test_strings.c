@@ -54,6 +54,8 @@ static void test_ts_sid(void) {
               "EN SID 0x146 = singular fax MWI notice");
     assert_ts(0x147u, "%S\nnew fax\nmessages",
               "EN SID 0x147 = plural fax MWI notice");
+    assert_ts(0x17cu, "Picture message received",
+              "EN SID 0x17c = picture arrival notice");
     /* Translation spot checks only run when those languages are compiled in
      * (the set is a build choice; English above is the guaranteed minimum). */
     bool have_german = false, have_french = false;

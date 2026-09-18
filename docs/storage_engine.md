@@ -1,9 +1,9 @@
 # Storage Engine
 
 The C firmware uses a Nokia-like local NVM service instead of a filesystem.
-Phonebook and SMS contents remain modem-backed, but preferences, profile state,
+Phonebook and ordinary SMS contents remain modem-backed, but preferences, profile state,
 clock/alarm preferences, speed dials, call-register lists, T9 learned words,
-saved picture-message slots, own-tone/composer drafts, call-divert editing
+saved and pending picture messages, own-tone/composer drafts, call-divert editing
 history, and per-pack battery health/SOC evidence are stored through this layer.
 
 ## Layers
@@ -41,7 +41,8 @@ Each unit owns two 4 KB journal slots:
 - call list: received
 - call list: dialled
 - T9 user dictionary: up to 16 learned words, newest/promoted first
-- picture messages: four 72x28 saved-picture slots, with optional text metadata
+- picture messages: seven shared saved slots and two pending receptions, with
+  bitmap, caption, and sender metadata; see [Picture messages](picture_messages.md)
 - own tones: two composer slots for user-composed melodies
 - call divert: delay setting and per-condition number history; live activation
   state is always network-owned and is never restored from flash
@@ -107,12 +108,12 @@ the warranty preview uses FS1, where all 15 digits fit its 78-pixel value field.
 
 ## SMS read/unread ownership
 
-The 3210 stores SMS only on the SIM and reads the GSM status octet for its four
+The 3210 ordinary SMS mailbox uses the SIM and reads the GSM status octet for its four
 inbox icons (read 42 / unread 43 / sent 44 / unsent 45). On the Telit WWX,
 `AT#SMSUCS=1` prevents `CMGL` and `CMGR` from changing `REC UNREAD` to
 `REC READ`; this behavior was verified on the live module. The modem status is
 therefore the sole read/unread authority, and no SMS status is persisted in RP
-flash.
+flash for ordinary SMS. Picture messages use the separate host-owned workflow.
 
 - Metadata scans first issue `AT#SMSUCS=1`, then list/read the mailbox with
   status preservation enabled.
@@ -153,9 +154,10 @@ meaning of the important fields:
 
 - T9 user dictionary mirrors the behavior traced around `0x0751/0x0752`: Spell
   and Insert word promote learned words to the front and persist them.
-- Picture messages mirror key `0x0757`: four runtime slots, each with a 72x28
-  MSB-first row-major picture payload and optional text. Picture-message SMS
-  encoding is outside the storage layer.
+- Picture messages follow key `0x0757`'s shared template/saved-picture semantics,
+  expanded from four to seven slots. The same journal also holds two pending
+  receptions. SMS transport encoding remains outside the storage layer; the
+  picture store uses the pure decoder to validate/reassemble received content.
 - Own tones mirror key `0x0748`: the composer saves a melody (ASCII notes + the
   packed Smart-Messaging byte stream) into slot 0, which is also played as the
   ringing tone when "Own tone" is selected.
