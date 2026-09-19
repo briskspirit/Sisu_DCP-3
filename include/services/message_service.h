@@ -2,6 +2,9 @@
 #define MESSAGE_SERVICE_H
 
 #include "services/message_types.h"
+#include "services/datetime_types.h"
+
+#define MESSAGE_INCOMPLETE_TTL_SECONDS (7u * 24u * 60u * 60u)
 
 typedef enum { MESSAGE_OP_LIST, MESSAGE_OP_READ, MESSAGE_OP_SAVE, MESSAGE_OP_DELETE,
                MESSAGE_OP_COUNT } message_op_t;
@@ -21,12 +24,15 @@ typedef struct {
     uint16_t inbox, outbox, unread, pending;
     uint8_t queued;
     uint32_t revision, received, full_events, receive_errors, filtered_controls;
+    uint32_t expired_incomplete;
+    bool retention_clock_valid;
 } message_status_t;
 
 /* Core0 only. Receive admission copies the normalized DELIVER; it is not a
  * durability acknowledgement. tick runs in the shared flash-write window. */
 void message_service_init(void);
-void message_service_tick(uint32_t now);
+/* Pass NULL when the local RTC is untrustworthy. Complete messages never expire. */
+void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time);
 bool message_service_idle(void);
 bool message_service_receive(const char *pdu);
 void message_service_note_receive_loss(void);

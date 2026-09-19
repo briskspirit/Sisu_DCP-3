@@ -5,6 +5,7 @@
 #include "services/message_service.h"
 #include "services/message_file_codec.h"
 #include "services/sms_deliver_codec.h"
+#include "sms_control_fixtures.h"
 #include "storage/storage_lfs.h"
 #include "storage/storage_layout.h"
 #include "storage/storage_objects.h"
@@ -16,6 +17,8 @@ static bool busy, io_error;
 static jmp_buf cut;
 static storage_backend_t backend;
 static uint32_t now;
+static rtc_datetime_t wall;
+static bool wall_valid;
 static message_file_t file, decoded;
 static message_content_t content;
 static uint8_t wire[MESSAGE_FILE_WIRE_MAX];
@@ -57,9 +60,9 @@ static void reopen(void) {
 }
 static void fresh(void) {
     storage_lfs_deinit(); memset(media, 0xff, sizeof(media));
-    cut_at = 0; busy = io_error = false; now = 0; reopen();
+    cut_at = 0; busy = io_error = false; now = 0; wall_valid = false; reopen();
 }
-static void tick(void) { now += 1001u; message_service_tick(now); }
+static void tick(void) { now += 1001u; message_service_tick(now, wall_valid ? &wall : NULL); }
 static void drain(void) { for (unsigned i = 0; i < 24u; i++) tick(); }
 static message_status_t status(void) { message_status_t s; message_service_get_status(&s); return s; }
 static void make_pdu(char *out, unsigned total, unsigned seq, unsigned ref, unsigned second,
@@ -274,6 +277,15 @@ static void test_busy_and_full(void) {
         if (status().full) break;
     }
     assert(status().full && status().pending > 0u && status().inbox > 0u);
+    unsigned held = status().pending, inbox_count = status().inbox;
+    wall = (rtc_datetime_t){2026, 9, 19, 12, 0, 0}; wall_valid = true;
+    drain(); wall.day = 30; drain();
+    assert(status().pending == held && status().inbox == inbox_count &&
+           status().expired_incomplete == 0u); /* complete, waiting for quota */
+    make_control_pdu(pdu[0], 1u, "//VVM:SYNC:");
+    make_control_pdu(pdu[1], 2u, "ev=NM;id=123;");
+    assert(message_service_receive(pdu[0])); assert(message_service_receive(pdu[1])); drain();
+    assert(status().pending == held && status().filtered_controls == 1u);
     uint32_t id;
     assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);
     assert(storage_object_write(STORAGE_OBJECT_CONTACT, id, (const uint8_t *)"contact", 7) == STORAGE_RECORD_OK);
@@ -371,8 +383,110 @@ static void test_delete_power_cuts(void) {
     }
 }
 
+static void test_expiry(void) {
+    fresh();
+    make_pdu(pdu[0], 3, 1, 91, 1, "Incomplete ");
+    make_pdu(pdu[1], 3, 2, 91, 2, "group");
+    make_pdu(pdu[2], 1, 1, 0, 3, "Complete");
+    assert(message_service_receive(pdu[0]));
+    assert(message_service_receive(pdu[2])); drain();
+    assert(status().pending == 1u && status().inbox == 1u && !status().retention_clock_valid);
+    wall = (rtc_datetime_t){2026, 9, 19, 12, 0, 0}; wall_valid = true;
+    drain();
+    wall.day = 25;
+    assert(message_service_receive(pdu[0])); /* duplicate cannot renew */
+    assert(message_service_receive(pdu[1])); /* nor can a new part */
+    drain(); reopen(); drain();
+    assert(status().pending == 1u && status().expired_incomplete == 0u);
+    wall.day = 26; wall_valid = false;
+    now = UINT32_MAX - 4000u; /* expiry and retry must survive uptime wrap */
+    drain(); assert(status().pending == 1u);
+    wall_valid = true;
+    busy = true; tick();
+    assert(status().pending == 1u && status().expired_incomplete == 0u);
+    busy = false; drain();
+    assert(status().pending == 0u && status().inbox == 1u && status().expired_incomplete == 1u);
+    reopen(); drain(); assert(status().pending == 0u && status().inbox == 1u);
+
+    /* A backward RTC correction cannot wrap subtraction into immediate expiry. */
+    assert(message_service_receive(pdu[0])); drain();
+    wall.day = 18; drain(); reopen();
+    wall.day = 24; drain(); assert(status().pending == 1u);
+    wall.day = 25; drain(); assert(status().pending == 0u);
+    wall.year = 2100; drain(); assert(!status().retention_clock_valid);
+}
+
+static void test_expiry_power_cuts(void) {
+    fresh();
+    wall = (rtc_datetime_t){2026, 9, 19, 12, 0, 0}; wall_valid = true;
+    make_pdu(pdu[0], 2, 1, 97, 1, "Expire atomically");
+    assert(message_service_receive(pdu[0])); drain();
+    memcpy(baseline, media, sizeof(media));
+    wall.day = 26; operations = 0; drain();
+    unsigned count = operations;
+    assert(count > 0u && status().pending == 0u);
+    for (unsigned point = 1u; point <= count; point++) {
+        for (tear = 0u; tear < 3u; tear++) {
+            storage_lfs_deinit(); memcpy(media, baseline, sizeof(media)); reopen();
+            operations = 0; cut_at = point;
+            if (setjmp(cut) == 0) { drain(); assert(false); }
+            cut_at = 0; reopen(); drain();
+            assert(status().ready && !status().storage_error && status().pending == 0u);
+        }
+    }
+}
+
+static void make_dm(char *out, unsigned seq, bool bad) {
+    static const char hex[] = CONTROL_DM_WSP_HEX;
+    sms_deliver_t d = {0};
+    strcpy(d.address, "15551230000");
+    assert(sms_deliver_scts_encode(2026, 9, 19, 12, 0, (uint8_t)seq, 0, d.scts));
+    d.udhi = true; d.dcs = 0xf5u;
+    const uint8_t udh[] = {11, 0, 3, 44, 2, (uint8_t)seq, 5, 4, 0x0b, 0x84, 0xc0, 2};
+    memcpy(d.ud, udh, sizeof(udh)); d.ud_len = sizeof(udh);
+    size_t begin = seq == 1u ? 0u : 20u, end = seq == 1u ? 20u : strlen(hex) / 2u;
+    for (size_t i = begin; i < end; i++) {
+        unsigned byte;
+        assert(sscanf(hex + 2u * i, "%2x", &byte) == 1);
+        d.ud[d.ud_len++] = (uint8_t)byte;
+    }
+    if (bad && seq == 2u) d.ud[d.ud_len++] = 0u;
+    d.udl = d.ud_len;
+    uint8_t length;
+    assert(sms_deliver_build(&d, out, SMS_DELIVER_HEX_MAX, &length));
+}
+
+static void test_control_admission(void) {
+    fresh();
+    sms_deliver_t d = {0};
+    strcpy(d.address, "15551230000"); d.pid = 0x40u; d.dcs = 4u;
+    assert(sms_deliver_scts_encode(2026, 9, 19, 12, 0, 0, 0, d.scts));
+    uint8_t length;
+    assert(sms_deliver_build(&d, pdu[0], sizeof(pdu[0]), &length));
+    unsigned before = operations;
+    assert(message_service_receive(pdu[0])); drain();
+    assert(status().filtered_controls == 1u && status().queued == 0u &&
+           status().pending == 0u && status().inbox == 0u && operations == before);
+    make_pdu(pdu[1], 1, 1, 0, 1, "Queue fill");
+    for (unsigned i = 0u; i < 8u; i++) assert(message_service_receive(pdu[1]));
+    assert(message_service_receive(pdu[0])); /* controls need no RAM slot either */
+    assert(status().filtered_controls == 2u && status().receive_errors == 0u);
+    fresh();
+    make_dm(pdu[0], 1u, false); make_dm(pdu[1], 2u, false);
+    assert(message_service_receive(pdu[1])); drain(); reopen();
+    assert(message_service_receive(pdu[0])); drain();
+    assert(status().inbox == 0u && status().pending == 0u && status().filtered_controls == 1u);
+    storage_user_usage_t usage;
+    assert(storage_user_get_usage(&usage) == STORAGE_RECORD_OK);
+    assert(usage.pools[STORAGE_USER_PENDING].contents.files == 0u);
+    make_dm(pdu[1], 2u, true);
+    assert(message_service_receive(pdu[0])); assert(message_service_receive(pdu[1])); drain();
+    assert(status().inbox == 1u && status().pending == 0u && status().filtered_controls == 1u);
+}
+
 int main(void) {
     test_codec(); test_mailboxes(); test_multipart(); test_power_cuts(); test_busy_and_full();
     test_sent_copy_and_category_isolation(); test_io_retry_and_corrupt_record(); test_delete_power_cuts();
+    test_expiry(); test_expiry_power_cuts(); test_control_admission();
     storage_lfs_deinit(); puts("PASS: local messages");
 }

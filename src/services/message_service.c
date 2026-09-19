@@ -9,6 +9,7 @@
 #define STATE_READ 1u
 #define INDEX_COMPLETE 2u
 #define INDEX_QUARANTINED 4u
+#define INDEX_CONTROL 8u
 
 typedef struct { uint32_t id, time; uint8_t flags; } index_t;
 typedef struct {
@@ -31,6 +32,7 @@ static index_t s_index[2][MESSAGE_MAILBOX_LIMIT], s_pending[PENDING_LIMIT];
 static uint16_t s_count[2], s_pending_count;
 static request_t s_requests[MESSAGE_OP_COUNT];
 static uint32_t s_token, s_retry_at;
+static bool s_retry_pending;
 static receive_t s_receive[RECEIVE_LIMIT];
 static uint8_t s_head, s_queued;
 static message_status_t s_status;
@@ -71,9 +73,13 @@ static storage_record_result_t index_current(storage_object_collection_t c, uint
     if (!message_file_metadata(&s_file, &meta)) return STORAGE_RECORD_ERROR;
     storage_record_result_t rc = storage_object_get_state(c, id, &state);
     if (rc != STORAGE_RECORD_OK) return rc;
-    if (state & ~STATE_READ) return STORAGE_RECORD_ERROR;
-    *entry = (index_t){.id=id, .time=message_timestamp_seconds(meta.timestamp),
-        .flags=(uint8_t)(state | (message_file_complete(&s_file) ? INDEX_COMPLETE : 0u) |
+    bool pending = c == STORAGE_OBJECT_PENDING_SMS;
+    if (!pending && (state & ~STATE_READ)) return STORAGE_RECORD_ERROR;
+    /* Pending objects use their attribute for first local receipt time. Inbox
+     * and outbox attributes retain the read flag; publication copies only body. */
+    *entry = (index_t){.id=id, .time=pending ? state : message_timestamp_seconds(meta.timestamp),
+        .flags=(uint8_t)((pending ? 0u : state) | (message_file_complete(&s_file) ? INDEX_COMPLETE : 0u) |
+            (pending && message_file_control(&s_file) != SMS_CONTROL_KEEP ? INDEX_CONTROL : 0u) |
             (meta.quarantined ? INDEX_QUARANTINED : 0u))};
     return STORAGE_RECORD_OK;
 }
@@ -154,6 +160,7 @@ static void failure(storage_record_result_t rc, uint32_t now) {
     /* A failed call may have committed before the I/O error was reported. */
     s_status.ready = false;
     s_retry_at = now + 1000u;
+    s_retry_pending = true;
 }
 
 void message_service_init(void) {
@@ -162,6 +169,7 @@ void message_service_init(void) {
     memset(s_receive, 0, sizeof(s_receive));
     s_head = s_queued = 0u;
     s_token = s_retry_at = 0u;
+    s_retry_pending = false;
     if (reload() != STORAGE_RECORD_OK) s_status.storage_error = true;
 }
 
@@ -284,10 +292,16 @@ static storage_record_result_t perform(request_t *r) {
 }
 
 bool message_service_receive(const char *pdu) {
-    if (pdu == NULL || strlen(pdu) > MESSAGE_FILE_PDU_MAX * 2u ||
-        s_queued == RECEIVE_LIMIT) { s_status.receive_errors++; return false; }
+    if (pdu == NULL || strlen(pdu) > MESSAGE_FILE_PDU_MAX * 2u) {
+        s_status.receive_errors++; return false;
+    }
     /* Parsing uses shared scratch, but admission never writes the filesystem. */
     if (!message_file_receive(&s_file, pdu)) { s_status.receive_errors++; return false; }
+    if (message_file_control(&s_file) != SMS_CONTROL_KEEP) {
+        s_status.filtered_controls++;
+        return true;
+    }
+    if (s_queued == RECEIVE_LIMIT) { s_status.receive_errors++; return false; }
     receive_t *r = &s_receive[(s_head + s_queued) % RECEIVE_LIMIT];
     strcpy(r->pdu, pdu); r->id = 0u; r->outgoing = false; s_queued++;
     s_status.queued = s_queued;
@@ -368,7 +382,7 @@ static storage_record_result_t publish(unsigned pos) {
     int existing = find(s_index[MESSAGE_INBOX], s_count[MESSAGE_INBOX], id);
     storage_record_result_t rc = load(STORAGE_OBJECT_PENDING_SMS, id);
     if (rc != STORAGE_RECORD_OK) return rc;
-    if (existing < 0 && message_file_is_vvm_control(&s_file)) {
+    if (existing < 0 && message_file_control(&s_file) != SMS_CONTROL_KEEP) {
         rc = storage_object_remove(STORAGE_OBJECT_PENDING_SMS, id);
         if (rc == STORAGE_RECORD_OK || rc == STORAGE_RECORD_NOT_FOUND) {
             erase_index(s_pending, &s_pending_count, pos);
@@ -404,8 +418,37 @@ static storage_record_result_t publish(unsigned pos) {
     return rc;
 }
 
-void message_service_tick(uint32_t now) {
-    if ((int32_t)(now - s_retry_at) < 0) return;
+/* One durable mutation per tick. A cut before receipt-time initialization only
+ * extends retention; it cannot cause premature expiry. Rewrites preserve the
+ * attribute, so extra parts and duplicate deliveries never renew the timer. */
+static bool cleanup_incomplete(uint32_t wall, storage_record_result_t *rc) {
+    if (wall == 0u) return false;
+    for (unsigned i = 0u; i < s_pending_count; i++) {
+        index_t *entry = &s_pending[i];
+        if (entry->flags & (INDEX_COMPLETE | INDEX_CONTROL)) continue;
+        if (entry->time == 0u || wall < entry->time) {
+            *rc = storage_object_set_state(STORAGE_OBJECT_PENDING_SMS, entry->id, wall);
+            if (*rc == STORAGE_RECORD_OK) entry->time = wall;
+            return true;
+        }
+        if (wall - entry->time < MESSAGE_INCOMPLETE_TTL_SECONDS) continue;
+        *rc = storage_object_remove(STORAGE_OBJECT_PENDING_SMS, entry->id);
+        if (*rc == STORAGE_RECORD_OK || *rc == STORAGE_RECORD_NOT_FOUND) {
+            *rc = STORAGE_RECORD_OK;
+            erase_index(s_pending, &s_pending_count, i);
+            s_status.expired_incomplete++;
+            s_status.full = false;
+        }
+        return true;
+    }
+    return false;
+}
+
+void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
+    uint32_t wall = message_datetime_seconds(wall_time);
+    s_status.retention_clock_valid = wall != 0u;
+    if (s_retry_pending && (int32_t)(now - s_retry_at) < 0) return;
+    s_retry_pending = false;
     storage_record_result_t rc = s_status.ready ? STORAGE_RECORD_OK : reload();
     /* User deletes must still run when an inbox/pending quota is full. */
     for (unsigned i = 0; i < MESSAGE_OP_COUNT; i++) {
@@ -422,14 +465,24 @@ void message_service_tick(uint32_t now) {
     }
     if (rc != STORAGE_RECORD_OK) { failure(rc, now); return; }
     s_status.storage_error = false;
+    if (cleanup_incomplete(wall, &rc)) {
+        if (rc != STORAGE_RECORD_OK) failure(rc, now);
+        recount();
+        return;
+    }
+    bool publication_full = false;
     for (unsigned i = 0; i < s_pending_count; i++) {
-        if (!(s_pending[i].flags & INDEX_COMPLETE)) continue;
+        if (!(s_pending[i].flags & (INDEX_COMPLETE | INDEX_CONTROL))) continue;
+        if (publication_full && !(s_pending[i].flags & INDEX_CONTROL) &&
+            find(s_index[MESSAGE_INBOX], s_count[MESSAGE_INBOX], s_pending[i].id) < 0) continue;
         rc = publish(i);
         if (rc != STORAGE_RECORD_OK && rc != STORAGE_RECORD_FULL) { failure(rc, now); return; }
         if (rc == STORAGE_RECORD_OK) { recount(); return; }
         if (!s_status.full) s_status.full_events++;
         s_status.full = true;
-        break;
+        publication_full = true;
+        /* A full inbox must not strand a filtered control or a post-cut
+         * duplicate behind the message waiting for publication. */
     }
     if (s_queued != 0u) {
         rc = receive_one();

@@ -2,7 +2,6 @@
 
 #include <string.h>
 #include "services/sms_picture_codec.h"
-#include "services/sms_vvm_filter.h"
 
 #define KNOWN_FLAGS (MESSAGE_FILE_DRAFT | MESSAGE_FILE_QUARANTINED | MESSAGE_FILE_SENT)
 #define CONCAT_WINDOW_SECONDS 86400u
@@ -13,7 +12,7 @@
 static sms_codec_message_t s_first, s_part;
 static message_file_part_t s_incoming;
 static char s_hex[MESSAGE_FILE_PDU_MAX * 2u + 1u];
-static uint8_t s_control[MODEM_SMS_BINARY_MAX];
+static uint8_t s_control[MESSAGE_TEXT_MAX];
 
 static int nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -68,8 +67,17 @@ uint32_t message_timestamp_seconds(const char *timestamp) {
         const char *p = timestamp + fields[i];
         if (p[0] < '0' || p[0] > '9' || p[1] < '0' || p[1] > '9') return 0u;
     }
-    unsigned year = pair(timestamp), month = pair(timestamp + 3), day = pair(timestamp + 6);
-    unsigned hour = pair(timestamp + 9), minute = pair(timestamp + 12), second = pair(timestamp + 15);
+    rtc_datetime_t date = {.year=(uint16_t)(2000u + pair(timestamp)),
+        .month=(uint8_t)pair(timestamp + 3), .day=(uint8_t)pair(timestamp + 6),
+        .hour=(uint8_t)pair(timestamp + 9), .minute=(uint8_t)pair(timestamp + 12),
+        .second=(uint8_t)pair(timestamp + 15)};
+    return message_datetime_seconds(&date);
+}
+
+uint32_t message_datetime_seconds(const rtc_datetime_t *date) {
+    if (date == NULL || date->year < 2000u || date->year > 2099u) return 0u;
+    unsigned year = date->year - 2000u, month = date->month, day = date->day;
+    unsigned hour = date->hour, minute = date->minute, second = date->second;
     static const uint8_t days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     if (month == 0u || month > 12u || day == 0u || hour > 23u || minute > 59u || second > 59u)
         return 0u;
@@ -179,27 +187,30 @@ bool message_file_complete(const message_file_t *file) {
     return mask == (uint8_t)((1u << total) - 1u);
 }
 
-bool message_file_is_vvm_control(const message_file_t *file) {
+sms_control_filter_t message_file_control(const message_file_t *file) {
+    if (file != NULL && !(file->flags & MESSAGE_FILE_DRAFT) && file->count == 1u &&
+        part_decode(&file->parts[0], &s_first) && s_first.pid == 0x40u && !s_first.submit)
+        return SMS_CONTROL_TYPE0;
     if (!message_file_complete(file) ||
         (file->flags & (MESSAGE_FILE_DRAFT | MESSAGE_FILE_QUARANTINED)) ||
-        !part_decode(&file->parts[0], &s_first) || s_first.pid != 0u ||
-        (s_first.dcs != 0u && s_first.dcs != 4u && s_first.dcs != 8u)) return false;
+        !part_decode(&file->parts[0], &s_first)) return SMS_CONTROL_KEEP;
     size_t used = 0u;
     for (uint8_t seq = 1u; seq <= file->count; seq++) {
         bool found = false;
         for (uint8_t i = 0u; i < file->count; i++) {
-            if (!part_decode(&file->parts[i], &s_part)) return false;
+            if (!part_decode(&file->parts[i], &s_part)) return SMS_CONTROL_KEEP;
             if (!s_part.has_concat || s_part.concat_seq == seq) { found = true; break; }
         }
-        if (!found || s_part.binary != s_first.binary) return false;
+        if (!found || s_part.binary != s_first.binary) return SMS_CONTROL_KEEP;
         size_t n = s_part.binary ? s_part.binary_len : strlen(s_part.text);
-        if (n > sizeof(s_control) - used) return false;
+        if (n > sizeof(s_control) - used) return SMS_CONTROL_KEEP;
         memcpy(s_control + used, s_part.binary ? s_part.binary_data :
                (const uint8_t *)s_part.text, n);
         used += n;
     }
-    return sms_vvm_control_payload_is_recognized(s_first.has_ports,
-                s_first.dest_port, s_control, used);
+    s_first.has_concat = false;
+    /* WDP transport provenance is not inferred from stored payload bytes. */
+    return sms_control_classify_payload(&s_first, false, s_control, used);
 }
 
 bool message_file_encode(const message_file_t *file, uint8_t *dst, size_t cap, size_t *len) {

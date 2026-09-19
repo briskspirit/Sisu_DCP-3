@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 #include "services/message_types.h"
+#include "services/datetime_types.h"
+#include "services/sms_control_filter.h"
 
 /* Normal messages contain at most eight parts. Extra slots retain conflicting
  * duplicates as one quarantined object instead of splicing unrelated text. */
@@ -44,7 +46,7 @@ bool message_file_receive(message_file_t *file, const char *pdu);
 message_merge_t message_file_merge(message_file_t *file, const char *pdu);
 bool message_file_complete(const message_file_t *file);
 /* Only a complete, unambiguous control is eligible; fragments stay durable. */
-bool message_file_is_vvm_control(const message_file_t *file);
+sms_control_filter_t message_file_control(const message_file_t *file);
 bool message_file_encode(const message_file_t *file, uint8_t *dst, size_t cap, size_t *len);
 bool message_file_decode(message_file_t *file, const uint8_t *src, size_t len);
 bool message_file_metadata(const message_file_t *file, message_metadata_t *out);
@@ -52,5 +54,8 @@ bool message_file_content(const message_file_t *file, message_content_t *out);
 /* Seconds since 2000-01-01, ignoring the display timestamp's absent zone.
  * Used only for ordering and a bounded same-SMSC concatenation window. */
 uint32_t message_timestamp_seconds(const char *timestamp);
+/* Zero means absent/invalid; the calendar must come from a trusted local clock
+ * when used for retention, never from the incoming message. */
+uint32_t message_datetime_seconds(const rtc_datetime_t *datetime);
 
 #endif

@@ -162,13 +162,27 @@ in a quarantined file rather than silently overwritten. Plain bodies decode
 into up to 2560 UTF-8 bytes. Compose/forward retains the current 160-byte draft
 limit: a larger received body can be read but is explicitly refused by edit/send
 instead of being truncated. Binary and quarantined content uses the translated
-Data message label. Complete recognized multipart voicemail controls are removed
-from staging before publication.
+Data message label and remains visible/deletable. Recognized type-0, voicemail
+and qualified OMA-DM controls are rejected before queue/storage admission, with
+the same policy applied again after unambiguous multipart reassembly. Filtering
+never guesses WDP transport provenance from payload bytes. Unknown service data
+is not silently discarded. Picture receptions take their separate bounded record
+path; complete pictures await user action, while abandoned partial slots are
+reclaimed on later picture reception.
 
 The eight-entry receive/sent-copy RAM queue retries BUSY, I/O and FULL outcomes.
 A full outbox cannot block an incoming message behind it. Once staged, fragments
-survive reboot. Incomplete SMS currently have no automatic expiry; the 32 KiB
-staging budget and 64-entry bound are enforced. Queue overflow and malformed
+survive reboot. Incomplete SMS expire after seven days of local wall-clock time;
+the 32 KiB staging budget and 64-entry bound still apply. The pending object's
+attribute stores its first trusted local receipt time (seconds since 2000), not
+the sender/SMSC timestamp. Extra parts and duplicates do not renew it. Old files
+without a receipt time get a fresh window. An invalid/unset RTC pauses expiry;
+a backward clock correction rebases affected files conservatively. A forward
+clock adjustment counts toward age. Complete messages waiting for inbox space
+never expire. One cleanup mutation runs per storage tick, through the same safe
+write window and recovery reserve as user deletes. A full inbox cannot prevent
+incomplete expiry or filtered-control cleanup. `storeinfo` reports clock validity
+and boot-local expired/filtered counters. Queue overflow and malformed
 deliveries are reported as receive losses. Because the modem acknowledges the
 network before local commit, sudden power loss can still lose RAM-only arrivals;
 this is not end-to-end exactly-once delivery.

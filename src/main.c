@@ -397,7 +397,9 @@ int main(void) {
         store_service_tick(now);
         if (store_service_write_window_open(now)) {
             phonebook_service_tick();
-            message_service_tick(now);
+            rtc_datetime_t wall_time;
+            rtc_alarm_hal_get_datetime(&wall_time);
+            message_service_tick(now, rtc_alarm_hal_time_valid() ? &wall_time : NULL);
         }
         debug_console_tick(&s_app);
         core1_services_audio_gate_tick(now); /* A2+R2: park idle audio plumbing */

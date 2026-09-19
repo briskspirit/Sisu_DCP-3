@@ -14,5 +14,9 @@ typedef enum {
  * wdp must come from the receiving transport, never from payload sniffing. */
 sms_control_filter_t sms_control_classify(const sms_codec_message_t *message,
                                           bool wdp);
+/* Same policy for a validated, fully assembled payload. The caller must clear
+ * has_concat only after proving completeness and unambiguous part identity. */
+sms_control_filter_t sms_control_classify_payload(const sms_codec_message_t *message,
+    bool wdp, const uint8_t *payload, size_t length);
 
 #endif

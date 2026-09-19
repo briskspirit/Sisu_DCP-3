@@ -36,7 +36,17 @@ static bool oma_dm_notification(const uint8_t *data, size_t length) {
 
 sms_control_filter_t sms_control_classify(const sms_codec_message_t *message,
                                           bool wdp) {
-    if (message == NULL || message->submit) {
+    if (message == NULL || message->binary_len > sizeof(message->binary_data))
+        return SMS_CONTROL_KEEP;
+    const uint8_t *payload = message->binary
+        ? message->binary_data : (const uint8_t *)message->text;
+    size_t length = message->binary ? message->binary_len : strlen(message->text);
+    return sms_control_classify_payload(message, wdp, payload, length);
+}
+
+sms_control_filter_t sms_control_classify_payload(const sms_codec_message_t *message,
+    bool wdp, const uint8_t *payload, size_t length) {
+    if (message == NULL || payload == NULL || message->submit) {
         return SMS_CONTROL_KEEP;
     }
     if (message->pid == 0x40u) {
@@ -52,13 +62,10 @@ sms_control_filter_t sms_control_classify(const sms_codec_message_t *message,
      * all multipart/unknown UDH on their existing paths. Never filter a
      * fragment solely because its prefix resembles a complete control. */
     if (message->pid != 0u || message->has_concat || message->udh_unhandled ||
-        message->trailing_data || message->binary_len > sizeof(message->binary_data) ||
+        message->trailing_data ||
         (!ordinary_dcs && !dm_octets)) {
         return SMS_CONTROL_KEEP;
     }
-    const uint8_t *payload = message->binary
-        ? message->binary_data : (const uint8_t *)message->text;
-    size_t length = message->binary ? message->binary_len : strlen(message->text);
     if (ordinary_dcs &&
         sms_vvm_control_payload_is_recognized(message->has_ports,
                                              message->dest_port, payload, length)) {
