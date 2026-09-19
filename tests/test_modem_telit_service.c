@@ -6159,6 +6159,7 @@ static void test_direct_delivery_plain_bodies_are_read_raw(void) {
     static const char MULTI[] = "Your code is 123456\r\nDo not share";
     static const uint8_t AT_BODY[3] = {'a', 0x00u, 'b'};
     static const uint8_t ESC_BODY[3] = {'a', 0x1Bu, 0x3Cu};
+    static const char BENCH_BODY[] = "Sisu littlefs live 1: local inbox, \0 and braces \x1b(\x1b).";
     static const char TELIT_MULTI[] = "Hi\r\nthere";
     static const char WEMT_HEX[] = "050003620202D46435599D9EABE7EAB99AAC26ABC9";
     static const char EMOJI_HEX[] = "D83EDD2A";
@@ -6170,8 +6171,12 @@ static void test_direct_delivery_plain_bodies_are_read_raw(void) {
          (const uint8_t *)"Hello ", 6u, "Hello ", "3GPP text body with a trailing space"},
         {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,3",
          AT_BODY, sizeof(AT_BODY), "a@b", "3GPP text body with GSM 0x00 (@)"},
-        {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,3",
+        {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,2",
          ESC_BODY, sizeof(ESC_BODY), "a[", "3GPP text body with ESC 0x3C ([)"},
+        {"+CMT: \"+17866910488\",\"\",\"26/09/19,11:17:50-16\",145,4,0,0,\"+19039321414\",145,51",
+         (const uint8_t *)BENCH_BODY, sizeof(BENCH_BODY) - 1u,
+         "Sisu littlefs live 1: local inbox, @ and braces {}.",
+         "live Telit GSM length counts characters instead of escaped wire bytes"},
         {"+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,9",
          (const uint8_t *)TELIT_MULTI, sizeof(TELIT_MULTI) - 1u, TELIT_MULTI,
          "Telit enc 8 body with a line break"},

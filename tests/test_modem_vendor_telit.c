@@ -1741,8 +1741,8 @@ static void test_direct_3gpp2_text_forms(void) {
           "voice mail notification teleservice rejected");
     check(telit_translate_direct_sms(
               "+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,7",
-              BYTES("Djssjjs"), &d) == MODEM_SMS_DIRECT_NOT_MINE,
-          "3GPP text form is not claimed");
+              BYTES("Djssjjs"), &d) == MODEM_SMS_DIRECT_ACCEPTED,
+          "3GPP plain text applies Telit's character-count convention");
     check(telit_translate_direct_sms("+CMT: ,26", BYTES("07"), &d) == MODEM_SMS_DIRECT_NOT_MINE,
           "3GPP PDU form is not claimed");
 
@@ -1806,6 +1806,43 @@ static void test_direct_3gpp2_text_forms(void) {
               BYTES("Djssjj\n"), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
               build_and_decode(&d, &m) && strcmp(m.text, "Djssjj\n") == 0,
           "enc 9 plain body with a trailing LF round-trips");
+}
+
+static void test_direct_3gpp_character_length(void) {
+    static const char header[] =
+        "+CMT: \"15551230000\",,\"26/09/19,11:17:50-16\",129,4,0,0,,129,80";
+    uint8_t body[158u];
+    for (size_t i = 0u; i < sizeof(body); i += 2u) {
+        body[i] = 0x1bu;
+        body[i + 1u] = 0x28u;
+    }
+    body[136u] = '\r';
+    body[137u] = '\n';
+    char hex[SMS_DELIVER_HEX_MAX];
+    uint8_t tpdu = 0u;
+    modem_sms_direct_reset();
+    bool ok = modem_sms_direct_feed(header, telit_translate_direct_sms,
+        hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_HEADER;
+    for (size_t i = 0u; i < sizeof(body); i++) {
+        ok = modem_sms_direct_feed_raw(body[i], telit_translate_direct_sms,
+            hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_IGNORED && ok;
+    }
+    ok = modem_sms_direct_feed_raw('\r', telit_translate_direct_sms,
+        hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_IGNORED && ok;
+    ok = modem_sms_direct_feed_raw('\n', telit_translate_direct_sms,
+        hex, sizeof(hex), &tpdu) == MODEM_SMS_DIRECT_STEP_READY && ok;
+    sms_codec_message_t decoded;
+    check(ok && sms_pdu_decode(hex, &decoded) && strlen(decoded.text) == 80u &&
+              decoded.text[68] == '\r' && decoded.text[69] == '\n',
+          "escaped GSM characters and embedded CRLF survive beyond packed-ASCII bound");
+    sms_deliver_t d;
+    check(telit_translate_direct_sms(header, body, sizeof(body) - 1u, &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "dangling GSM escape is rejected");
+    body[0] = 0x80u;
+    check(telit_translate_direct_sms(header, body, sizeof(body), &d) ==
+              MODEM_SMS_DIRECT_REJECTED,
+          "non-GSM bytes remain rejected");
 }
 
 static void test_direct_3gpp2_wemt_length_boundary(void) {
@@ -2186,6 +2223,7 @@ int main(void) {
     test_typed_diagnostics();
     test_guarded_maintenance_boundary();
     test_direct_3gpp2_text_forms();
+    test_direct_3gpp_character_length();
     test_direct_3gpp2_wemt_length_boundary();
     test_direct_3gpp2_pdu_forms();
     test_direct_3gpp2_bounds();

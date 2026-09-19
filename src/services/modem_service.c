@@ -2629,10 +2629,7 @@ static void direct_count_error_locked_free(void) {
 }
 
 
-/* Apply one collector step. The PDU was built straight into the free ring
- * slot (or the static sink when the ring is full): the collector's frames
- * beneath this one already carry the core0 stack budget, so no hex buffer
- * lives here. */
+/* The collector builds into static scratch to preserve the RX stack budget. */
 static void direct_apply_step(modem_sms_direct_step_t step, uint8_t tpdu_len) {
     switch (step) {
     case MODEM_SMS_DIRECT_STEP_HEADER:
@@ -2641,8 +2638,8 @@ static void direct_apply_step(modem_sms_direct_step_t step, uint8_t tpdu_len) {
         break;
     case MODEM_SMS_DIRECT_STEP_READY:
         s_direct_body_deadline_armed = false;
-        /* Recognized pictures belong to the host's journal, including when
-         * the ordinary SMS ring/ME is full. Do not leak fragments into Inbox. */
+        /* Pictures have their own local store and budget. Do not leak their
+         * fragments into the ordinary Inbox. */
         store_status_t result = store_picture_receive_pdu(
             s_direct_pdu,
             s_now_ms);

@@ -24,6 +24,7 @@
 
 #include "modem_vendor_telit_internal.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "services/modem_sms_direct.h"
@@ -53,6 +54,49 @@ static uint8_t s_bytes[TELIT_3GPP2_PDU_BYTES_MAX]; /* decoded payload bytes */
 static uint8_t s_codes[TELIT_GSM7_SEPTETS_MAX];    /* GSM 03.38 codes to pack */
 static uint8_t s_ascii[TELIT_GSM7_SEPTETS_MAX];    /* unpacked 7-bit ASCII (PDU form) */
 static telit_csv_view_t s_fields[TELIT_3GPP2_HEADER_FIELDS_MAX];
+static char s_3gpp_header[MODEM_SMS_DIRECT_LINE_MAX];
+
+static modem_sms_direct_translate_result_t translate_3gpp_text(
+    const char *header, const uint8_t *payload, size_t payload_len,
+    sms_deliver_t *out) {
+    uint32_t fo, dcs, length;
+    if (!telit_view_parse_u32(s_fields[4], 255u, &fo) ||
+        !telit_view_parse_u32(s_fields[6], 255u, &dcs) ||
+        !telit_view_parse_u32(s_fields[9], 255u, &length)) {
+        return MODEM_SMS_DIRECT_REJECTED;
+    }
+    uint32_t group = dcs >> 4u;
+    bool gsm7 = group <= 7u ? (dcs & 0x2Cu) == 0u :
+        (group == 12u || group == 13u || (group == 15u && (dcs & 12u) == 0u));
+    if ((fo & 0x40u) != 0u || !gsm7) {
+        return MODEM_SMS_DIRECT_NOT_MINE;
+    }
+    /* On this interface <length> counts displayed GSM characters, not
+     * septets: the captured 51-character message has 53 bytes for {}.
+     * Keep the generic parser strict and normalize only this vendor form. */
+    if (payload_len > TELIT_GSM7_SEPTETS_MAX || length > TELIT_GSM7_SEPTETS_MAX) {
+        return MODEM_SMS_DIRECT_REJECTED;
+    }
+    size_t chars = 0u;
+    for (size_t i = 0u; i < payload_len; i++, chars++) {
+        if (payload[i] >= 0x80u) return MODEM_SMS_DIRECT_REJECTED;
+        if (payload[i] == 0x1bu) {
+            if (++i == payload_len || payload[i] >= 0x80u || payload[i] == 0x1bu) {
+                return MODEM_SMS_DIRECT_REJECTED;
+            }
+        }
+    }
+    const char *last = strrchr(header, ',');
+    if (last == NULL) return MODEM_SMS_DIRECT_REJECTED;
+    int n = snprintf(s_3gpp_header, sizeof(s_3gpp_header), "%.*s,%u",
+                     (int)(last - header), header, (unsigned)payload_len);
+    if (n < 0 || (size_t)n >= sizeof(s_3gpp_header) ||
+        !modem_sms_direct_parse_3gpp_text(s_3gpp_header, payload, payload_len, out)) {
+        return MODEM_SMS_DIRECT_REJECTED;
+    }
+    if (chars < length) return MODEM_SMS_DIRECT_INCOMPLETE;
+    return chars == length ? MODEM_SMS_DIRECT_ACCEPTED : MODEM_SMS_DIRECT_REJECTED;
+}
 
 static bool digits_to_scts(const char *yyyymmddhhmmss, uint8_t out[7]) {
     if (strlen(yyyymmddhhmmss) != TELIT_3GPP2_DATE_DIGITS) {
@@ -392,6 +436,9 @@ modem_sms_direct_translate_result_t telit_translate_direct_sms(
     }
     if (count == TELIT_3GPP2_PDU_FIELDS) {
         return translate_pdu_form(s_fields, payload, payload_len, out);
+    }
+    if (count == TELIT_3GPP2_HEADER_FIELDS_MAX) {
+        return translate_3gpp_text(header, payload, payload_len, out);
     }
     return MODEM_SMS_DIRECT_NOT_MINE;
 }

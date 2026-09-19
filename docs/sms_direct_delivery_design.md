@@ -203,6 +203,14 @@ of this storage revision.
 
 ### Format mapping (3GPP2 -> SMS-DELIVER)
 
+The module also emits the ten-field 3GPP text form. A live capture on
+2026-09-19 reported 51 characters while delivering 53 GSM bytes: each brace
+used an escape byte. The vendor adapter counts GSM extension pairs as one
+character and normalizes the length before the generic parser packs the body.
+The raw collector permits up to 160 septets, preserving embedded CR/LF and
+GSM NUL (`@`); malformed escapes and non-GSM bytes are rejected. Hex/UDH
+deliveries retain their separate length rules.
+
 Header, text form (`+CSDH=1`):
 `+CMT: "<orig>","<callback>","<YYYYMMDDHHMMSS>",<tooa>,<tele_id>,<priority>,<enc>,<length>`
 

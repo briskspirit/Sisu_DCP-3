@@ -3,7 +3,7 @@
  * A +CMT is a header line followed by the body. The collector remembers the
  * header, reads the body, hands header+body to the vendor hook first
  * (module-specific forms), then to the generic 3GPP text/PDU parsers, and
- * returns a SMS-DELIVER PDU ready for +CMGW or a filtered-control result.
+ * returns an SMS-DELIVER PDU for local storage or a filtered-control result.
  * Pure: no I/O, no vendor names.
  *
  * Body reading (RAW mode): the line path cannot carry a plain-text body
@@ -41,6 +41,7 @@ static bool s_raw_multiline; /* a candidate line break became body data */
 static bool s_raw_unconsumed; /* the byte past a bound belongs to the framer */
 static size_t s_raw_len;
 static size_t s_raw_min;    /* <length>: bytes that are data regardless of value */
+static size_t s_raw_plain_max;
 static uint8_t s_raw[MODEM_SMS_DIRECT_LINE_MAX];
 /* Parser scratch lives here, not on the stack: the collector runs beneath the
  * core0 RX drain, whose stack budget these frames would otherwise exceed. The
@@ -61,16 +62,20 @@ static void raw_leave(void) {
     s_raw_unconsumed = false;
     s_raw_len = 0u;
     s_raw_min = 0u;
+    s_raw_plain_max = 0u;
 }
 
-/* Only plain bodies can contain CR/LF, and no supported plain encoding packs
- * more than 8 characters into 7 octets (encoding 2/3: <length> is the packed
- * octet count), so once more than ceil(8*L/7) + 1 bytes are in, no plain
+/* Only plain bodies can contain CR/LF. Ten-field GSM text may use two wire
+ * bytes per reported character; packed ASCII needs at most ceil(8*L/7) + 1.
+ * Once the encoding's bound is reached, no plain
  * body can still be pending: a continued body past this bound ends the
  * delivery instead of waiting for the cap or the deadline. Hex bodies are
  * longer than this but carry no CR/LF, so their own CRLF is their first
  * candidate and never continues after one. */
-static size_t raw_plain_body_max(size_t length) {
+static size_t raw_plain_body_max(size_t length, bool gsm_text) {
+    if (gsm_text) {
+        return length < GSM7_SEPTETS_MAX / 2u ? length * 2u : GSM7_SEPTETS_MAX;
+    }
     return (length * 8u + 6u) / 7u + 1u;
 }
 
@@ -441,6 +446,8 @@ modem_sms_direct_step_t modem_sms_direct_feed(
         }
         s_raw_active = true;
         s_raw_min = length;
+        s_raw_plain_max = raw_plain_body_max(length,
+            split_header(line, s_fields, HEADER_FIELDS_MAX) == HEADER_FIELDS_MAX);
         return MODEM_SMS_DIRECT_STEP_HEADER;
     }
     if (s_raw_active || !s_pending) {
@@ -454,7 +461,7 @@ modem_sms_direct_step_t modem_sms_direct_feed(
 
 static bool raw_append(uint8_t byte) {
     if (s_raw_len >= sizeof(s_raw) ||
-        (s_raw_multiline && s_raw_len >= raw_plain_body_max(s_raw_min))) {
+        (s_raw_multiline && s_raw_len >= s_raw_plain_max)) {
         return false;
     }
     s_raw[s_raw_len++] = byte;
