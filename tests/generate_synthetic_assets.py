@@ -64,8 +64,10 @@ def emit_assets(root: Path) -> None:
         for cp in codepoints:
             width = glyph_width(font_id, cp)
             offset = len(data)
-            columns = width * ((heights[font_id] + 7) // 8)
-            data.extend([0x00 if cp == 0x20 else 0x7F] * columns)
+            for bank in range((heights[font_id] + 7) // 8):
+                rows = min(8, heights[font_id] - bank * 8)
+                pixels = 0x00 if cp == 0x20 else (1 << rows) - 1
+                data.extend([pixels] * width)
             glyphs.append(
                 f"    {{{cp}u, {width}u, {heights[font_id]}u, {offset}u}},"
             )
@@ -156,6 +158,7 @@ extern const uint16_t g_string_key_count;
         0x13A: "%S\nnew e-mail\nmessages",
         0x146: "New fax\nmessage",
         0x147: "%S\nnew fax\nmessages",
+        0x17C: "Picture message received",
         0x17F: "Synthetic localized text",
         0x187: "Calling",
         0x18B: "Serial No.\n%S",
