@@ -585,6 +585,50 @@ void netmon_render_local(uint8_t id, uint8_t frame_index,
             netmon_render_linef(out, 3u, "used/margin");
         }
         break;
+    case 76u: {
+        const netmon_storage_diag_t *s = &l->partitions;
+        int32_t age_ms = (int32_t)(l->updated_ms - s->sampled_ms);
+        uint32_t age = age_ms > 0 ? (uint32_t)age_ms / 1000u : 0u;
+        if (age > 15u) {
+            netmon_render_linef(out, 0u, "FS STALE");
+            netmon_render_linef(out, 1u, "AGE %lus", (unsigned long)age);
+            break;
+        }
+        if (frame_index < 6u && !s->valid) {
+            netmon_render_linef(out, 0u, "FS NOT READY");
+            break;
+        }
+        if (frame_index == 0u) {
+            netmon_render_linef(out, 0u, "SYS %u/%uK", (unsigned)s->system_used_kib,
+                                (unsigned)s->system_total_kib);
+            netmon_render_linef(out, 1u, "USR %u/%uK", (unsigned)s->user_used_kib,
+                                (unsigned)s->user_total_kib);
+            unsigned free_kib = s->user_total_kib >= s->user_used_kib
+                ? (unsigned)(s->user_total_kib - s->user_used_kib) : 0u;
+            netmon_render_linef(out, 2u, "FREE %uK", free_kib);
+            netmon_render_linef(out, 3u, "RSV %uK", (unsigned)s->reserve_kib);
+        } else if (frame_index < 6u) {
+            static const char *const names[] = {"CONTACTS", "INBOX", "OUTBOX", "PART SMS", "OTHER"};
+            unsigned pool = frame_index - 1u;
+            netmon_render_linef(out, 0u, "%s KiB", names[pool]);
+            netmon_render_linef(out, 1u, "USE %u/%u", (unsigned)s->pools[pool].used_kib,
+                                (unsigned)s->pools[pool].limit_kib);
+            netmon_render_linef(out, 2u, "FILES %u", (unsigned)s->pools[pool].files);
+            netmon_render_linef(out, 3u, "DATA %uK", (unsigned)s->pools[pool].data_kib);
+        } else if (frame_index == 6u) {
+            netmon_render_linef(out, 0u, "SMS %s", !s->messages_ready ? "UNREADY" :
+                                s->messages_full ? "FULL" : "OK");
+            netmon_render_linef(out, 1u, "IN%u OUT%u", (unsigned)s->inbox, (unsigned)s->outbox);
+            netmon_render_linef(out, 2u, "PART %u Q%u", (unsigned)s->pending, (unsigned)s->queued);
+            netmon_render_linef(out, 3u, "CLOCK %s", s->retention_clock_valid ? "OK" : "UNSET");
+        } else {
+            netmon_render_linef(out, 0u, "SMS CLEANUP");
+            netmon_render_linef(out, 1u, "E %lu", (unsigned long)s->expired);
+            netmon_render_linef(out, 2u, "F %lu", (unsigned long)s->filtered);
+            netmon_render_linef(out, 3u, "L %lu", (unsigned long)s->lost);
+        }
+        break;
+    }
     case 80u:
         netmon_render_linef(out, 0u, "LCD %s", l->lcd_powered_down ? "sleep" : "awake");
         netmon_render_linef(out, 1u, "LIGHT %s", netmon_render_on_off(b->backlight_on));

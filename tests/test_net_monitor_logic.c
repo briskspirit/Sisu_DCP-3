@@ -32,9 +32,10 @@ static void test_registry(void) {
     check(netmon_registry_find(0u) == NULL, "page 00 is disable, not a page");
     check(netmon_registry_find(1u) != NULL, "serving page present");
     check(netmon_registry_find(99u) != NULL, "maintenance page present");
-    check(netmon_registry_find(38u) == NULL &&
-              netmon_registry_find(76u) == NULL,
-          "retired duplicate pages stay absent");
+    check(netmon_registry_find(38u) == NULL, "retired duplicate page stays absent");
+    check(netmon_registry_find(76u) != NULL &&
+              netmon_registry_find(76u)->provider == NETMON_PROVIDER_LOCAL,
+          "partition statistics have a local read-only page");
     check(netmon_registry_find(82u) != NULL &&
               netmon_registry_find(89u) != NULL &&
               netmon_registry_find(89u)->action ==

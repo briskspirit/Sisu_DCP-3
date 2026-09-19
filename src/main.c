@@ -400,6 +400,8 @@ int main(void) {
             rtc_datetime_t wall_time;
             rtc_alarm_hal_get_datetime(&wall_time);
             message_service_tick(now, rtc_alarm_hal_time_valid() ? &wall_time : NULL);
+            if (s_app.net_monitor_selector == 76u && s_app.route != APP_ROUTE_POWER_OFF)
+                netmon_diag_service_poll_storage(now);
         }
         debug_console_tick(&s_app);
         core1_services_audio_gate_tick(now); /* A2+R2: park idle audio plumbing */

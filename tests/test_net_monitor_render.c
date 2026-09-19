@@ -134,6 +134,18 @@ static void populate_snapshots(netmon_local_diag_snapshot_t *local,
     local->stack.core1.size_bytes = 4096u;
     local->stack.core1.peak_used_bytes = 880u;
     local->stack.core1.minimum_margin_bytes = 3216u;
+    local->partitions = (netmon_storage_diag_t){.valid=true, .sampled_ms=1200u,
+        .system_used_kib=12u, .system_total_kib=64u,
+        .user_used_kib=120u, .user_total_kib=384u, .reserve_kib=32u,
+        .inbox=500u, .outbox=500u, .pending=64u, .queued=8u,
+        .messages_ready=true, .retention_clock_valid=true,
+        .expired=123u, .filtered=456u, .lost=7u};
+    for (unsigned i = 0u; i < STORAGE_USER_POOL_COUNT; i++) {
+        local->partitions.pools[i].used_kib = 32u;
+        local->partitions.pools[i].limit_kib = 64u;
+        local->partitions.pools[i].files = 500u;
+        local->partitions.pools[i].data_kib = 25u;
+    }
 
     modem->backend_available = true;
     modem->at_ready = true;
@@ -231,7 +243,7 @@ static netmon_render_owner_t expected_owner(uint8_t id) {
     if ((id >= 40u && id <= 48u) ||
         (id >= 50u && id <= 58u) ||
         (id >= 60u && id <= 68u) ||
-        (id >= 70u && id <= 75u) ||
+        (id >= 70u && id <= 76u) ||
         (id >= 80u && id <= 88u)) {
         return NETMON_RENDER_OWNER_LOCAL;
     }
@@ -243,7 +255,7 @@ static netmon_render_owner_t expected_owner(uint8_t id) {
 
 static void test_page_ownership(void) {
     size_t owned = 0u;
-    check(netmon_registry_count() == 88u,
+    check(netmon_registry_count() == 89u,
           "render ownership contract covers the complete page registry");
 
     for (size_t i = 0u; i < netmon_registry_count(); i++) {
@@ -584,6 +596,29 @@ static void test_state_and_absence_rendering(void) {
                         &local, &modem, &control, &frame);
     check(strcmp(frame.lines[1], "HB 0ms") == 0,
           "cross-core heartbeat skew cannot wrap into a false huge age");
+
+    const netmon_page_descriptor_t *storage = netmon_registry_find(76u);
+    check(netmon_frame_count(storage, &modem) == 8u, "partition page has eight frames");
+    netmon_format_frame(storage, 0u, caps, 1200u, &local, &modem, &control, &frame);
+    check_lines(&frame, "SYS 12/64K", "USR 120/384K", "FREE 264K", "RSV 32K",
+                "partition totals and physical free space");
+    netmon_format_frame(storage, 1u, caps, 1200u, &local, &modem, &control, &frame);
+    check_lines(&frame, "CONTACTS KiB", "USE 32/64", "FILES 500", "DATA 25K",
+                "category budget, files and data are distinct");
+    netmon_format_frame(storage, 6u, caps, 1200u, &local, &modem, &control, &frame);
+    check_lines(&frame, "SMS OK", "IN500 OUT500", "PART 64 Q8", "CLOCK OK",
+                "message queue and retention health");
+    netmon_format_frame(storage, 7u, caps, 1200u, &local, &modem, &control, &frame);
+    check_lines(&frame, "SMS CLEANUP", "E 123", "F 456", "L 7",
+                "local cleanup counters");
+    local.partitions.valid = false;
+    netmon_format_frame(storage, 0u, caps, 1200u, &local, &modem, &control, &frame);
+    check(strcmp(frame.lines[0], "FS NOT READY") == 0, "failed sample never displays zero usage");
+    local.partitions.valid = true;
+    local.updated_ms = 18000u;
+    netmon_format_frame(storage, 0u, caps, 18000u, &local, &modem, &control, &frame);
+    check(strcmp(frame.lines[0], "FS STALE") == 0, "deferred sampling is visibly stale");
+    local.updated_ms = 1000u;
 
     serving->sequence = 1u;
     serving->state = MODEM_DIAG_STATE_PENDING;

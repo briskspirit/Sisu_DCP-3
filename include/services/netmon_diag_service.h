@@ -11,6 +11,7 @@
 #include "services/power_sleep.h"
 #include "services/stack_monitor.h"
 #include "storage/store_service.h"
+#include "storage/storage_user_space.h"
 
 typedef struct {
     bool codec_ready;
@@ -191,6 +192,20 @@ typedef struct {
 } netmon_battery_learning_diag_t;
 
 typedef struct {
+    bool valid;
+    uint32_t sampled_ms;
+    uint16_t system_used_kib, system_total_kib;
+    uint16_t user_used_kib, user_total_kib, reserve_kib;
+    struct {
+        uint16_t used_kib, limit_kib, files, data_kib;
+    } pools[STORAGE_USER_POOL_COUNT];
+    uint16_t inbox, outbox, pending;
+    uint8_t queued;
+    bool messages_ready, messages_full, retention_clock_valid;
+    uint32_t expired, filtered, lost;
+} netmon_storage_diag_t;
+
+typedef struct {
     uint32_t updated_ms;
     uint32_t sequence;
     board_diag_snapshot_t board;
@@ -207,6 +222,7 @@ typedef struct {
     uint32_t main_loop_over_budget;
     uint32_t main_loop_budget_us;
     store_diag_snapshot_t storage;
+    netmon_storage_diag_t partitions;
     netmon_battery_learning_diag_t battery_learning;
     netmon_charge_supervisor_diag_t battery_charge_supervisor;
     core1_services_diag_t core1;
@@ -236,6 +252,8 @@ typedef struct {
 
 void netmon_diag_service_init(uint32_t now_ms);
 void netmon_diag_service_poll(uint32_t now_ms);
+/* Core0's shared storage-safe window only. Rendering never traverses flash. */
+void netmon_diag_service_poll_storage(uint32_t now_ms);
 void netmon_diag_service_get_snapshot(netmon_local_diag_snapshot_t *out);
 uint32_t netmon_diag_service_measurement_generation(void);
 void netmon_diag_service_reset_measurement_window(uint32_t now_ms);

@@ -163,6 +163,8 @@ uint8_t netmon_frame_count(const netmon_page_descriptor_t *page,
         return 3u;
     case 75u:
         return 4u;
+    case 76u:
+        return 8u;
     case 31u:
         return modem != NULL && modem->calls.leg_count != 0u
             ? modem->calls.leg_count : 1u;

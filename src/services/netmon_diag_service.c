@@ -21,6 +21,8 @@
 #include "services/power_sleep.h"
 #include "services/shared_3v8_service.h"
 #include "services/stack_monitor.h"
+#include "services/message_service.h"
+#include "storage/storage_partitions.h"
 
 #define NETMON_DIAG_SAMPLE_MS 250u
 
@@ -42,6 +44,8 @@ static battery_learning_service_snapshot_t s_learning_scratch;
 static battery_charge_supervisor_service_snapshot_t s_charge_scratch;
 static netmon_rate_baseline_t s_rate_baseline;
 static uint32_t s_next_sample_ms;
+static uint32_t s_last_storage_sample_ms;
+static bool s_storage_sampled;
 static bool s_measurement_baseline_valid;
 static uint32_t s_measurement_gauge_session;
 static int64_t s_measurement_baseline_nah;
@@ -71,7 +75,42 @@ void netmon_diag_service_init(uint32_t now_ms) {
     s_measurement_started_ms = now_ms;
     s_measurement_generation = 1u;
     s_next_sample_ms = now_ms;
+    s_storage_sampled = false;
     netmon_diag_service_poll(now_ms);
+}
+
+void netmon_diag_service_poll_storage(uint32_t now_ms) {
+    if (s_storage_sampled && (uint32_t)(now_ms - s_last_storage_sample_ms) < 5000u) return;
+    s_last_storage_sample_ms = now_ms;
+    s_storage_sampled = true;
+    netmon_storage_diag_t *out = &s_snapshot.partitions;
+    memset(out, 0, sizeof(*out));
+    out->sampled_ms = now_ms;
+    message_status_t messages;
+    message_service_get_status(&messages);
+    out->inbox = messages.inbox; out->outbox = messages.outbox;
+    out->pending = messages.pending; out->queued = messages.queued;
+    out->messages_ready = messages.ready; out->messages_full = messages.full;
+    out->retention_clock_valid = messages.retention_clock_valid;
+    out->expired = messages.expired_incomplete;
+    out->filtered = messages.filtered_controls; out->lost = messages.receive_errors;
+    storage_partition_diag_t partitions;
+    storage_user_usage_t usage;
+    storage_partitions_get_diag(&partitions);
+    if (!partitions.ready || partitions.system_used < 0 || partitions.user_used < 0 ||
+        storage_user_get_usage(&usage) != STORAGE_RECORD_OK) return;
+    out->valid = true;
+    out->system_used_kib = (uint16_t)(partitions.system_used * 4);
+    out->system_total_kib = (uint16_t)(partitions.system_blocks * 4);
+    out->user_used_kib = (uint16_t)(usage.allocated_bytes / 1024u);
+    out->user_total_kib = (uint16_t)(usage.capacity_bytes / 1024u);
+    out->reserve_kib = (uint16_t)(usage.recovery_reserve_bytes / 1024u);
+    for (unsigned i = 0; i < STORAGE_USER_POOL_COUNT; i++) {
+        out->pools[i].used_kib = (uint16_t)(usage.pools[i].allocated_bytes / 1024u);
+        out->pools[i].limit_kib = (uint16_t)(usage.pools[i].limit_bytes / 1024u);
+        out->pools[i].files = (uint16_t)usage.pools[i].contents.files;
+        out->pools[i].data_kib = (uint16_t)((usage.pools[i].contents.file_bytes + 1023u) / 1024u);
+    }
 }
 
 void netmon_diag_service_poll(uint32_t now_ms) {
@@ -423,5 +462,7 @@ void netmon_diag_service_note_main_loop(uint32_t duration_us,
     }
 }
 
-_Static_assert(sizeof(netmon_local_diag_snapshot_t) <= 1024u,
+_Static_assert(sizeof(netmon_storage_diag_t) <= 96u,
+               "Net Monitor partition projection unexpectedly large");
+_Static_assert(sizeof(netmon_local_diag_snapshot_t) <= 1024u + 96u,
                "Net Monitor local snapshot unexpectedly large");
