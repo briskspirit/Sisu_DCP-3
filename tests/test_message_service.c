@@ -431,6 +431,57 @@ static void test_io_retry_and_corrupt_record(void) {
            len == 3u && memcmp(wire, "bad", 3u) == 0);
 }
 
+static void test_publication_conflict_isolation(void) {
+    uint8_t destination[MESSAGE_FILE_WIRE_MAX + 1u], pending[MESSAGE_FILE_WIRE_MAX];
+    uint8_t actual[sizeof(destination)];
+    for (unsigned kind = 0u; kind < 4u; kind++) {
+        fresh();
+        make_pdu(pdu[0], 1, 1, 0, 47, "Preserve the staging evidence");
+        assert(message_file_receive(&file, pdu[0]));
+        size_t pending_len, destination_len;
+        assert(message_file_encode(&file, pending, sizeof(pending), &pending_len));
+        uint32_t id;
+        assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);
+        assert(storage_object_write(STORAGE_OBJECT_PENDING_SMS, id, pending, pending_len) == STORAGE_RECORD_OK);
+        if (kind == 0u) {
+            memcpy(destination, "bad", 3u); destination_len = 3u;
+        } else if (kind == 1u) {
+            memcpy(destination, pending, pending_len); destination_len = pending_len;
+        } else if (kind == 2u) {
+            make_pdu(pdu[1], 1, 1, 0, 48, "A different valid inbox body");
+            assert(message_file_receive(&file, pdu[1]));
+            assert(message_file_encode(&file, destination, sizeof(destination), &destination_len));
+        } else {
+            /* Valid object envelope, outside the SMS decoder's size bound. */
+            memset(destination, 'X', sizeof(destination)); destination_len = sizeof(destination);
+        }
+        assert(storage_object_write(STORAGE_OBJECT_INBOX, id, destination, destination_len) == STORAGE_RECORD_OK);
+        uint32_t expected_state = kind == 1u ? 2u : 0u;
+        assert(storage_object_set_state(STORAGE_OBJECT_INBOX, id, expected_state) == STORAGE_RECORD_OK);
+        reopen();
+        for (unsigned boot = 0u; boot < 2u; boot++) {
+            make_pdu(pdu[2], 1, 1, 0, 51u + boot, "Unrelated arrival must be saved");
+            assert(message_service_receive(pdu[2])); drain();
+            assert(status().ready && !status().storage_error && status().pending == 1u &&
+                   status().queued == 0u && status().inbox == boot + 1u + (kind == 2u));
+            assert(message_service_idle() && message_service_sleep_ready());
+            storage_object_collection_t damaged = kind == 2u ? STORAGE_OBJECT_PENDING_SMS : STORAGE_OBJECT_INBOX;
+            assert(corrupt_detections[damaged] != 0u && boot_faults == 0u);
+            size_t len;
+            uint32_t state;
+            assert(storage_object_read(STORAGE_OBJECT_INBOX, id, actual, sizeof(actual), &len) == STORAGE_RECORD_OK &&
+                   len == destination_len && memcmp(actual, destination, len) == 0);
+            assert(storage_object_get_state(STORAGE_OBJECT_INBOX, id, &state) == STORAGE_RECORD_OK && state == expected_state);
+            assert(storage_object_read(STORAGE_OBJECT_PENDING_SMS, id, actual, sizeof(actual), &len) == STORAGE_RECORD_OK &&
+                   len == pending_len && memcmp(actual, pending, len) == 0);
+            unsigned before = operations;
+            drain();
+            assert(operations == before); /* No repeated destructive repair attempts. */
+            reopen();
+        }
+    }
+}
+
 static void test_delete_power_cuts(void) {
     fresh();
     make_pdu(pdu[0], 1, 1, 0, 50, "Atomic delete");
@@ -565,7 +616,7 @@ static void test_control_admission(void) {
 int main(void) {
     test_codec(); test_mailboxes(); test_multipart(); test_power_cuts(); test_busy_and_full();
     test_sent_copy_and_category_isolation(); test_failed_queue_sleep();
-    test_io_retry_and_corrupt_record(); test_delete_power_cuts();
+    test_io_retry_and_corrupt_record(); test_publication_conflict_isolation(); test_delete_power_cuts();
     test_expiry(); test_expiry_power_cuts(); test_control_admission();
     storage_lfs_deinit(); puts("PASS: local messages");
 }

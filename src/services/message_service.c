@@ -14,6 +14,7 @@
 #define INDEX_COMPLETE 2u
 #define INDEX_QUARANTINED 4u
 #define INDEX_CONTROL 8u
+#define INDEX_PUBLICATION_BLOCKED 16u
 
 typedef struct { uint32_t id, time; uint8_t flags; } index_t;
 typedef struct {
@@ -386,6 +387,7 @@ static storage_record_result_t receive_one(void) {
         uint16_t count = group == 0u ? s_pending_count : s_count[MESSAGE_INBOX];
         storage_object_collection_t c = group == 0u ? STORAGE_OBJECT_PENDING_SMS : STORAGE_OBJECT_INBOX;
         for (uint16_t i = 0; i < count; i++) {
+            if (index[i].flags & INDEX_PUBLICATION_BLOCKED) continue;
             rc = load(c, index[i].id);
             if (rc != STORAGE_RECORD_OK) return rc;
             message_merge_t merged = message_file_merge(&s_file, r->pdu);
@@ -412,33 +414,54 @@ static storage_record_result_t receive_one(void) {
     return rc;
 }
 
+static storage_record_result_t block_publication(unsigned pos, storage_object_collection_t damaged) {
+    store_health_note_corrupt(damaged, s_pending[pos].id);
+    s_pending[pos].flags |= INDEX_PUBLICATION_BLOCKED;
+    return STORAGE_RECORD_CORRUPT;
+}
+
 static storage_record_result_t publish(unsigned pos) {
     uint32_t id = s_pending[pos].id;
     int existing = find(s_index[MESSAGE_INBOX], s_count[MESSAGE_INBOX], id);
     storage_record_result_t rc = load(STORAGE_OBJECT_PENDING_SMS, id);
     if (rc != STORAGE_RECORD_OK) return rc;
-    if (existing < 0 && message_file_control(&s_file) != SMS_CONTROL_KEEP) {
-        rc = storage_object_remove(STORAGE_OBJECT_PENDING_SMS, id);
-        if (rc == STORAGE_RECORD_OK || rc == STORAGE_RECORD_NOT_FOUND) {
-            erase_index(s_pending, &s_pending_count, pos);
-            s_status.filtered_controls++;
-            return STORAGE_RECORD_OK;
-        }
-        return rc;
-    }
-    if (existing >= 0) {
-        /* Both copies survived a cut after publication. Never delete the
-         * staging copy unless the published body is exactly the same. */
-        size_t pending_len;
-        if (!message_file_encode(&s_file, s_compare, sizeof(s_compare), &pending_len)) return STORAGE_RECORD_ERROR;
-        size_t inbox_len;
-        rc = storage_object_read(STORAGE_OBJECT_INBOX, id, s_wire, sizeof(s_wire), &inbox_len);
+
+    /* The healthy index deliberately omits corrupt files. Only the physical
+     * destination can prove absence or authorize removal of a duplicate. */
+    size_t pending_len, inbox_len;
+    if (!message_file_encode(&s_file, s_compare, sizeof(s_compare), &pending_len)) return STORAGE_RECORD_ERROR;
+    rc = storage_object_read(STORAGE_OBJECT_INBOX, id, s_wire, sizeof(s_wire), &inbox_len);
+    if (rc == STORAGE_RECORD_CORRUPT) return block_publication(pos, STORAGE_OBJECT_INBOX);
+    if (rc == STORAGE_RECORD_OK) {
+        uint32_t state;
+        rc = storage_object_get_state(STORAGE_OBJECT_INBOX, id, &state);
+        if (rc == STORAGE_RECORD_CORRUPT || (rc == STORAGE_RECORD_OK && (state & ~STATE_READ)))
+            return block_publication(pos, STORAGE_OBJECT_INBOX);
         if (rc != STORAGE_RECORD_OK) return rc;
-        if (pending_len != inbox_len || memcmp(s_compare, s_wire, inbox_len) != 0) return STORAGE_RECORD_ERROR;
-    } else {
+        if (pending_len != inbox_len || memcmp(s_compare, s_wire, inbox_len) != 0) {
+            bool inbox_valid = message_file_decode(&s_file, s_wire, inbox_len) &&
+                !(s_file.flags & MESSAGE_FILE_DRAFT) && message_file_complete(&s_file);
+            return block_publication(pos, inbox_valid ? STORAGE_OBJECT_PENDING_SMS : STORAGE_OBJECT_INBOX);
+        }
+        if ((s_file.flags & MESSAGE_FILE_DRAFT) || !message_file_complete(&s_file))
+            return block_publication(pos, STORAGE_OBJECT_INBOX);
+    } else if (rc == STORAGE_RECORD_NOT_FOUND) {
+        if (existing >= 0) return STORAGE_RECORD_ERROR; /* Reload a stale index first. */
+        if (message_file_control(&s_file) != SMS_CONTROL_KEEP) {
+            rc = storage_object_remove(STORAGE_OBJECT_PENDING_SMS, id);
+            if (rc == STORAGE_RECORD_OK || rc == STORAGE_RECORD_NOT_FOUND) {
+                erase_index(s_pending, &s_pending_count, pos);
+                s_status.filtered_controls++;
+                return STORAGE_RECORD_OK;
+            }
+            return rc;
+        }
         if (s_count[MESSAGE_INBOX] == MESSAGE_MAILBOX_LIMIT) return STORAGE_RECORD_FULL;
         rc = save(STORAGE_OBJECT_INBOX, id);
         if (rc != STORAGE_RECORD_OK) return rc;
+    } else return rc;
+    if (existing < 0) {
+        if (s_count[MESSAGE_INBOX] == MESSAGE_MAILBOX_LIMIT) return STORAGE_RECORD_FULL;
         index_t entry;
         rc = index_current(STORAGE_OBJECT_INBOX, id, &entry);
         if (rc != STORAGE_RECORD_OK) return rc;
@@ -460,7 +483,7 @@ static bool cleanup_incomplete(uint32_t wall, storage_record_result_t *rc) {
     if (wall == 0u) return false;
     for (unsigned i = 0u; i < s_pending_count; i++) {
         index_t *entry = &s_pending[i];
-        if (entry->flags & (INDEX_COMPLETE | INDEX_CONTROL)) continue;
+        if (entry->flags & (INDEX_COMPLETE | INDEX_CONTROL | INDEX_PUBLICATION_BLOCKED)) continue;
         if (entry->time == 0u || wall < entry->time) {
             *rc = storage_object_set_state(STORAGE_OBJECT_PENDING_SMS, entry->id, wall);
             if (*rc == STORAGE_RECORD_OK) entry->time = wall;
@@ -521,10 +544,12 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
     }
     bool publication_full = false;
     for (unsigned i = 0; i < s_pending_count; i++) {
+        if (s_pending[i].flags & INDEX_PUBLICATION_BLOCKED) continue;
         if (!(s_pending[i].flags & (INDEX_COMPLETE | INDEX_CONTROL))) continue;
         if (publication_full && !(s_pending[i].flags & INDEX_CONTROL) &&
             find(s_index[MESSAGE_INBOX], s_count[MESSAGE_INBOX], s_pending[i].id) < 0) continue;
         rc = publish(i);
+        if (rc == STORAGE_RECORD_CORRUPT && (s_pending[i].flags & INDEX_PUBLICATION_BLOCKED)) continue;
         if (rc != STORAGE_RECORD_OK && rc != STORAGE_RECORD_FULL) { failure(rc, now); return; }
         if (rc == STORAGE_RECORD_OK) { s_io_failures = 0u; recount(); return; }
         if (!s_status.full) s_status.full_events++;

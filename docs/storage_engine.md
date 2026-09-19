@@ -247,6 +247,11 @@ Read/unread state uses a fixed four-byte littlefs attribute, atomically updated
 without rewriting the body and preserved across body replacements. A completed
 staging file is published under the same durable ID in the inbox before staging
 is removed. Recovery verifies identical bodies when both copies survive a cut.
+It checks the on-disk inbox path even when the healthy index omits that ID.
+A corrupt destination body/state or conflicting duplicate leaves both files
+untouched, records a health detection, and blocks only that publication pair.
+Blocked staging copies are neither merged into nor expired. They are checked
+again when the index is rebuilt; unrelated publication and receive work continues.
 The RAM index is rebuilt from files; it is not another persisted transaction.
 Host tests cover out-of-order eight-part reception, exact retransmissions,
 conflicting segments, reboot persistence, torn stage/publish/cleanup writes,
