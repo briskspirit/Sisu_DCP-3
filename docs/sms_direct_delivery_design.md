@@ -335,8 +335,9 @@ timeout or cancellation; repair failure never turns an accepted send into a
 retryable failure, and blocks later SMS sends until repaired.
 
 The September 19 Unicode loopback also exposed a receive length discrepancy:
-the ten-field Telit UCS2 `+CMT` without UDH reports characters, not octets. The
-vendor adapter normalizes this form before the strict generic TPDU parser.
+the ten-field Telit UCS2 `+CMT` reports UDH octets plus text characters, not
+the total TP-UD octets. The vendor adapter checks the header/body relationship
+and normalizes this form before the strict generic TPDU parser.
 
 ### Command Scheduling
 

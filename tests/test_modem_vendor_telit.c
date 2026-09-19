@@ -2247,6 +2247,15 @@ static void test_3gpp_ucs2_character_length(void) {
           telit_translate_direct_sms(header, BYTES("0040007B0041"), &d) == MODEM_SMS_DIRECT_REJECTED &&
           telit_translate_direct_sms(header, BYTES("0040007Z"), &d) == MODEM_SMS_DIRECT_REJECTED,
           "short, oversized and non-hex UCS2 bodies do not consume following lines");
+    const char *part = "06080400060202003300340035003600370038003900300031003200330034003500360037003800390030003100320033003400350036003700380039";
+    check(telit_translate_direct_sms(
+              "+CMT: \"+18132936877\",\"\",\"26/09/19,12:17:13-16\",145,68,0,8,\"+19039321415\",145,34",
+              BYTES(part), &d) == MODEM_SMS_DIRECT_ACCEPTED && d.udhi && d.ud_len == 61u,
+          "captured multipart UCS2 length includes seven UDH octets plus 27 characters");
+    check(telit_translate_direct_sms(
+              "+CMT: \"123\",,\"26/09/19,12:00:00+00\",129,68,0,8,,129,2",
+              BYTES("FF000000"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "UDH outside the UCS2 body is rejected");
 }
 
 int main(void) {

@@ -98,14 +98,21 @@ static modem_sms_direct_translate_result_t translate_3gpp_text(
     bool gsm7 = group <= 7u ? (dcs & 0x2Cu) == 0u :
         (group == 12u || group == 13u || (group == 15u && (dcs & 12u) == 0u));
     bool ucs2 = group == 14u || (group <= 7u && (dcs & 0x2Cu) == 8u);
-    if (ucs2 && (fo & 0x40u) == 0u) {
-        /* Captured UCS2 +CMT reports characters, while the generic parser
-         * consumes octets. Hex bodies end at this line; never swallow URCs. */
+    if (ucs2) {
+        /* Telit counts UDH octets plus UCS2 characters, not TP-UD octets.
+         * Captured multipart example: 7 UDH bytes + 66 chars = length 73,
+         * but 139 TP-UD bytes. Hex bodies must end on this line. */
         const char *last = strrchr(header, ',');
-        if (last == NULL || length > SMS_DELIVER_UD_MAX / 2u || payload_len != length * 4u)
+        size_t bytes = 0u;
+        if (last == NULL || (payload_len != 0u &&
+            !modem_sms_direct_hex_to_bytes(payload, payload_len, s_bytes, SMS_DELIVER_UD_MAX, &bytes)))
+            return MODEM_SMS_DIRECT_REJECTED;
+        size_t udh = (fo & 0x40u) != 0u && bytes != 0u ? (size_t)s_bytes[0] + 1u : 0u;
+        if (((fo & 0x40u) != 0u && udh == 0u) || udh > bytes ||
+            ((bytes - udh) & 1u) != 0u || length != udh + (bytes - udh) / 2u)
             return MODEM_SMS_DIRECT_REJECTED;
         int n = snprintf(s_3gpp_header, sizeof(s_3gpp_header), "%.*s,%u",
-                         (int)(last - header), header, (unsigned)length * 2u);
+                         (int)(last - header), header, (unsigned)bytes);
         return n >= 0 && (size_t)n < sizeof(s_3gpp_header) &&
             modem_sms_direct_parse_3gpp_text(s_3gpp_header, payload, payload_len, out)
                 ? MODEM_SMS_DIRECT_ACCEPTED : MODEM_SMS_DIRECT_REJECTED;
