@@ -35,12 +35,12 @@ bool start_standby_call(app_t *app, uint32_t now);
  * start_outgoing_call; restore only once the route settled on APP_ROUTE_CALL. */
 typedef struct {
     char held_number[MODEM_PHONE_MAX + 1u];
-    char held_name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char held_name[PHONEBOOK_NAME_MAX + 1u];
     store_call_list_t held_list;
     uint32_t held_id;
     uint32_t held_elapsed_seconds;
     char wait_number[MODEM_PHONE_MAX + 1u];
-    char wait_name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char wait_name[PHONEBOOK_NAME_MAX + 1u];
     bool had_waiting;
     uint8_t waiting_id;
     uint8_t waiting_generation;

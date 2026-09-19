@@ -255,6 +255,10 @@ bool store_service_flush_all(void) {
     return all_clean;
 }
 
+bool store_service_write_window_open(uint32_t now_ms) {
+    return (uint32_t)(s_commit_defer_until_ms - now_ms) > STORE_COMMIT_DEFER_MAX_MS;
+}
+
 void store_service_tick(uint32_t now_ms) {
     /* Wrap-safe gates (the old signed absolute-deadline compares inverted after
      * ~24.8 days of idle, blocking ALL commits -> silent loss of call logs and

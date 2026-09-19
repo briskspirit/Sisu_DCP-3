@@ -18,6 +18,7 @@
 #include "services/timebase.h"
 #include "services/usb_service.h"
 #include "storage/store_service.h"
+#include "services/phonebook_service.h"
 
 #include "hardware/powman.h"
 #include "hardware/regs/powman.h"
@@ -385,7 +386,7 @@ static void power_sleep_enter(void) {
         LOGW("power", "dormant entry aborted: RTC config pending");
         return;
     }
-    if (!store_service_flush_all()) {
+    if (!phonebook_service_idle() || !store_service_flush_all()) {
         note_abort(POWER_SLEEP_ABORT_FLUSH);
         LOGW("power", "dormant entry aborted: store flush failed");
         return;

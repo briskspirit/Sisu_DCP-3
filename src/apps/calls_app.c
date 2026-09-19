@@ -1,3 +1,4 @@
+#include "services/phonebook_service.h"
 #include "apps/calls_app.h"
 
 #include <stdint.h>
@@ -134,7 +135,7 @@ static void show_call_volume(app_t *app, int8_t delta, uint32_t now);
 static void apply_call_volume_gain(uint8_t level);
 static uint8_t call_options_build(const app_t *app, call_option_t *options, const char **labels);
 static bool route_is_call_surface(const app_t *app);
-static bool speed_dial_entry_for_digit(char digit, modem_phonebook_entry_t *entry);
+static bool speed_dial_entry_for_digit(char digit, phonebook_entry_t *entry);
 static char dtmf_char_for_key(uint16_t key);
 static void format_call_duration(uint32_t elapsed_seconds, char *dst, size_t cap);
 static uint32_t call_arm_stamp(uint32_t stamp_ms);
@@ -889,7 +890,7 @@ bool poll_call_runtime(app_t *app, uint32_t now) {
     if (status.waiting_call && app->call_phase == CALL_PHASE_CONNECTED && !app->call_waiting_action_pending) {
         capture_waiting_identity(app, &call_snapshot);
         const char *number = status.incoming_number;
-        char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+        char name[PHONEBOOK_NAME_MAX + 1u];
         resolve_contact_name(number, name, sizeof(name));
         if (!app->call_waiting_pending ||
             strcmp(app->call_waiting_number, number) != 0 ||
@@ -959,7 +960,7 @@ bool poll_call_runtime(app_t *app, uint32_t now) {
                 /* A different generation may already be presenting. B is
                  * correctly missed, but the replacement call must not be lost
                  * merely because both changes landed in one app poll. */
-                char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+                char name[PHONEBOOK_NAME_MAX + 1u];
                 resolve_contact_name(status.incoming_number, name, sizeof(name));
                 finalize_call_record(app, now, STORE_CALL_REASON_NONE);
                 open_incoming_call(app, status.incoming_number, name);
@@ -1011,7 +1012,7 @@ bool poll_call_runtime(app_t *app, uint32_t now) {
         if (app->route == APP_ROUTE_INCOMING_CALL) {
             bool incoming_changed = false;
             if (number[0] != '\0' && strcmp(app->call_number, number) != 0) {
-                char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+                char name[PHONEBOOK_NAME_MAX + 1u];
                 resolve_contact_name(number, name, sizeof(name));
                 copy_text(app->call_number, sizeof(app->call_number), number);
                 copy_text(app->call_name, sizeof(app->call_name), name);
@@ -1034,7 +1035,7 @@ bool poll_call_runtime(app_t *app, uint32_t now) {
             return incoming_changed;
         }
         if (app->route != APP_ROUTE_CALL) {
-            char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+            char name[PHONEBOOK_NAME_MAX + 1u];
             resolve_contact_name(number, name, sizeof(name));
             open_incoming_call(app, number, name);
             app->call_incoming_withheld = status.caller_id_withheld;
@@ -1336,7 +1337,7 @@ bool start_standby_call(app_t *app, uint32_t now) {
     }
 
     char number[MODEM_PHONE_MAX + 1u];
-    char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char name[PHONEBOOK_NAME_MAX + 1u];
     copy_text(number, sizeof(number), app->input_text);
     name[0] = '\0';
     if (strcmp(number, "1") == 0) {
@@ -1355,7 +1356,7 @@ bool start_standby_call(app_t *app, uint32_t now) {
             return true;
         }
     } else if (number[0] >= '2' && number[0] <= '9' && number[1] == '\0') {
-        modem_phonebook_entry_t entry;
+        phonebook_entry_t entry;
         if (speed_dial_entry_for_digit(number[0], &entry)) {
             copy_text(number, sizeof(number), entry.number);
             copy_text(name, sizeof(name), entry.name);
@@ -1696,7 +1697,7 @@ static void swap_call_display_slots(app_t *app, uint32_t now) {
         current_elapsed = (uint32_t)time_diff_ms(now, app->call_connected_ms) / 1000u;
     }
     char old_number[MODEM_PHONE_MAX + 1u];
-    char old_name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char old_name[PHONEBOOK_NAME_MAX + 1u];
     copy_text(old_number, sizeof(old_number), app->call_number);
     copy_text(old_name, sizeof(old_name), app->call_name);
     store_call_list_t old_list = app->call_record_list;
@@ -1815,7 +1816,7 @@ static bool cancel_new_call_setup(app_t *app, uint32_t now) {
 static void handoff_waiting_to_incoming(app_t *app, const modem_status_t *status,
                                         uint32_t now) {
     char number[MODEM_PHONE_MAX + 1u];
-    char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char name[PHONEBOOK_NAME_MAX + 1u];
     bool withheld = app->call_waiting_withheld;
     bool diverted = app->call_waiting_diverted;
     copy_text(number, sizeof(number), app->call_waiting_number);
@@ -1829,7 +1830,7 @@ static void handoff_waiting_to_incoming(app_t *app, const modem_status_t *status
 static void handoff_waiting_to_connected(app_t *app, const modem_status_t *status,
                                          uint32_t now) {
     char number[MODEM_PHONE_MAX + 1u];
-    char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char name[PHONEBOOK_NAME_MAX + 1u];
     bool withheld = app->call_waiting_withheld;
     bool diverted = app->call_waiting_diverted;
     copy_text(number, sizeof(number), app->call_waiting_number);
@@ -2213,18 +2214,18 @@ static bool route_is_call_surface(const app_t *app) {
     return false;
 }
 
-static bool speed_dial_entry_for_digit(char digit, modem_phonebook_entry_t *entry) {
+static bool speed_dial_entry_for_digit(char digit, phonebook_entry_t *entry) {
     if (digit < '2' || digit > '9' || entry == 0) {
         return false;
     }
-    uint16_t contact_index = STORE_SPEED_DIAL_EMPTY;
+    uint32_t contact_index = STORE_SPEED_DIAL_EMPTY;
     if (store_phonebook_get_speed_dial((uint8_t)(digit - '0'), &contact_index) != STORE_STATUS_OK ||
         contact_index == STORE_SPEED_DIAL_EMPTY) {
         return false;
     }
-    uint16_t count = modem_service_phonebook_count();
+    uint16_t count = phonebook_service_count();
     for (uint16_t i = 0u; i < count; i++) {
-        if (modem_service_phonebook_entry(i, entry) && entry->index == contact_index && entry->number[0] != '\0') {
+        if (phonebook_service_entry(i, entry) && entry->index == contact_index && entry->number[0] != '\0') {
             return true;
         }
     }

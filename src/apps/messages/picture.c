@@ -55,7 +55,7 @@ static void picture_format(char *dst, size_t cap, const char *format,
 
 static void picture_sender_text(uint8_t slot, char *text, size_t cap) {
     char sender[MODEM_SMS_SENDER_MAX + 1u] = {0};
-    char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char name[PHONEBOOK_NAME_MAX + 1u];
     (void)store_picture_message_sender(slot, sender, sizeof(sender));
     resolve_contact_name(sender, name, sizeof(name));
     picture_format(text, cap, ts_or(0x35cu, "Sender:\n%S"),

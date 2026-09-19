@@ -60,7 +60,7 @@ the release-fidelity gate and host prerequisites.
 - The Telit backend owns module commands, response grammar, power sequencing,
   provisioning, registration details, DTR/CTS sleep, RI wake, DVI setup, and
   dynamic antenna tuning.
-- The generic modem service owns request scheduling, SMS and phonebook flows,
+- The generic modem service owns request scheduling and SMS transport flows,
   call transactions, and the id-authoritative CLCC call table.
 - Hardware access stays behind HAL and service ownership boundaries. Apps do
   not drive board power, modem control, or shared interrupt pins directly.
@@ -88,8 +88,9 @@ shutdown work and wake-source checks complete.
 
 Settings and phone-local records use CRC-protected atomic records on separate
 64 KiB system and 384 KiB user littlefs partitions. Previous layouts require an
-explicit erase; no journal import is performed. Phonebook entries and SMS bodies remain modem-backed and are read
-lazily. See [Storage engine](docs/storage_engine.md) for the flash layout.
+explicit erase; no journal import is performed. Contacts are local files with a
+boot-time RAM cache, independent of the SIM. SMS bodies remain modem-backed at
+this stage and are read lazily. See [Storage engine](docs/storage_engine.md) for the flash layout.
 
 ## License
 

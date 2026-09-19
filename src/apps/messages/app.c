@@ -311,7 +311,7 @@ void render_messages_list(const app_t *app, framebuffer_t *fb) {
     }
 
     if (app->messages_mode == MESSAGES_MODE_READ) {
-        char detail[MODEM_PHONEBOOK_NAME_MAX + MODEM_SMS_SENDER_MAX + 32u];
+        char detail[PHONEBOOK_NAME_MAX + MODEM_SMS_SENDER_MAX + 32u];
         const char *text = detail;
         if (record == 0 || !app->sms_selected_content.valid) {
             return;
@@ -1542,7 +1542,7 @@ static const char *sms_record_label(const app_sms_record_t *record,
         return scratch;
     }
     if (record->address[0] != '\0') {
-        char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+        char name[PHONEBOOK_NAME_MAX + 1u];
         resolve_contact_name(record->address, name, sizeof(name));
         if (name[0] != '\0') {
             copy_text(scratch, cap, name);
@@ -1564,7 +1564,7 @@ static void sms_sender_page_text(const app_sms_record_t *record, char *dst, size
         snprintf(dst, cap, "Sender:\n%s", "Message");
         return;
     }
-    char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char name[PHONEBOOK_NAME_MAX + 1u];
     resolve_contact_name(record->address, name, sizeof(name));
     if (name[0] != '\0') {
         snprintf(dst, cap, "Sender:\n%s\n%s", name, record->address);
@@ -1585,7 +1585,7 @@ static void sms_recipient_page_text(const app_sms_record_t *record, char *dst, s
         copy_text(dst, cap, "Recipient:");
         return;
     }
-    char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char name[PHONEBOOK_NAME_MAX + 1u];
     resolve_contact_name(record->address, name, sizeof(name));
     snprintf(dst, cap, "Recipient:\n%s", name[0] != '\0' ? name : record->address);
 }

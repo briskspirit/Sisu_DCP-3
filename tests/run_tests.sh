@@ -26,7 +26,6 @@ MODEM_SERVICE_SOURCES=(
     src/services/modem_line_framer.c
     src/services/modem_line_parser.c
     src/services/modem_maintenance.c
-    src/services/modem_phonebook_state.c
     src/services/modem_sms_direct.c
     src/services/modem_sms_protocol.c
     src/services/modem_sms_state.c
@@ -450,13 +449,13 @@ check_modem_supplementary_boundary() {
 }
 
 check_modem_phonebook_boundary() {
-    name="test_modem_phonebook_boundary"
+    name="test_phonebook_boundary"
     blog="$OUT/$name.blog"
-    if ! deps="$($CC -MM -I include src/services/modem_phonebook_state.c 2>"$blog")"; then
+    if ! deps="$($CC -MM -I include src/services/phonebook_service.c 2>"$blog")"; then
         echo "BUILD FAIL: $name"; sed 's/^/    /' "$blog"; fail=1; return
     fi
     if printf '%s\n' "$deps" | grep -Eq \
-        'include/hal/|services/modem_service\.h|services/modem_vendor|storage/'; then
+        'include/hal/|services/modem_service\.h|services/modem_vendor'; then
         echo "FAIL: $name"
         printf '    forbidden phonebook-state dependency: %s\n' "$deps"
         fail=1
@@ -471,7 +470,7 @@ check_modem_phonebook_boundary() {
         return
     fi
     if grep -Eq \
-        'AT\+CPB[RSW]|\+CPB[RS]:|MODEM_PHONEBOOK_STORAGE|parse_cpbr_line|phonebook_start_(read|write)' \
+        'AT\+CPB[RSW]|\+CPB[RS]:|PHONEBOOK_STORAGE|parse_cpbr_line|phonebook_start_(read|write)' \
         src/services/modem_service.c; then
         echo "FAIL: $name"
         echo "    phonebook parsing, command syntax, or operation steps leaked back into modem_service.c"
@@ -816,6 +815,7 @@ run test_nvm_flash_hal       src/storage/nvm_flash_hal.c -DTEST_NVM_IRQ_ORDER
 run test_storage_lfs         src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_lfs_growth  src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_objects     src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
+run test_phonebook_service src/services/phonebook_service.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_powercut    src/diag/storage_powercut_test.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I src/storage -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_partitions  src/storage/storage_partitions.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_store_service       src/storage/store_calls.c src/storage/store_battery_learning.c src/storage/store_battery_charge_supervisor.c src/storage/store_service.c src/storage/store_divert.c src/storage/store_pictures.c src/storage/store_settings.c src/storage/store_t9.c src/storage/store_tones.c src/storage/store_warranty.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c src/services/battery_learning_logic.c src/services/battery_charge_supervisor_logic.c src/services/battery_charge_logic.c src/services/sms_picture_codec.c -I src -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
@@ -906,8 +906,6 @@ run test_modem_pdu           src/services/sms_submit_codec.c
 run test_modem_diag_engine   src/services/modem_diag_engine.c
 run test_modem_maintenance   src/services/modem_maintenance.c
 run test_modem_supplementary_state src/services/modem_supplementary_state.c
-run test_modem_phonebook_state src/services/modem_phonebook_state.c -I src
-run test_modem_phonebook_protocol src/services/modem_phonebook_state.c -I src
 run test_modem_sms_state src/services/modem_sms_state.c \
     src/services/sms_identity.c src/services/sms_submit_codec.c -I src
 run test_modem_sms_protocol src/services/modem_sms_protocol.c \

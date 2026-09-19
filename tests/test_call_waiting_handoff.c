@@ -1,3 +1,4 @@
+#include "services/phonebook_service.h"
 /* Remote foreground release while a waiting caller survives must transfer the
  * UI to that exact caller. The waiting leg may remain INCOMING/WAITING or may
  * already be ACTIVE by the next application poll; neither outcome is a missed
@@ -542,7 +543,7 @@ store_status_t store_setting_set_u8(store_setting_key_t key, uint8_t value) {
     return STORE_STATUS_OK;
 }
 
-bool modem_service_phonebook_find_name(const char *number, char *out,
+bool phonebook_service_find_name(const char *number, char *out,
                                        size_t cap) {
     (void)number;
     if (out != NULL && cap > 0u) out[0] = '\0';

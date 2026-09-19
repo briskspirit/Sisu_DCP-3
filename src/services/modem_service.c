@@ -18,10 +18,8 @@
 #include "services/modem_diag_engine.h"
 #include "services/modem_line_framer.h"
 #include "services/modem_line_parser.h"
-#include "services/modem_phonebook_state.h"
 #include "services/modem_sms_direct.h"
 #include "services/operator_name_db.h"
-#include "modem_phonebook_protocol_internal.h"
 #include "modem_sms_protocol_internal.h"
 #include "modem_sms_state_internal.h"
 #include "services/modem_supplementary_state.h"
@@ -82,9 +80,6 @@ _Static_assert(MODEM_SMS_RECORD_MAX <= UINT8_MAX,
                "SMS mailbox counts use uint8_t");
 _Static_assert(MODEM_SMS_SEGMENT_MAX <= 8u,
                "multipart completion masks use one byte");
-_Static_assert(MODEM_PHONEBOOK_RESULT_CAPACITY >=
-                   MODEM_REQUEST_QUEUE_LEN + 1u,
-               "phonebook journal must hold the current request plus the FIFO");
 
 typedef enum {
     MODEM_STATE_PROBE = 0,
@@ -154,9 +149,6 @@ typedef enum {
     MODEM_AT_SMS_CMGW_PROMPT,
     MODEM_AT_SMS_CMGW_FINAL,
     MODEM_AT_SMS_PICTURE_TEXT_SETUP,
-    MODEM_AT_PHONEBOOK_CPBS,
-    MODEM_AT_PHONEBOOK_CPBR,
-    MODEM_AT_PHONEBOOK_CPBW,
     MODEM_AT_DIAG_QUERY,        /* one Net Monitor v2 query; always yields on final */
     MODEM_AT_MAINTENANCE,
     MODEM_AT_POWER_OFF,
@@ -189,10 +181,6 @@ typedef enum {
     MODEM_OP_SMS_READ,
     MODEM_OP_DELETE_SMS,
     MODEM_OP_STORE_DELIVERED_SMS, /* internal: re-store a +CMT as a PDU */
-    MODEM_OP_PHONEBOOK_LIST,
-    MODEM_OP_PHONEBOOK_ADD,
-    MODEM_OP_PHONEBOOK_UPDATE,
-    MODEM_OP_PHONEBOOK_DELETE,
     MODEM_OP_DEBUG_AT,
 } modem_operation_t;
 
@@ -217,10 +205,6 @@ typedef enum {
     MODEM_REQ_SMS_READ,
     MODEM_REQ_DELETE_SMS,
     MODEM_REQ_STORE_DELIVERED_SMS, /* internal: queued by the direct ring */
-    MODEM_REQ_PHONEBOOK_LIST,
-    MODEM_REQ_PHONEBOOK_ADD,
-    MODEM_REQ_PHONEBOOK_UPDATE,
-    MODEM_REQ_PHONEBOOK_DELETE,
     MODEM_REQ_DEBUG_AT,
     MODEM_REQ_DEBUG_BACKGROUND_POLLING,
 } modem_request_type_t;
@@ -234,7 +218,6 @@ typedef struct {
     bool sms_quarantined;
     uint16_t index;
     char number[MODEM_PHONE_MAX + 1u];
-    char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
     char text[MODEM_SMS_TEXT_MAX + 1u];
     uint8_t binary[MODEM_SMS_BINARY_MAX];
     uint16_t binary_len;
@@ -318,7 +301,7 @@ static void dtmf_finish_digit(bool ok, uint32_t now_ms);
 static bool queue_request(const modem_request_t *request);
 static bool pop_request(modem_request_t *request);
 static void cancel_request(const modem_request_t *request,
-                           modem_phonebook_outcome_t phonebook_outcome);
+                           modem_sms_outcome_t outcome);
 static void cancel_request_session(void);
 static bool model_queue_call_request(modem_request_t *request, bool front);
 static bool model_start_pending_release(uint32_t now_ms);
@@ -355,22 +338,6 @@ static void direct_ring_reset(void);
 static void direct_store_unblock(const char *why);
 static void direct_body_deadline_tick(uint32_t now_ms);
 static bool sms_mode_restore_start(uint32_t now_ms);
-static bool phonebook_protocol_request_view(
-    modem_phonebook_protocol_request_t *out);
-static bool phonebook_protocol_command_from_at(
-    modem_at_kind_t at_kind, modem_phonebook_command_kind_t *out);
-static modem_at_kind_t phonebook_protocol_command_to_at(
-    modem_phonebook_command_kind_t kind);
-static bool phonebook_protocol_emit(
-    const modem_phonebook_protocol_action_t *action);
-static bool phonebook_start_current_request(uint32_t now_ms);
-static void phonebook_clear_cache(void);
-static const modem_phonebook_protocol_hooks_t s_phonebook_protocol_hooks;
-static bool phonebook_operation_from_request_type(
-    modem_request_type_t type, modem_phonebook_op_t *out);
-static bool queue_phonebook_request(modem_request_t *request,
-                                    uint32_t *request_id_out);
-static void phonebook_cancel_protocol(void);
 static void sms_continue_after_cpms(uint32_t now_ms);
 static void sms_complete_deferred_setup(void);
 static bool sms_wake_required(void);
@@ -384,12 +351,6 @@ static bool sms_wake_retry_due(uint32_t now_ms);
 static void sms_wake_send_arm(uint32_t now_ms);
 static void sms_begin_prompt_abort_settle(uint32_t now_ms);
 static void push_debug_result(bool ok);
-static void phonebook_finish_operation(uint32_t request_id,
-                                       modem_phonebook_op_t kind,
-                                       modem_phonebook_outcome_t outcome);
-static void phonebook_push_result(uint32_t request_id,
-                                  modem_phonebook_op_t kind,
-                                  modem_phonebook_outcome_t outcome);
 static bool is_final_text(const char *line);
 static bool is_call_progress_final(const char *line);
 static bool is_call_at_kind(modem_at_kind_t kind);
@@ -473,7 +434,6 @@ static void supplementary_project_status_locked(void);
 static critical_section_t s_status_lock;
 static critical_section_t s_request_lock;
 static critical_section_t s_sms_lock;
-static critical_section_t s_phonebook_lock;
 static modem_status_t s_status;
 static modem_diag_engine_t s_diag_engine;
 _Static_assert(sizeof(modem_diag_snapshot_t) <= 1616u,
@@ -523,7 +483,6 @@ static modem_sim_observation_t s_maintenance_sim_deferred;
 static volatile bool s_status_lock_ready;
 static volatile bool s_request_lock_ready;
 static volatile bool s_sms_lock_ready;
-static volatile bool s_phonebook_lock_ready;
 static modem_state_t s_state;
 static modem_at_kind_t s_active_kind;
 static modem_operation_t s_operation;
@@ -853,7 +812,7 @@ static bool model_queue_call_request(modem_request_t *request, bool front) {
 
     if (dropped) {
         LOGW("modem", "request queue full; dropped newest for call control");
-        cancel_request(&evicted, MODEM_PHONEBOOK_OUTCOME_EVICTED);
+        cancel_request(&evicted, MODEM_SMS_OUTCOME_EVICTED);
     }
     /* A call-control admission invalidates the remainder of a diagnostic
      * group immediately. The one command already on the wire is allowed to
@@ -1059,7 +1018,6 @@ void modem_service_init(void) {
     critical_section_init(&s_status_lock);
     critical_section_init(&s_request_lock);
     critical_section_init(&s_sms_lock);
-    critical_section_init(&s_phonebook_lock);
     memset(&s_status, 0, sizeof(s_status));
     memset(&s_rx_trace_status, 0, sizeof(s_rx_trace_status));
     s_rx_trace_write = 0u;
@@ -1180,7 +1138,6 @@ void modem_service_init(void) {
     s_sms_text_parameters_dirty = false;
     s_sms_mode_restore_attempts = 0u;
     s_sms_mode_restore_retry_ms = 0u;
-    modem_phonebook_state_init();
     s_now_ms = time_ms();
     s_diag_transport_last_account_ms = s_now_ms;
     s_diag_transport_ready_ms = 0u;
@@ -1220,7 +1177,6 @@ void modem_service_init(void) {
     s_status_lock_ready = true;
     s_request_lock_ready = true;
     s_sms_lock_ready = true;
-    s_phonebook_lock_ready = true;
 
     s_startup_recycled = false;
 
@@ -2706,138 +2662,6 @@ bool modem_service_sms_mailbox_entry(uint8_t position,
     return ok;
 }
 
-static bool queue_phonebook_request(modem_request_t *request,
-                                    uint32_t *request_id_out) {
-    if (request_id_out == NULL) {
-        return false;
-    }
-    *request_id_out = 0u;
-    if (request == NULL || !s_phonebook_lock_ready) {
-        return false;
-    }
-
-    uint32_t request_id = 0u;
-    critical_section_enter_blocking(&s_phonebook_lock);
-    bool reserved =
-        modem_phonebook_state_reserve_request(&request_id);
-    critical_section_exit(&s_phonebook_lock);
-    if (!reserved) {
-        s_request_admission_failures++;
-        return false;
-    }
-
-    request->request_id = request_id;
-    if (!queue_request(request)) {
-        critical_section_enter_blocking(&s_phonebook_lock);
-        bool released =
-            modem_phonebook_state_release_request(request_id);
-        critical_section_exit(&s_phonebook_lock);
-        if (!released) {
-            LOGE("modem", "phonebook reservation %lu disappeared before admission",
-                 (unsigned long)request_id);
-        }
-        request->request_id = 0u;
-        return false;
-    }
-    *request_id_out = request_id;
-    return true;
-}
-
-bool modem_service_request_phonebook_list(uint32_t *request_id_out) {
-    modem_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.type = MODEM_REQ_PHONEBOOK_LIST;
-    return queue_phonebook_request(&request, request_id_out);
-}
-
-bool modem_service_request_phonebook_add(const char *name, const char *number,
-                                         uint32_t *request_id_out) {
-    if (request_id_out != NULL) {
-        *request_id_out = 0u;
-    }
-    modem_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.type = MODEM_REQ_PHONEBOOK_ADD;
-    copy_bounded(request.name, sizeof(request.name), name);
-    copy_bounded(request.number, sizeof(request.number), number);
-    return request.number[0] != '\0' &&
-           queue_phonebook_request(&request, request_id_out);
-}
-
-bool modem_service_request_phonebook_update(uint16_t index, const char *name,
-                                            const char *number,
-                                            uint32_t *request_id_out) {
-    if (request_id_out != NULL) {
-        *request_id_out = 0u;
-    }
-    modem_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.type = MODEM_REQ_PHONEBOOK_UPDATE;
-    request.index = index;
-    copy_bounded(request.name, sizeof(request.name), name);
-    copy_bounded(request.number, sizeof(request.number), number);
-    return request.index >= MODEM_PHONEBOOK_FIRST_INDEX &&
-           request.index <= MODEM_PHONEBOOK_LAST_INDEX &&
-           request.number[0] != '\0' &&
-           queue_phonebook_request(&request, request_id_out);
-}
-
-bool modem_service_request_phonebook_delete(uint16_t index,
-                                            uint32_t *request_id_out) {
-    if (request_id_out != NULL) {
-        *request_id_out = 0u;
-    }
-    modem_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.type = MODEM_REQ_PHONEBOOK_DELETE;
-    request.index = index;
-    return request.index >= MODEM_PHONEBOOK_FIRST_INDEX &&
-           request.index <= MODEM_PHONEBOOK_LAST_INDEX &&
-           queue_phonebook_request(&request, request_id_out);
-}
-
-bool modem_service_pop_phonebook_result(modem_phonebook_result_t *out) {
-    if (out == 0 || !s_phonebook_lock_ready) {
-        return false;
-    }
-    bool ok = false;
-    critical_section_enter_blocking(&s_phonebook_lock);
-    ok = modem_phonebook_state_pop_result(out);
-    critical_section_exit(&s_phonebook_lock);
-    return ok;
-}
-
-bool modem_service_phonebook_cache_valid(void) {
-    if (!s_phonebook_lock_ready) {
-        return false;
-    }
-    critical_section_enter_blocking(&s_phonebook_lock);
-    bool valid = modem_phonebook_state_cache_valid();
-    critical_section_exit(&s_phonebook_lock);
-    return valid;
-}
-
-uint16_t modem_service_phonebook_count(void) {
-    if (!s_phonebook_lock_ready) {
-        return 0;
-    }
-    critical_section_enter_blocking(&s_phonebook_lock);
-    uint16_t count = modem_phonebook_state_count();
-    critical_section_exit(&s_phonebook_lock);
-    return count;
-}
-
-bool modem_service_phonebook_entry(uint16_t position, modem_phonebook_entry_t *out) {
-    if (out == 0 || !s_phonebook_lock_ready) {
-        return false;
-    }
-    bool ok = false;
-    critical_section_enter_blocking(&s_phonebook_lock);
-    ok = modem_phonebook_state_entry(position, out);
-    critical_section_exit(&s_phonebook_lock);
-    return ok;
-}
-
 bool modem_service_rx_trace_start(void) {
     if (!s_status_lock_ready) return false;
     critical_section_enter_blocking(&s_status_lock);
@@ -2952,7 +2776,6 @@ static void feed_byte(uint8_t byte) {
          * (A header with a <length> reads its body raw and is normally not
          * pending here; the reset is unconditional either way.) */
         modem_sms_protocol_line_dropped();
-        modem_phonebook_protocol_line_dropped();
         modem_sms_direct_reset();
         s_line_drop_count++;
         LOGW("modem", "dropped overlong AT line");
@@ -3610,26 +3433,6 @@ static void process_timeout(uint32_t now_ms) {
             (void)sms_publish_terminal_for_request(
                 &s_current_request, MODEM_SMS_OUTCOME_TIMEOUT);
             finish_operation(false);
-        }
-        return;
-    }
-
-    modem_phonebook_command_kind_t phonebook_kind;
-    if (phonebook_protocol_command_from_at(kind, &phonebook_kind)) {
-        modem_phonebook_protocol_request_t request;
-        if (phonebook_protocol_request_view(&request)) {
-            modem_phonebook_protocol_on_timeout(
-                phonebook_kind, &request, &s_phonebook_protocol_hooks);
-        } else {
-            modem_phonebook_op_t operation;
-            if (phonebook_operation_from_request_type(
-                    s_current_request.type, &operation)) {
-                phonebook_finish_operation(
-                    s_current_request.request_id, operation,
-                    MODEM_PHONEBOOK_OUTCOME_TIMEOUT);
-            } else {
-                finish_operation(false);
-            }
         }
         return;
     }
@@ -4319,12 +4122,6 @@ static void start_next_request(uint32_t now_ms) {
     case MODEM_REQ_STORE_DELIVERED_SMS:
         (void)sms_start_current_request(now_ms);
         break;
-    case MODEM_REQ_PHONEBOOK_LIST:
-    case MODEM_REQ_PHONEBOOK_ADD:
-    case MODEM_REQ_PHONEBOOK_UPDATE:
-    case MODEM_REQ_PHONEBOOK_DELETE:
-        (void)phonebook_start_current_request(now_ms);
-        break;
     case MODEM_REQ_DEBUG_AT:
         s_operation = MODEM_OP_DEBUG_AT;
         set_operation_busy(true);
@@ -4835,19 +4632,6 @@ static void finish_command_result(bool ok, const char *line) {
             modem_sms_protocol_note_final_line(line);
             modem_sms_protocol_on_final(
                 sms_kind, ok, &request, &s_sms_protocol_hooks, s_now_ms);
-        } else {
-            finish_operation(false);
-        }
-        return;
-    }
-
-    modem_phonebook_command_kind_t phonebook_kind;
-    if (phonebook_protocol_command_from_at(kind, &phonebook_kind)) {
-        modem_phonebook_protocol_request_t request;
-        if (phonebook_protocol_request_view(&request)) {
-            modem_phonebook_protocol_on_final(
-                phonebook_kind, ok, &request, &s_phonebook_protocol_hooks,
-                s_now_ms);
         } else {
             finish_operation(false);
         }
@@ -5484,7 +5268,6 @@ static void modem_begin_reinit_wait(uint32_t now_ms) {
     s_ri_release_pending = false;
     s_ri_release_deadline_ms = 0u;
     sms_wake_reset_session();
-    phonebook_clear_cache();
     modem_line_framer_reset(&s_line_framer);
     s_power_pulsed = true;
     s_boot_deadline_ms = now_ms + g_modem_vendor.power.ready_budget_ms;
@@ -5680,8 +5463,6 @@ static bool at_kind_is_operation(modem_at_kind_t kind) {
            kind == MODEM_AT_SMS_CMGF_TEXT || kind == MODEM_AT_SMS_CMGS_PROMPT ||
            kind == MODEM_AT_SMS_CMGS_FINAL || kind == MODEM_AT_SMS_CMGW_PROMPT ||
            kind == MODEM_AT_SMS_CMGW_FINAL || kind == MODEM_AT_SMS_PICTURE_TEXT_SETUP ||
-           kind == MODEM_AT_PHONEBOOK_CPBS ||
-           kind == MODEM_AT_PHONEBOOK_CPBR || kind == MODEM_AT_PHONEBOOK_CPBW ||
            kind == MODEM_AT_POWER_OFF || kind == MODEM_AT_DEBUG ||
            kind == MODEM_AT_MAINTENANCE;
 }
@@ -5694,11 +5475,6 @@ static bool parse_expected_line(const char *line) {
             modem_sms_protocol_parse_line(
                 sms_kind, line, is_known_urc_line(line), is_final_text(line),
                 &request, &s_sms_protocol_hooks);
-    }
-    modem_phonebook_command_kind_t phonebook_kind;
-    if (phonebook_protocol_command_from_at(s_active_kind, &phonebook_kind)) {
-        return modem_phonebook_protocol_parse_line(
-            phonebook_kind, line, &s_phonebook_protocol_hooks);
     }
     switch (s_active_kind) {
     case MODEM_AT_INIT:
@@ -6418,7 +6194,7 @@ static void message_waiting_finish(bool ok) {
 }
 
 static void cancel_request(const modem_request_t *request,
-                           modem_phonebook_outcome_t phonebook_outcome) {
+                           modem_sms_outcome_t outcome) {
     if (request == NULL) {
         return;
     }
@@ -6429,17 +6205,8 @@ static void cancel_request(const modem_request_t *request,
                                  CALL_FORWARD_OUTCOME_CANCELLED,
                                  false, false, NULL, false, 0u);
     }
-    modem_phonebook_op_t operation;
-    if (phonebook_operation_from_request_type(request->type, &operation)) {
-        phonebook_push_result(request->request_id, operation,
-                              phonebook_outcome);
-    }
     modem_sms_request_kind_t sms_kind;
     if (sms_request_kind_from_request_type(request->type, &sms_kind)) {
-        modem_sms_outcome_t outcome =
-            phonebook_outcome == MODEM_PHONEBOOK_OUTCOME_EVICTED
-                ? MODEM_SMS_OUTCOME_EVICTED
-                : MODEM_SMS_OUTCOME_CANCELLED;
         (void)sms_publish_terminal_for_request(request, outcome);
     }
 }
@@ -6451,8 +6218,6 @@ static void cancel_request_session(void) {
         call_forward_request_t call_forward;
         bool is_call_forward;
         bool call_forward_uncertain;
-        modem_phonebook_op_t phonebook_operation;
-        bool is_phonebook;
         modem_sms_request_kind_t sms_kind;
         modem_sms_outcome_t sms_outcome;
         modem_sms_mailbox_t sms_mailbox;
@@ -6489,12 +6254,6 @@ static void cancel_request_session(void) {
                     s_current_request.call_forward.action ==
                         CALL_FORWARD_ACTION_QUERY),
         };
-        (void)phonebook_operation_from_request_type(
-            s_current_request.type,
-            &cancelled[cancelled_count - 1u].phonebook_operation);
-        cancelled[cancelled_count - 1u].is_phonebook =
-            cancelled[cancelled_count - 1u].phonebook_operation !=
-                MODEM_PHONEBOOK_OP_NONE;
         cancelled[cancelled_count - 1u].is_sms =
             sms_request_kind_from_request_type(
                 s_current_request.type,
@@ -6523,12 +6282,6 @@ static void cancel_request_session(void) {
             .call_forward = request->call_forward,
             .is_call_forward = request->type == MODEM_REQ_CALL_FORWARD,
         };
-        (void)phonebook_operation_from_request_type(
-            request->type,
-            &cancelled[cancelled_count - 1u].phonebook_operation);
-        cancelled[cancelled_count - 1u].is_phonebook =
-            cancelled[cancelled_count - 1u].phonebook_operation !=
-                MODEM_PHONEBOOK_OP_NONE;
         cancelled[cancelled_count - 1u].is_sms =
             sms_request_kind_from_request_type(
                 request->type,
@@ -6555,7 +6308,6 @@ static void cancel_request_session(void) {
     s_dtmf_cancel_requested = false;
     critical_section_exit(&s_request_lock);
 
-    phonebook_cancel_protocol();
     sms_cancel_protocol();
 
     for (uint8_t i = 0u; i < cancelled_count; i++) {
@@ -6567,11 +6319,6 @@ static void cancel_request_session(void) {
                                          ? CALL_FORWARD_OUTCOME_RESULT_UNKNOWN
                                          : CALL_FORWARD_OUTCOME_CANCELLED,
                                      false, false, NULL, false, 0u);
-        }
-        if (cancelled[i].is_phonebook) {
-            phonebook_push_result(cancelled[i].request_id,
-                                  cancelled[i].phonebook_operation,
-                                  MODEM_PHONEBOOK_OUTCOME_CANCELLED);
         }
         if (cancelled[i].is_sms) {
             (void)sms_publish_terminal(
@@ -7302,196 +7049,6 @@ static void push_debug_result(bool ok) {
     critical_section_exit(&s_sms_lock);
 }
 
-static bool phonebook_protocol_command_from_at(
-    modem_at_kind_t at_kind, modem_phonebook_command_kind_t *out) {
-    _Static_assert(MODEM_AT_PHONEBOOK_CPBR == MODEM_AT_PHONEBOOK_CPBS + 1,
-                   "phonebook AT-kind map requires a contiguous range");
-    _Static_assert(MODEM_AT_PHONEBOOK_CPBW == MODEM_AT_PHONEBOOK_CPBS + 2,
-                   "phonebook AT-kind map requires a contiguous range");
-    if (out == NULL || at_kind < MODEM_AT_PHONEBOOK_CPBS ||
-        at_kind > MODEM_AT_PHONEBOOK_CPBW) {
-        return false;
-    }
-    *out = (modem_phonebook_command_kind_t)(
-        at_kind - MODEM_AT_PHONEBOOK_CPBS);
-    return true;
-}
-
-static modem_at_kind_t phonebook_protocol_command_to_at(
-    modem_phonebook_command_kind_t kind) {
-    if ((unsigned)kind > (unsigned)MODEM_PHONEBOOK_COMMAND_CPBW) {
-        return MODEM_AT_NONE;
-    }
-    return (modem_at_kind_t)(MODEM_AT_PHONEBOOK_CPBS + kind);
-}
-
-static bool phonebook_operation_from_request_type(
-    modem_request_type_t type, modem_phonebook_op_t *out) {
-    _Static_assert(MODEM_REQ_PHONEBOOK_ADD == MODEM_REQ_PHONEBOOK_LIST + 1,
-                   "phonebook request map requires a contiguous range");
-    _Static_assert(MODEM_REQ_PHONEBOOK_UPDATE == MODEM_REQ_PHONEBOOK_LIST + 2,
-                   "phonebook request map requires a contiguous range");
-    _Static_assert(MODEM_REQ_PHONEBOOK_DELETE == MODEM_REQ_PHONEBOOK_LIST + 3,
-                   "phonebook request map requires a contiguous range");
-    if (out == NULL || type < MODEM_REQ_PHONEBOOK_LIST ||
-        type > MODEM_REQ_PHONEBOOK_DELETE) {
-        return false;
-    }
-    *out = (modem_phonebook_op_t)(
-        MODEM_PHONEBOOK_OP_LIST + (type - MODEM_REQ_PHONEBOOK_LIST));
-    return true;
-}
-
-static bool phonebook_protocol_request_view(
-    modem_phonebook_protocol_request_t *out) {
-    modem_phonebook_op_t operation;
-    if (out == NULL || !phonebook_operation_from_request_type(
-                           s_current_request.type, &operation)) {
-        return false;
-    }
-    memset(out, 0, sizeof(*out));
-    out->request_id = s_current_request.request_id;
-    out->operation = operation;
-    out->index = s_current_request.index;
-    out->name = s_current_request.name;
-    out->number = s_current_request.number;
-    return true;
-}
-
-static void phonebook_finish_operation(uint32_t request_id,
-                                       modem_phonebook_op_t kind,
-                                       modem_phonebook_outcome_t outcome) {
-    phonebook_push_result(request_id, kind, outcome);
-    s_operation = MODEM_OP_NONE;
-    memset(&s_current_request, 0, sizeof(s_current_request));
-    set_operation_busy(false);
-}
-
-static void phonebook_clear_cache(void) {
-    if (!s_phonebook_lock_ready) {
-        return;
-    }
-    critical_section_enter_blocking(&s_phonebook_lock);
-    modem_phonebook_state_clear();
-    critical_section_exit(&s_phonebook_lock);
-}
-
-static void phonebook_push_result(uint32_t request_id,
-                                  modem_phonebook_op_t kind,
-                                  modem_phonebook_outcome_t outcome) {
-    if (!s_phonebook_lock_ready) {
-        return;
-    }
-    bool sim_not_ready = !status_sim_ready_snapshot();
-    critical_section_enter_blocking(&s_phonebook_lock);
-    bool published = modem_phonebook_state_publish_result(
-        request_id, kind, outcome, sim_not_ready);
-    critical_section_exit(&s_phonebook_lock);
-    if (!published) {
-        LOGE("modem", "phonebook terminal rejected id=%lu op=%u outcome=%u",
-             (unsigned long)request_id, (unsigned)kind, (unsigned)outcome);
-    }
-}
-
-static bool phonebook_protocol_emit(
-    const modem_phonebook_protocol_action_t *action) {
-    if (action == NULL) {
-        return false;
-    }
-    switch (action->type) {
-    case MODEM_PHONEBOOK_ACTION_COMMAND: {
-        modem_at_kind_t kind = phonebook_protocol_command_to_at(
-            action->data.command.kind);
-        if (kind == MODEM_AT_NONE || action->data.command.command == NULL) {
-            return false;
-        }
-        send_command(kind, action->data.command.command,
-                     action->data.command.timeout_ms,
-                     action->data.command.now_ms);
-        return true;
-    }
-    case MODEM_PHONEBOOK_ACTION_BEGIN_REFRESH:
-        if (!s_phonebook_lock_ready) {
-            return false;
-        }
-        critical_section_enter_blocking(&s_phonebook_lock);
-        modem_phonebook_state_refresh_begin();
-        critical_section_exit(&s_phonebook_lock);
-        return true;
-    case MODEM_PHONEBOOK_ACTION_APPEND_ENTRY: {
-        if (!s_phonebook_lock_ready) {
-            return false;
-        }
-        bool appended;
-        critical_section_enter_blocking(&s_phonebook_lock);
-        appended = modem_phonebook_state_append(&action->data.entry);
-        critical_section_exit(&s_phonebook_lock);
-        return appended;
-    }
-    case MODEM_PHONEBOOK_ACTION_FINISH_REFRESH: {
-        if (!s_phonebook_lock_ready) {
-            return false;
-        }
-        bool finished;
-        critical_section_enter_blocking(&s_phonebook_lock);
-        finished = modem_phonebook_state_refresh_finish(
-            action->data.refresh.publish);
-        critical_section_exit(&s_phonebook_lock);
-        return finished;
-    }
-    case MODEM_PHONEBOOK_ACTION_COMPLETE:
-        phonebook_finish_operation(action->data.complete.request_id,
-                                   action->data.complete.operation,
-                                   action->data.complete.outcome);
-        return true;
-    default:
-        return false;
-    }
-}
-
-static const modem_phonebook_protocol_hooks_t s_phonebook_protocol_hooks = {
-    .emit = phonebook_protocol_emit,
-    .transport_counter = model_transport_counter,
-};
-
-static void phonebook_cancel_protocol(void) {
-    modem_phonebook_protocol_cancel(&s_phonebook_protocol_hooks);
-}
-
-static bool phonebook_start_current_request(uint32_t now_ms) {
-    _Static_assert(MODEM_OP_PHONEBOOK_ADD == MODEM_OP_PHONEBOOK_LIST + 1,
-                   "phonebook operation map requires a contiguous range");
-    _Static_assert(MODEM_OP_PHONEBOOK_UPDATE == MODEM_OP_PHONEBOOK_LIST + 2,
-                   "phonebook operation map requires a contiguous range");
-    _Static_assert(MODEM_OP_PHONEBOOK_DELETE == MODEM_OP_PHONEBOOK_LIST + 3,
-                   "phonebook operation map requires a contiguous range");
-    modem_phonebook_protocol_request_t request;
-    if (!phonebook_protocol_request_view(&request)) {
-        modem_phonebook_op_t operation;
-        if (phonebook_operation_from_request_type(
-                s_current_request.type, &operation)) {
-            phonebook_finish_operation(
-                s_current_request.request_id, operation,
-                MODEM_PHONEBOOK_OUTCOME_ERROR);
-        } else {
-            finish_operation(false);
-        }
-        return false;
-    }
-    s_operation = (modem_operation_t)(
-        MODEM_OP_PHONEBOOK_LIST +
-        (request.operation - MODEM_PHONEBOOK_OP_LIST));
-    set_operation_busy(true);
-
-    if (!modem_phonebook_protocol_begin(
-            &request, &s_phonebook_protocol_hooks, now_ms)) {
-        phonebook_finish_operation(request.request_id, request.operation,
-                                   MODEM_PHONEBOOK_OUTCOME_ERROR);
-        return false;
-    }
-    return true;
-}
-
 static bool is_final_text(const char *line) {
     bool ok = false;
     return parse_final_result(line, &ok);
@@ -7675,7 +7232,6 @@ static void apply_sim_observation(modem_sim_observation_t observation) {
     critical_section_exit(&s_status_lock);
 
     if (observation != MODEM_SIM_OBSERVATION_READY) {
-        phonebook_clear_cache();
         /* SIM removal/PIN lock invalidates runtime settings owned by the SIM
          * subsystem. Wait for the next trustworthy readiness edge before
          * attempting their bounded completion pass. */
@@ -7801,7 +7357,6 @@ static void modem_enter_off(void) {
     modem_sms_protocol_reset_pending_arrivals();
     direct_ring_reset();
     modem_sms_protocol_operation_finished();
-    phonebook_clear_cache();
     modem_uart_hal_set_power_pin(false);
     modem_uart_hal_set_dtr_sleep_permitted(false);
     /* OFF_DISCHARGE may have left RX enabled as a SIO break sensor. Re-park

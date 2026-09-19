@@ -544,8 +544,8 @@ static void test_defaults(void) {
                     text[0] == '\0',
                 "default message centre empty");
     /* Speed dials default to EMPTY. */
-    uint16_t sd;
-    assert_true(store_setting_get_u16(STORE_SETTING_SPEED_DIAL_1, &sd) == STORE_STATUS_OK && sd == STORE_SPEED_DIAL_EMPTY,
+    uint32_t sd;
+    assert_true(store_setting_get_u32(STORE_SETTING_SPEED_DIAL_1, &sd) == STORE_STATUS_OK && sd == STORE_SPEED_DIAL_EMPTY,
                 "default speed dial empty");
 }
 
@@ -998,7 +998,7 @@ static void test_call_datetime_v1_payload_migrates(void) {
 
 static void test_speed_dial(void) {
     fresh_store();
-    uint16_t idx;
+    uint32_t idx;
     /* Unset -> NOT_FOUND. */
     assert_true(store_phonebook_get_speed_dial(1u, &idx) == STORE_STATUS_NOT_FOUND, "unset speed dial NOT_FOUND");
     /* key out of range 0 and 10. */
@@ -1020,10 +1020,12 @@ static void test_speed_dial(void) {
     assert_true(store_phonebook_get_speed_dial(1u, &idx) == STORE_STATUS_NOT_FOUND, "cleared -> NOT_FOUND");
     assert_true(store_phonebook_set_speed_dial(0u, 5u) == STORE_STATUS_INVALID_ARGUMENT, "set key 0 invalid");
     assert_true(store_phonebook_clear_speed_dial(10u) == STORE_STATUS_INVALID_ARGUMENT, "clear key 10 invalid");
-    /* Boundary value 0xfffe (one below EMPTY sentinel) must NOT be treated as empty. */
-    assert_true(store_phonebook_set_speed_dial(2u, 0xfffeu) == STORE_STATUS_OK, "set near-sentinel speed dial");
-    assert_true(store_phonebook_get_speed_dial(2u, &idx) == STORE_STATUS_OK && idx == 0xfffeu,
-                "0xfffe speed dial not treated as empty");
+    assert_true(store_phonebook_set_speed_dial(2u, 0x12345678u) == STORE_STATUS_OK,
+                "set a full-width durable contact ID");
+    flush_commits();
+    store_service_init();
+    assert_true(store_phonebook_get_speed_dial(2u, &idx) == STORE_STATUS_OK && idx == 0x12345678u,
+                "32-bit speed dial survives a reboot without truncation");
 }
 
 /* --------------------------------------------------------------------------
@@ -1065,11 +1067,11 @@ static void test_contact_tone(void) {
 /* Contact-tone persistence + slot reuse after PRESET-removal. */
 static void test_contact_tone_persistence(void) {
     fresh_store();
-    store_phonebook_set_contact_tone_value(11u, 5u);
+    store_phonebook_set_contact_tone_value(0x12345678u, 5u);
     store_phonebook_set_contact_tone_value(22u, 0xffu); /* NO_TONE = silent */
     flush_commits();
     assert_true(store_service_init() == STORE_STATUS_OK, "re-init contact tones");
-    assert_eq_u32(5u, store_phonebook_get_contact_tone_value(11u), "tone 11 persisted");
+    assert_eq_u32(5u, store_phonebook_get_contact_tone_value(0x12345678u), "32-bit contact tone persisted");
     assert_eq_u32(0xffu, store_phonebook_get_contact_tone_value(22u), "tone 22 (silent) persisted");
 }
 
@@ -1533,7 +1535,7 @@ typedef struct {
 } wire_expectation_t;
 
 static const wire_expectation_t WIRE_EXPECTED[STORE_UNIT_COUNT] = {
-    [STORE_UNIT_SETTINGS_PHONEBOOK] = {79u, UINT64_C(0xf86cf5cdb26f0f03)},
+    [STORE_UNIT_SETTINGS_PHONEBOOK] = {99u, UINT64_C(0x92cafe843f3ec823)},
     [STORE_UNIT_SETTINGS_SMS] = {61u, UINT64_C(0xb1adfff1f95740f2)},
     [STORE_UNIT_SETTINGS_CALLS] = {98u, UINT64_C(0x06494ae4b8997cfd)},
     [STORE_UNIT_SETTINGS_PROFILES] = {228u, UINT64_C(0xbdc1090e2e99d1fd)},
@@ -2270,7 +2272,7 @@ static void test_default_initialization_power_cuts(void) {
             assert(memcmp(s_fake_nvm, snapshot, FAKE_NVM_CAPACITY / 2u) == 0);
         }
     }
-    printf("default initialization: %u operation boundaries x 3 torn-write modes passed\\n",
+    printf("default initialization: %u operation boundaries x 3 torn-write modes passed\n",
            operation_count);
 }
 

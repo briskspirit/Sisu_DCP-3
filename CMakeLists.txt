@@ -191,7 +191,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/modem_line_framer.c
     src/services/modem_line_parser.c
     src/services/modem_maintenance.c
-    src/services/modem_phonebook_state.c
+    src/services/phonebook_service.c
     src/services/modem_sms_direct.c
     src/services/modem_sms_protocol.c
     src/services/modem_sms_state.c

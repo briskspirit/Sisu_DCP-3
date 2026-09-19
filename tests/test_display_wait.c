@@ -1,3 +1,4 @@
+#include "services/phonebook_service.h"
 /* A message-body read uses the sticky v6.00 "Opening" progress note. It must
  * remain on screen until the async read result (or its timeout) resolves it;
  * otherwise C/Navi can expose the list while sms_read_waiting remains true. */
@@ -74,14 +75,14 @@ const char *ts(uint16_t sid) {
     return NULL;
 }
 
-bool modem_service_phonebook_entry(uint16_t position,
-                                   modem_phonebook_entry_t *out) {
+bool phonebook_service_entry(uint16_t position,
+                                   phonebook_entry_t *out) {
     (void)position;
     (void)out;
     return false;
 }
 
-bool start_phonebook_delete(app_t *app, uint16_t index, uint32_t now) {
+bool start_phonebook_delete(app_t *app, uint32_t index, uint32_t now) {
     (void)app;
     (void)index;
     (void)now;

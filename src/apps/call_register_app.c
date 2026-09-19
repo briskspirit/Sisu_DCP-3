@@ -1,3 +1,4 @@
+#include "services/phonebook_service.h"
 #include "apps/call_register_app.h"
 
 #include <stdio.h>
@@ -832,11 +833,11 @@ static void call_register_save_record(app_t *app, const store_call_record_t *rec
         open_display_sid(app, 0u, 0x208u, "No phone\nnumber", APP_ROUTE_CALL_REGISTER_LIST, now);
         return;
     }
-    char name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char name[PHONEBOOK_NAME_MAX + 1u];
     if (record->name[0] != '\0') {
         copy_text(name, sizeof(name), record->name);
     } else {
-        snprintf(name, sizeof(name), "Call %u", (unsigned)(modem_service_phonebook_count() + 1u));
+        snprintf(name, sizeof(name), "Call %u", (unsigned)(phonebook_service_count() + 1u));
     }
     start_phonebook_add_with_context(app,
                                      name,

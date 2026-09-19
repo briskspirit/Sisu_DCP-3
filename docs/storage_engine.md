@@ -7,12 +7,13 @@ Rev B2 reserves the last 448 KiB of internal flash for two littlefs volumes:
 | Volume | Address range (inclusive) | Size | Current records |
 | --- | --- | --- | --- |
 | System | `0x10190000..0x1019ffff` | 64 KiB | Settings, board identity, battery and charge state |
-| User | `0x101a0000..0x101fffff` | 384 KiB | Call lists, T9, pictures, tones, divert history; future contacts/SMS |
+| User | `0x101a0000..0x101fffff` | 384 KiB | Call lists, T9, pictures, tones, divert history, contacts; future SMS |
 
 The build guard protects both regions. All sixteen existing persistent units
 use littlefs. The old journal's flash allocation has been reclaimed. Its code
 is retained for a possible FRAM backend, but is not linked into normal firmware.
-Phonebook contacts and ordinary SMS bodies remain modem-backed in this stage.
+Phonebook contacts are separate local files. Ordinary SMS bodies remain
+modem-backed in this stage.
 
 littlefs v2.11.3 is vendored with its BSD-3-Clause license and a documented
 [local changes](../third_party/littlefs/README.sisu.md). Its adapter
@@ -117,8 +118,8 @@ readback and reuse after deletion, reconstructed usage after remount, the
 The chosen policy is **one file per logical SMS**, including multipart SMS.
 There will not be a separate file for each segment or a shared message database.
 Incomplete reception belongs in one per-message staging file, atomically replaced
-as parts arrive. The message codec, assembly and SMS/contact migration remain
-the next stage; ordinary SMS/contact contents are still modem-backed today.
+as parts arrive. The message codec and assembly remain the next stage;
+ordinary SMS contents are still modem-backed today.
 
 The user filesystem retains its 512-byte inline cutoff and 4 KiB erase blocks.
 Small files share directory metadata blocks; 512 bytes is not a minimum file
@@ -145,7 +146,7 @@ The historical stage-1 power-cut bench uses obsolete addresses and must not be
 flashed onto this layout. Its retained results describe that earlier test only.
 
 The C firmware exposes a typed local NVM service backed by littlefs.
-Phonebook and ordinary SMS contents remain modem-backed, but preferences, profile state,
+Contacts are local objects. Ordinary SMS contents remain modem-backed, while preferences, profile state,
 clock/alarm preferences, speed dials, call-register lists, T9 learned words,
 saved and pending picture messages, own-tone/composer drafts, call-divert editing
 history, and per-pack battery health/SOC evidence are stored through this layer.
@@ -156,8 +157,8 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
   handshake implemented in `nvm_flash_hal.c`.
 - `storage_lfs`: filesystem/block-device adapter and atomic opaque records.
 - `storage_objects`: independent user-record files with durable IDs, CRCs,
-  atomic replacement and directory iteration. It is a storage foundation;
-  ordinary SMS/contact migration and multipart assembly are not implemented.
+  atomic replacement and directory iteration. Contacts use this interface;
+  ordinary SMS storage and multipart assembly are the next stage.
 - `storage_user_space`: category usage and budgets, enforced inside the adapter;
   application code never handles littlefs block numbers or allocation callbacks.
 - `storage_backend`: record read/write contract and board composition point.
@@ -255,6 +256,32 @@ The v6.00 `*#06#` presentation is preserved: PPM record index 337 (runtime SID
 `0x18b`) is rendered by display record `0x1f` in FS0 over the full 84-pixel
 window. The raw 15 digits hard-wrap at glyph boundaries (10 digits, then 5);
 the warranty preview uses FS1, where all 15 digits fit its 78-pixel value field.
+
+## Contacts
+
+Contacts live in the `contacts` collection, one atomic file per contact. The
+versioned payload stores byte-counted name and number fields; the object
+filename supplies a durable 32-bit ID. The ID allocator never reuses deleted
+IDs. Speed dials and contact tones also store full-width IDs. A complete valid
+scan prunes orphan bindings, including a deletion interrupted before its
+settings cleanup. Corrupt or incomplete scans never prune bindings.
+
+`phonebook_service` owns a 500-entry RAM cache rebuilt during boot. A bounded
+request/result queue preserves UI operation tokens without involving the modem.
+Results are published after the file commit. BUSY writes stay queued, and media
+failures invalidate the cache before retry. Normal writes honor the shared audio
+and key-activity defer window; outstanding writes block dormant entry. Names
+resolve from this cache across Inbox, call screens and call lists even before
+the modem starts or with no SIM inserted.
+
+The 500-entry limit is a RAM bound, not a promise that every contact fits in the
+64 KiB category budget. The Memory status page reports actual category headroom
+in KiB and the number of saved contacts. A full category reports the localized
+Memory full dialog; files remain intact and deletion can reclaim space.
+
+Host tests cover add/update/delete at every media boundary, I/O failures,
+BUSY retry, request backpressure, reboot persistence, quota exhaustion, malformed
+records, and IDs above 65535. The old modem phonebook protocol is removed.
 
 ## SMS read/unread ownership
 

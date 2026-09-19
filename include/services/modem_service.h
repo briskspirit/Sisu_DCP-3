@@ -10,7 +10,6 @@
 #include "services/modem_diag.h"
 #include "services/modem_maintenance.h"
 #include "services/modem_signal.h"
-#include "services/phonebook_types.h"
 #include "services/sms_types.h"
 
 /* EF-SPN has up to 16 characters; allow their UTF-8 representation. */
@@ -321,20 +320,5 @@ bool modem_service_pop_sms_delete_result(uint32_t request_id,
 uint8_t modem_service_sms_mailbox_count(void);
 bool modem_service_sms_mailbox_entry(uint8_t position,
                                      modem_sms_record_t *out);
-/* A successful admission returns a nonzero request id and guarantees exactly
- * one matching terminal result. A rejected request returns false, leaves the
- * output at zero, and publishes no result. */
-bool modem_service_request_phonebook_list(uint32_t *request_id_out);
-bool modem_service_request_phonebook_add(const char *name, const char *number,
-                                         uint32_t *request_id_out);
-bool modem_service_request_phonebook_update(uint16_t index, const char *name,
-                                            const char *number,
-                                            uint32_t *request_id_out);
-bool modem_service_request_phonebook_delete(uint16_t index,
-                                            uint32_t *request_id_out);
-bool modem_service_pop_phonebook_result(modem_phonebook_result_t *out);
-bool modem_service_phonebook_cache_valid(void);
-uint16_t modem_service_phonebook_count(void);
-bool modem_service_phonebook_entry(uint16_t position, modem_phonebook_entry_t *out);
 
 #endif

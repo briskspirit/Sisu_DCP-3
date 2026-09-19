@@ -1,3 +1,4 @@
+#include "services/phonebook_service.h"
 #include "apps/dialogs_app.h"
 
 #include <stdio.h>
@@ -465,15 +466,15 @@ bool handle_editor_key(app_t *app, uint16_t key, event_type_t event_type, uint32
             }
         } else if (app->editor_context == EDITOR_CONTEXT_PHONEBOOK_EDIT_NAME) {
             if (app->editor_value[0] != '\0') {
-                modem_phonebook_entry_t entry;
+                phonebook_entry_t entry;
                 copy_text(app->editor_draft_name, sizeof(app->editor_draft_name), app->editor_value);
-                if (modem_service_phonebook_entry(app->phonebook_pending_index, &entry)) {
+                if (phonebook_service_entry(app->phonebook_pending_index, &entry)) {
                     open_editor(app, ts_or(0x28du, "Number:"), entry.number, 30u, EDITOR_KIND_NUMBER, EDITOR_CONTEXT_PHONEBOOK_EDIT_NUMBER, true, now);
                 }
             }
         } else if (app->editor_context == EDITOR_CONTEXT_PHONEBOOK_EDIT_NUMBER) {
-            modem_phonebook_entry_t entry;
-            if (app->editor_value[0] != '\0' && modem_service_phonebook_entry(app->phonebook_pending_index, &entry)) {
+            phonebook_entry_t entry;
+            if (app->editor_value[0] != '\0' && phonebook_service_entry(app->phonebook_pending_index, &entry)) {
                 copy_text(app->editor_draft_number, sizeof(app->editor_draft_number), app->editor_value);
                 if (strcmp(app->editor_draft_name, app->editor_original_name) != 0) {
                     app->phonebook_edit_choice_selected = 0u;
@@ -488,8 +489,8 @@ bool handle_editor_key(app_t *app, uint16_t key, event_type_t event_type, uint32
                 copy_text(app->sms_recipient_prefill, sizeof(app->sms_recipient_prefill), app->editor_value);
                 start_phonebook_list(app, PHONEBOOK_LABEL_OK, "1-7", PHONEBOOK_CONTEXT_SEND_RECIPIENT, 0u, now);
             } else {
-                modem_phonebook_entry_t entry;
-                if (modem_service_phonebook_entry(app->phonebook_pending_index, &entry)) {
+                phonebook_entry_t entry;
+                if (phonebook_service_entry(app->phonebook_pending_index, &entry)) {
                     char text[64];
                     snprintf(text, sizeof(text), "%s\n%s", entry.name, entry.number);
                     uint32_t request_id = 0u;
@@ -745,8 +746,8 @@ bool handle_confirm_key(app_t *app, uint16_t key, uint32_t now) {
         return true;
     }
     if (app->confirm_context == CONFIRM_CONTEXT_PHONEBOOK_ERASE) {
-        modem_phonebook_entry_t entry;
-        if (modem_service_phonebook_entry(app->phonebook_pending_index, &entry)) {
+        phonebook_entry_t entry;
+        if (phonebook_service_entry(app->phonebook_pending_index, &entry)) {
             start_phonebook_delete(app, entry.index, now);
         }
     } else if (app->confirm_context == CONFIRM_CONTEXT_PHONEBOOK_ERASE_ALL) {

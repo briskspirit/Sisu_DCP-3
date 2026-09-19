@@ -62,26 +62,6 @@ static void check_admissions_rejected(void) {
               !modem_service_request_sms_mailbox(
                   MODEM_SMS_MAILBOX_INBOX, NULL),
           "SMS admission requires an explicit request owner");
-    uint32_t phonebook_request_id = 99u;
-    check(!modem_service_request_phonebook_list(&phonebook_request_id) &&
-              phonebook_request_id == 0u,
-          "phonebook list rejected");
-    check(!modem_service_request_phonebook_list(NULL),
-          "phonebook admission requires a request-id owner");
-    phonebook_request_id = 99u;
-    check(!modem_service_request_phonebook_add(
-              "A", "123", &phonebook_request_id) &&
-              phonebook_request_id == 0u,
-          "phonebook add rejected");
-    phonebook_request_id = 99u;
-    check(!modem_service_request_phonebook_update(
-              1u, "A", "123", &phonebook_request_id) &&
-              phonebook_request_id == 0u,
-          "phonebook update rejected");
-    phonebook_request_id = 99u;
-    check(!modem_service_request_phonebook_delete(
-              1u, &phonebook_request_id) && phonebook_request_id == 0u,
-          "phonebook delete rejected");
     modem_service_test_snapshot_t snapshot;
     modem_service_test_get_snapshot(&snapshot);
     check(snapshot.request_queue_depth == 0u,

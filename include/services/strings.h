@@ -3,6 +3,14 @@
 
 #include <stdint.h>
 
+/* Project-owned SIDs, outside the original ROM's namespace. */
+enum {
+    SID_LOCAL_PHONE_MEMORY = 0x8000,
+    SID_LOCAL_KIB_FREE,
+    SID_LOCAL_CONTACT_COUNT,
+    SID_LOCAL_STORAGE_UNAVAILABLE,
+};
+
 /* UI localization by v6.00 string id (SID), exactly like the ROM: each UI site
  * names its exact SID via ts()/ts_or(); softkeys resolve centrally via
  * ts_softkey(). User/dynamic content has no SID and is never localized. Only

@@ -21,7 +21,7 @@
 #define STORE_CALL_LIST_LIMIT 20u
 #define STORE_CALL_NUMBER_MAX 32u
 #define STORE_CALL_NAME_MAX 24u
-#define STORE_SPEED_DIAL_EMPTY 0xffffu
+#define STORE_SPEED_DIAL_EMPTY 0u
 /* Per-contact ringing tone: stored as the v6.00 ringing-tone VALUE byte
  * (RINGING_TONE_OPTIONS catalogue), not a UI label string. */
 #define STORE_CONTACT_TONE_PRESET 0x00u
@@ -309,6 +309,8 @@ bool store_service_ready(void);
  * flash commit. Dirty units already parked as degraded do not pin the phone
  * awake forever, matching the power-off flush policy. */
 bool store_service_standby_ready(void);
+/* Shared audio/key activity guard for local object-store owners. */
+bool store_service_write_window_open(uint32_t now_ms);
 void store_service_defer_commits_until(uint32_t deadline_ms);
 void store_service_tick(uint32_t now_ms);
 /* Power-off path: commit every dirty unit NOW, ignoring the activity defer
@@ -344,11 +346,13 @@ store_status_t store_call_update_result(store_call_list_t list,
                                         store_call_reason_t reason);
 store_status_t store_call_delete(store_call_list_t list, uint8_t index);
 store_status_t store_call_clear(store_call_list_t list);
-store_status_t store_phonebook_get_speed_dial(uint8_t key, uint16_t *out_contact_index);
-store_status_t store_phonebook_set_speed_dial(uint8_t key, uint16_t contact_index);
+store_status_t store_phonebook_get_speed_dial(uint8_t key, uint32_t *out_contact_index);
+store_status_t store_phonebook_set_speed_dial(uint8_t key, uint32_t contact_index);
 store_status_t store_phonebook_clear_speed_dial(uint8_t key);
-uint8_t store_phonebook_get_contact_tone_value(uint16_t contact_index);
-store_status_t store_phonebook_set_contact_tone_value(uint16_t contact_index, uint8_t value);
+uint8_t store_phonebook_get_contact_tone_value(uint32_t contact_index);
+store_status_t store_phonebook_set_contact_tone_value(uint32_t contact_index, uint8_t value);
+/* Remove orphan bindings only after a complete, validated contact scan. */
+void store_phonebook_prune_bindings(bool (*contact_exists)(uint32_t id));
 
 store_status_t store_t9_user_words_load(char words[][STORE_T9_WORD_MAX + 1u],
                                         uint8_t word_cap,

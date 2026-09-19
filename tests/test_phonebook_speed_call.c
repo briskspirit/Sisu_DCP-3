@@ -1,3 +1,4 @@
+#include "services/phonebook_service.h"
 /* Speed-dial Options > Call must enter the same calls_app transaction path as
  * every other outgoing-call entry point. A direct modem request leaves the UI
  * on Standby and bypasses call identity, timers, cancellation, and errors. */
@@ -25,11 +26,11 @@ static int s_failures;
 static unsigned s_start_call_count;
 static unsigned s_direct_dial_count;
 static char s_call_number[MODEM_PHONE_MAX + 1u];
-static char s_call_name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+static char s_call_name[PHONEBOOK_NAME_MAX + 1u];
 static app_route_t s_error_route;
 static bool s_phonebook_admit = true;
 static uint32_t s_next_phonebook_request_id = 100u;
-static modem_phonebook_result_t s_phonebook_results[8];
+static phonebook_result_t s_phonebook_results[8];
 static uint8_t s_phonebook_result_head;
 static uint8_t s_phonebook_result_count;
 static uint8_t s_phonebook_entry_reads_before_failure = UINT8_MAX;
@@ -67,7 +68,7 @@ const char *ts_or(uint16_t sid, const char *fallback) {
     return fallback;
 }
 
-store_status_t store_phonebook_get_speed_dial(uint8_t key, uint16_t *out_contact_index) {
+store_status_t store_phonebook_get_speed_dial(uint8_t key, uint32_t *out_contact_index) {
     check(key == 2u, "fixture requests speed-dial key 2");
     *out_contact_index = 42u;
     return STORE_STATUS_OK;
@@ -91,7 +92,7 @@ static bool admit_phonebook(uint32_t *request_id_out) {
     return true;
 }
 
-bool modem_service_request_phonebook_list(uint32_t *request_id_out) {
+bool phonebook_service_request_list(uint32_t *request_id_out) {
     s_phonebook_list_requests++;
     return admit_phonebook(request_id_out);
 }
@@ -102,14 +103,14 @@ void modem_service_get_status(modem_status_t *out) {
     }
 }
 
-bool modem_service_request_phonebook_add(const char *name, const char *number,
+bool phonebook_service_request_add(const char *name, const char *number,
                                          uint32_t *request_id_out) {
     (void)name;
     (void)number;
     return admit_phonebook(request_id_out);
 }
 
-bool modem_service_request_phonebook_update(uint16_t index, const char *name,
+bool phonebook_service_request_update(uint32_t index, const char *name,
                                             const char *number,
                                             uint32_t *request_id_out) {
     (void)index;
@@ -118,13 +119,13 @@ bool modem_service_request_phonebook_update(uint16_t index, const char *name,
     return admit_phonebook(request_id_out);
 }
 
-bool modem_service_request_phonebook_delete(uint16_t index,
+bool phonebook_service_request_delete(uint32_t index,
                                             uint32_t *request_id_out) {
     (void)index;
     return admit_phonebook(request_id_out);
 }
 
-bool modem_service_pop_phonebook_result(modem_phonebook_result_t *out) {
+bool phonebook_service_pop_result(phonebook_result_t *out) {
     if (out == NULL || s_phonebook_result_count == 0u) {
         return false;
     }
@@ -135,15 +136,21 @@ bool modem_service_pop_phonebook_result(modem_phonebook_result_t *out) {
     return true;
 }
 
-bool modem_service_phonebook_cache_valid(void) {
+bool phonebook_service_space(uint32_t *used, uint32_t *limit) {
+    *used = s_phonebook_count == PHONEBOOK_MAX_RECORDS ? 65536u : 8192u;
+    *limit = 65536u;
+    return true;
+}
+
+bool phonebook_service_cache_valid(void) {
     return s_phonebook_cache_valid;
 }
 
-uint16_t modem_service_phonebook_count(void) {
+uint16_t phonebook_service_count(void) {
     return s_phonebook_count;
 }
 
-bool modem_service_phonebook_entry(uint16_t position, modem_phonebook_entry_t *out) {
+bool phonebook_service_entry(uint16_t position, phonebook_entry_t *out) {
     if (position != 0u || out == NULL ||
         s_phonebook_entry_reads_before_failure == 0u) {
         return false;
@@ -246,13 +253,13 @@ store_status_t store_setting_get_text(store_setting_key_t key, char *out_text,
 }
 
 static void push_phonebook_result(uint32_t request_id,
-                                  modem_phonebook_op_t kind,
-                                  modem_phonebook_outcome_t outcome) {
+                                  phonebook_op_t kind,
+                                  phonebook_outcome_t outcome) {
     check(s_phonebook_result_count < 8u,
           "phonebook UI result fixture has journal space");
     uint8_t tail = (uint8_t)((s_phonebook_result_head +
                               s_phonebook_result_count) % 8u);
-    s_phonebook_results[tail] = (modem_phonebook_result_t){
+    s_phonebook_results[tail] = (phonebook_result_t){
         .request_id = request_id,
         .kind = kind,
         .outcome = outcome,
@@ -309,8 +316,8 @@ static void test_late_result_never_hijacks_priority_routes(void) {
                              PHONEBOOK_CONTEXT_STANDBY, 0u, 100u);
         uint32_t request_id = app.phonebook_request_id;
         app.route = routes[i];
-        push_phonebook_result(request_id, MODEM_PHONEBOOK_OP_LIST,
-                              MODEM_PHONEBOOK_OUTCOME_OK);
+        push_phonebook_result(request_id, PHONEBOOK_OP_LIST,
+                              PHONEBOOK_OUTCOME_OK);
         check(!poll_phonebook(&app, 101u) && app.route == routes[i] &&
                   app.phonebook_pending_kind == PHONEBOOK_PENDING_NONE &&
                   app.phonebook_request_id == 0u,
@@ -330,8 +337,8 @@ static void test_late_result_never_replaces_newer_dialog(void) {
      * note has the same route and record id. */
     open_display(&app, 4u, "Switching profile", NULL, NULL,
                  APP_ROUTE_PROFILES_MENU, 151u);
-    push_phonebook_result(request_id, MODEM_PHONEBOOK_OP_LIST,
-                          MODEM_PHONEBOOK_OUTCOME_OK);
+    push_phonebook_result(request_id, PHONEBOOK_OP_LIST,
+                          PHONEBOOK_OUTCOME_OK);
 
     check(!poll_phonebook(&app, 152u) &&
               app.route == APP_ROUTE_DISPLAY_MESSAGE &&
@@ -379,10 +386,10 @@ static void test_newer_request_owns_completion(void) {
     start_phonebook_list(&app, PHONEBOOK_LABEL_CALL, "1-1",
                          PHONEBOOK_CONTEXT_STANDBY, 0u, 201u);
     uint32_t current_id = app.phonebook_request_id;
-    push_phonebook_result(old_id, MODEM_PHONEBOOK_OP_LIST,
-                          MODEM_PHONEBOOK_OUTCOME_OK);
-    push_phonebook_result(current_id, MODEM_PHONEBOOK_OP_LIST,
-                          MODEM_PHONEBOOK_OUTCOME_OK);
+    push_phonebook_result(old_id, PHONEBOOK_OP_LIST,
+                          PHONEBOOK_OUTCOME_OK);
+    push_phonebook_result(current_id, PHONEBOOK_OP_LIST,
+                          PHONEBOOK_OUTCOME_OK);
     check(poll_phonebook(&app, 202u) && old_id != current_id &&
               app.route == APP_ROUTE_PHONEBOOK_LIST &&
               app.phonebook_pending_kind == PHONEBOOK_PENDING_NONE &&
@@ -396,8 +403,8 @@ static void test_wrong_kind_and_backstop_fail_closed(void) {
     start_phonebook_list(&app, PHONEBOOK_LABEL_CALL, "1-1",
                          PHONEBOOK_CONTEXT_STANDBY, 0u, 300u);
     push_phonebook_result(app.phonebook_request_id,
-                          MODEM_PHONEBOOK_OP_DELETE,
-                          MODEM_PHONEBOOK_OUTCOME_OK);
+                          PHONEBOOK_OP_DELETE,
+                          PHONEBOOK_OUTCOME_OK);
     check(poll_phonebook(&app, 301u) &&
               app.phonebook_pending_kind == PHONEBOOK_PENDING_NONE &&
               strcmp(s_display_text, "Not\nallowed") == 0,
@@ -409,7 +416,7 @@ static void test_wrong_kind_and_backstop_fail_closed(void) {
     check(poll_phonebook(&app, 45400u) &&
               app.phonebook_pending_kind == PHONEBOOK_PENDING_NONE &&
               app.phonebook_request_id == 0u &&
-              strcmp(s_display_text, "SIM card\nnot ready") == 0,
+              strcmp(s_display_text, "Not\nallowed") == 0,
           "a missing terminal still has a bounded UI backstop");
 }
 
@@ -423,7 +430,7 @@ static void test_erase_all_checks_admission_and_is_bounded(void) {
               app.phonebook_erase_all_started_ms == 0u &&
               app.phonebook_pending_kind == PHONEBOOK_PENDING_NONE &&
               app.phonebook_request_id == 0u &&
-              strcmp(s_display_text, "SIM card\nbusy") == 0,
+              strcmp(s_display_text, "Not\nallowed") == 0,
           "erase-all rejects a full queue instead of waiting forever");
 
     memset(&app, 0, sizeof(app));
@@ -444,8 +451,8 @@ static void test_erase_all_checks_admission_and_is_bounded(void) {
     check(handle_phonebook_security_key(&app, KEY_NAVI, 700u),
           "erase-all admits its initial list for cache-race coverage");
     uint32_t request_id = app.phonebook_request_id;
-    push_phonebook_result(request_id, MODEM_PHONEBOOK_OP_LIST,
-                          MODEM_PHONEBOOK_OUTCOME_OK);
+    push_phonebook_result(request_id, PHONEBOOK_OP_LIST,
+                          PHONEBOOK_OUTCOME_OK);
     /* build_phonebook_visible reads the row once; make the subsequent delete
      * lookup fail as if the cache changed between the two bounded reads. */
     s_phonebook_entry_reads_before_failure = 1u;
@@ -458,7 +465,7 @@ static void test_erase_all_checks_admission_and_is_bounded(void) {
     s_phonebook_entry_reads_before_failure = UINT8_MAX;
 }
 
-static void test_memory_status_uses_full_telit_domain(void) {
+static void test_memory_status_reports_local_budget(void) {
     app_t app;
     memset(&app, 0, sizeof(app));
     const font_t *font = asset_font(FONT_FS2);
@@ -470,31 +477,31 @@ static void test_memory_status_uses_full_telit_domain(void) {
 
     framebuffer_t expected;
     fb_clear(&expected, false);
-    fb_text(&expected, font, "SIM card:", 0, 7, true, FB_WIDTH);
-    fb_text(&expected, font, "500 free", 0, 16, true, FB_WIDTH);
-    fb_text(&expected, font, "0 in use", 0, 25, true, FB_WIDTH);
+    fb_text(&expected, font, "Phone:", 0, 7, true, FB_WIDTH);
+    fb_text(&expected, font, "56 KiB free", 0, 16, true, FB_WIDTH);
+    fb_text(&expected, font, "0 contacts", 0, 25, true, FB_WIDTH);
     check(memcmp(&actual, &expected, sizeof(actual)) == 0,
-          "empty Telit ME store reports all 500 records free");
+          "empty local store reports category headroom, not fictional free slots");
 
-    s_phonebook_count = MODEM_PHONEBOOK_MAX_RECORDS;
+    s_phonebook_count = PHONEBOOK_MAX_RECORDS;
     memset(&actual, 0, sizeof(actual));
     render_phonebook_memory(&app, &actual);
     fb_clear(&expected, false);
-    fb_text(&expected, font, "SIM card:", 0, 7, true, FB_WIDTH);
-    fb_text(&expected, font, "0 free", 0, 16, true, FB_WIDTH);
-    fb_text(&expected, font, "500 in use", 0, 25, true, FB_WIDTH);
+    fb_text(&expected, font, "Phone:", 0, 7, true, FB_WIDTH);
+    fb_text(&expected, font, "0 KiB free", 0, 16, true, FB_WIDTH);
+    fb_text(&expected, font, "500 contacts", 0, 25, true, FB_WIDTH);
     check(memcmp(&actual, &expected, sizeof(actual)) == 0,
-          "full Telit ME store reports 500 records in use and none free");
+          "full local store reports exhausted category headroom and contact count");
     s_phonebook_count = 1u;
 }
 
-static void test_ready_sim_preloads_shared_phonebook_cache(void) {
+static void test_local_phonebook_preloads_without_sim(void) {
     app_t app;
     memset(&app, 0, sizeof(app));
     app.route = APP_ROUTE_MESSAGES_LIST;
     memset(&s_modem_status, 0, sizeof(s_modem_status));
-    s_modem_status.at_ready = true;
-    s_modem_status.sim_ready = true;
+    s_modem_status.at_ready = false;
+    s_modem_status.sim_ready = false;
     s_phonebook_cache_valid = false;
     s_phonebook_count = 0u;
     unsigned requests_before = s_phonebook_list_requests;
@@ -503,12 +510,12 @@ static void test_ready_sim_preloads_shared_phonebook_cache(void) {
               app.route == APP_ROUTE_MESSAGES_LIST &&
               app.phonebook_sync_request_id != 0u &&
               s_phonebook_list_requests == requests_before + 1u,
-          "ready SIM starts one silent phonebook preload outside Phone book");
+          "local phonebook retry works outside Phone book without any ready modem or SIM");
 
     uint32_t request_id = app.phonebook_sync_request_id;
     s_phonebook_cache_valid = true;
-    push_phonebook_result(request_id, MODEM_PHONEBOOK_OP_LIST,
-                          MODEM_PHONEBOOK_OUTCOME_OK);
+    push_phonebook_result(request_id, PHONEBOOK_OP_LIST,
+                          PHONEBOOK_OUTCOME_OK);
     check(poll_phonebook(&app, 1001u) &&
               app.route == APP_ROUTE_MESSAGES_LIST &&
               app.phonebook_sync_request_id == 0u && app.dirty &&
@@ -539,8 +546,8 @@ static void test_phonebook_preload_retry_is_bounded(void) {
               app.phonebook_sync_request_id != 0u,
           "preload fixture admits its first request");
     push_phonebook_result(app.phonebook_sync_request_id,
-                          MODEM_PHONEBOOK_OP_LIST,
-                          MODEM_PHONEBOOK_OUTCOME_ERROR);
+                          PHONEBOOK_OP_LIST,
+                          PHONEBOOK_OUTCOME_ERROR);
     check(!poll_phonebook(&app, 2001u) &&
               app.phonebook_sync_request_id == 0u &&
               app.phonebook_sync_retry_ms == 32001u &&
@@ -566,8 +573,8 @@ int main(void) {
     test_newer_request_owns_completion();
     test_wrong_kind_and_backstop_fail_closed();
     test_erase_all_checks_admission_and_is_bounded();
-    test_memory_status_uses_full_telit_domain();
-    test_ready_sim_preloads_shared_phonebook_cache();
+    test_memory_status_reports_local_budget();
+    test_local_phonebook_preloads_without_sim();
     test_phonebook_preload_retry_is_bounded();
     if (s_failures != 0) {
         fprintf(stderr, "%d phonebook speed-call test(s) failed\n", s_failures);

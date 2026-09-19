@@ -35,7 +35,7 @@ claim is the current best understanding, not a measured fact.
 - [CLCC call model](call_model.md): id-authoritative call state, transactions,
   projection, and the host-test oracle.
 - [Storage engine](storage_engine.md): flash journals, persistent records, and
-  modem-backed SMS/phonebook boundaries.
+  local contact records and the SMS storage boundary.
 - [Net Monitor](net_monitor.md): page registry, typed query/control ownership,
   and diagnostic regression coverage.
 

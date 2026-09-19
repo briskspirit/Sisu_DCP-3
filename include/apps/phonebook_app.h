@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "app_internal.h"
-#include "services/modem_service.h"
+#include "services/phonebook_types.h"
 #include "storage/store_service.h"
 
 typedef enum {
@@ -82,8 +82,8 @@ void start_phonebook_add_with_context(app_t *app,
                                       const char *path,
                                       phonebook_context_t context,
                                       uint32_t now);
-void start_phonebook_update(app_t *app, uint16_t index, const char *name, const char *number, uint32_t now);
-bool start_phonebook_delete(app_t *app, uint16_t index, uint32_t now);
+void start_phonebook_update(app_t *app, uint32_t index, const char *name, const char *number, uint32_t now);
+bool start_phonebook_delete(app_t *app, uint32_t index, uint32_t now);
 void show_phonebook_list(app_t *app,
                          phonebook_label_t label,
                          const char *path,

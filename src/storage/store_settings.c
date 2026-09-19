@@ -6,7 +6,7 @@
 #include <string.h>
 
 #define SETTINGS_MAGIC 0x53455431u
-#define PHONEBOOK_TONES_BLOCK 0x544fu
+#define PHONEBOOK_TONES_BLOCK 0x5432u
 #define STORE_CONTACT_TONE_LIMIT 32u
 
 typedef enum {
@@ -32,7 +32,7 @@ typedef struct {
 
 typedef struct {
     bool used;
-    uint16_t contact_index;
+    uint32_t contact_index;
     uint8_t value; /* v6.00 ringing-tone value byte; STORE_CONTACT_TONE_NO_TONE = silent */
 } contact_tone_t;
 
@@ -51,7 +51,7 @@ static bool walk_settings_payload(store_domain_t domain,
                                   size_t len,
                                   bool publish);
 static store_setting_key_t speed_dial_key(uint8_t key);
-static int find_contact_tone(uint16_t contact_index);
+static int find_contact_tone(uint32_t contact_index);
 
 static const setting_meta_t SETTINGS_META[] = {
     {STORE_SETTING_PHONEBOOK_VIEW_MODE, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U8, 0u, 0},
@@ -88,15 +88,15 @@ static const setting_meta_t SETTINGS_META[] = {
     {STORE_SETTING_SYSTEM_LANGUAGE, STORE_DOMAIN_SYSTEM, SETTING_TYPE_U8, 0u, 0}, /* runtime language id: 0 = Automatic (resolves to English until auto-detect logic exists) */
     {STORE_SETTING_SYSTEM_WELCOME_NOTE, STORE_DOMAIN_SYSTEM, SETTING_TYPE_TEXT, 0u, ""},
     {STORE_SETTING_SYSTEM_VOICE_MAILBOX_NUMBER, STORE_DOMAIN_SYSTEM, SETTING_TYPE_TEXT, 0u, ""},
-    {STORE_SETTING_SPEED_DIAL_1, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U16, STORE_SPEED_DIAL_EMPTY, 0},
-    {STORE_SETTING_SPEED_DIAL_2, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U16, STORE_SPEED_DIAL_EMPTY, 0},
-    {STORE_SETTING_SPEED_DIAL_3, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U16, STORE_SPEED_DIAL_EMPTY, 0},
-    {STORE_SETTING_SPEED_DIAL_4, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U16, STORE_SPEED_DIAL_EMPTY, 0},
-    {STORE_SETTING_SPEED_DIAL_5, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U16, STORE_SPEED_DIAL_EMPTY, 0},
-    {STORE_SETTING_SPEED_DIAL_6, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U16, STORE_SPEED_DIAL_EMPTY, 0},
-    {STORE_SETTING_SPEED_DIAL_7, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U16, STORE_SPEED_DIAL_EMPTY, 0},
-    {STORE_SETTING_SPEED_DIAL_8, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U16, STORE_SPEED_DIAL_EMPTY, 0},
-    {STORE_SETTING_SPEED_DIAL_9, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U16, STORE_SPEED_DIAL_EMPTY, 0},
+    {STORE_SETTING_SPEED_DIAL_1, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U32, STORE_SPEED_DIAL_EMPTY, 0},
+    {STORE_SETTING_SPEED_DIAL_2, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U32, STORE_SPEED_DIAL_EMPTY, 0},
+    {STORE_SETTING_SPEED_DIAL_3, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U32, STORE_SPEED_DIAL_EMPTY, 0},
+    {STORE_SETTING_SPEED_DIAL_4, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U32, STORE_SPEED_DIAL_EMPTY, 0},
+    {STORE_SETTING_SPEED_DIAL_5, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U32, STORE_SPEED_DIAL_EMPTY, 0},
+    {STORE_SETTING_SPEED_DIAL_6, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U32, STORE_SPEED_DIAL_EMPTY, 0},
+    {STORE_SETTING_SPEED_DIAL_7, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U32, STORE_SPEED_DIAL_EMPTY, 0},
+    {STORE_SETTING_SPEED_DIAL_8, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U32, STORE_SPEED_DIAL_EMPTY, 0},
+    {STORE_SETTING_SPEED_DIAL_9, STORE_DOMAIN_PHONEBOOK, SETTING_TYPE_U32, STORE_SPEED_DIAL_EMPTY, 0},
     {STORE_SETTING_SMS_DICTIONARY_ACTIVE, STORE_DOMAIN_SMS, SETTING_TYPE_U8, 0u, 0},
     {STORE_SETTING_SMS_DICTIONARY_LANGUAGE, STORE_DOMAIN_SMS, SETTING_TYPE_U8, 0u, 0},
     {STORE_SETTING_PROFILE_INCOMING_ALERT, STORE_DOMAIN_PROFILES, SETTING_TYPE_U8, 1u, 0},
@@ -314,7 +314,7 @@ store_status_t store_setting_set_text(store_setting_key_t key, const char *text)
     return mark_settings_domain_dirty(meta->domain);
 }
 
-store_status_t store_phonebook_get_speed_dial(uint8_t key, uint16_t *out_contact_index) {
+store_status_t store_phonebook_get_speed_dial(uint8_t key, uint32_t *out_contact_index) {
     if (out_contact_index == 0) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
@@ -322,8 +322,8 @@ store_status_t store_phonebook_get_speed_dial(uint8_t key, uint16_t *out_contact
     if (setting >= STORE_SETTING_COUNT) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
-    uint16_t value = STORE_SPEED_DIAL_EMPTY;
-    store_status_t status = store_setting_get_u16(setting, &value);
+    uint32_t value = STORE_SPEED_DIAL_EMPTY;
+    store_status_t status = store_setting_get_u32(setting, &value);
     if (status != STORE_STATUS_OK) {
         return status;
     }
@@ -334,12 +334,12 @@ store_status_t store_phonebook_get_speed_dial(uint8_t key, uint16_t *out_contact
     return STORE_STATUS_OK;
 }
 
-store_status_t store_phonebook_set_speed_dial(uint8_t key, uint16_t contact_index) {
+store_status_t store_phonebook_set_speed_dial(uint8_t key, uint32_t contact_index) {
     store_setting_key_t setting = speed_dial_key(key);
     if (setting >= STORE_SETTING_COUNT || contact_index == STORE_SPEED_DIAL_EMPTY) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
-    return store_setting_set_u16(setting, contact_index);
+    return store_setting_set_u32(setting, contact_index);
 }
 
 store_status_t store_phonebook_clear_speed_dial(uint8_t key) {
@@ -347,15 +347,15 @@ store_status_t store_phonebook_clear_speed_dial(uint8_t key) {
     if (setting >= STORE_SETTING_COUNT) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
-    return store_setting_set_u16(setting, STORE_SPEED_DIAL_EMPTY);
+    return store_setting_set_u32(setting, STORE_SPEED_DIAL_EMPTY);
 }
 
-uint8_t store_phonebook_get_contact_tone_value(uint16_t contact_index) {
+uint8_t store_phonebook_get_contact_tone_value(uint32_t contact_index) {
     int index = find_contact_tone(contact_index);
     return index >= 0 ? s_contact_tones[index].value : STORE_CONTACT_TONE_PRESET;
 }
 
-store_status_t store_phonebook_set_contact_tone_value(uint16_t contact_index, uint8_t value) {
+store_status_t store_phonebook_set_contact_tone_value(uint32_t contact_index, uint8_t value) {
     if (contact_index == 0u) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
@@ -382,6 +382,25 @@ store_status_t store_phonebook_set_contact_tone_value(uint16_t contact_index, ui
     s_contact_tones[index].contact_index = contact_index;
     s_contact_tones[index].value = value;
     return mark_settings_domain_dirty(STORE_DOMAIN_PHONEBOOK);
+}
+
+void store_phonebook_prune_bindings(bool (*contact_exists)(uint32_t id)) {
+    if (contact_exists == NULL) return;
+    bool changed = false;
+    for (uint8_t key = 1u; key <= 9u; key++) {
+        setting_value_t *value = &s_settings[speed_dial_key(key)];
+        if (value->num != STORE_SPEED_DIAL_EMPTY && !contact_exists(value->num)) {
+            value->num = STORE_SPEED_DIAL_EMPTY;
+            changed = true;
+        }
+    }
+    for (uint8_t i = 0u; i < STORE_CONTACT_TONE_LIMIT; i++) {
+        if (s_contact_tones[i].used && !contact_exists(s_contact_tones[i].contact_index)) {
+            memset(&s_contact_tones[i], 0, sizeof(s_contact_tones[i]));
+            changed = true;
+        }
+    }
+    if (changed) (void)mark_settings_domain_dirty(STORE_DOMAIN_PHONEBOOK);
 }
 
 static store_status_t mark_settings_domain_dirty(store_domain_t domain) {
@@ -487,7 +506,7 @@ static bool serialize_settings_domain(store_domain_t domain, uint8_t *dst, size_
             }
             /* Length-prefixed payload kept for framing; new format is one
              * value byte (old label-string entries are skipped on load). */
-            if (!write_u16_field(dst, cap, &pos, s_contact_tones[i].contact_index) ||
+            if (!write_u32_field(dst, cap, &pos, s_contact_tones[i].contact_index) ||
                 !write_u8_field(dst, cap, &pos, 1u) ||
                 !write_u8_field(dst, cap, &pos, s_contact_tones[i].value)) {
                 return false;
@@ -558,11 +577,11 @@ static bool walk_settings_payload(store_domain_t domain,
             }
             uint8_t slot = 0u;
             for (uint8_t i = 0; i < tone_count; i++) {
-                if (pos + 3u > len) {
+                if (pos + 5u > len) {
                     return false;
                 }
-                uint16_t contact_index = read_u16(&payload[pos]);
-                pos += 2u;
+                uint32_t contact_index = read_u32(&payload[pos]);
+                pos += 4u;
                 uint8_t value_len = payload[pos++];
                 if (pos + value_len > len || value_len > STORE_TEXT_MAX) {
                     return false;
@@ -589,7 +608,7 @@ static store_setting_key_t speed_dial_key(uint8_t key) {
     return (store_setting_key_t)((uint8_t)STORE_SETTING_SPEED_DIAL_1 + key - 1u);
 }
 
-static int find_contact_tone(uint16_t contact_index) {
+static int find_contact_tone(uint32_t contact_index) {
     for (uint8_t i = 0; i < STORE_CONTACT_TONE_LIMIT; i++) {
         if (s_contact_tones[i].used && s_contact_tones[i].contact_index == contact_index) {
             return (int)i;
@@ -616,4 +635,3 @@ const store_unit_ops_t g_store_settings_unit_ops = {
     .fallback_missing_or_corrupt = 0,
     .name = "settings",
 };
-

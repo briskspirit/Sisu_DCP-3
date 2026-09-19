@@ -33,6 +33,16 @@ uint8_t strings_get_language(void) {
  * out-of-range sid (e.g. a clone-only string with no v6.00 id, like Net
  * Monitor) returns NULL so the caller can substitute its own literal. */
 const char *ts(uint16_t sid) {
+    /* English fallback for project-owned records. Translations can be added
+     * here independently of the immutable ROM tables. Numeric formats take
+     * one unsigned long argument. */
+    switch (sid) {
+    case SID_LOCAL_PHONE_MEMORY: return "Phone:";
+    case SID_LOCAL_KIB_FREE: return "%lu KiB free";
+    case SID_LOCAL_CONTACT_COUNT: return "%lu contacts";
+    case SID_LOCAL_STORAGE_UNAVAILABLE: return "Unavailable";
+    default: break;
+    }
     if (sid < STRINGS_SID_BASE) {
         return 0;
     }

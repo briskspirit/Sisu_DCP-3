@@ -104,16 +104,6 @@ static bool s_mwi_ambiguous_snapshot;
 static bool s_call_forward_active[6];
 static char s_call_forward_number[6][MODEM_PHONE_MAX + 1u];
 static uint8_t s_call_forward_delay[6];
-#define TELIT_PHONEBOOK_FIXTURE_MAX 8u
-typedef struct {
-    bool used;
-    modem_phonebook_entry_t entry;
-} telit_phonebook_fixture_entry_t;
-static telit_phonebook_fixture_entry_t
-    s_phonebook[TELIT_PHONEBOOK_FIXTURE_MAX];
-static bool s_phonebook_inject_malformed;
-static bool s_phonebook_inject_oversized;
-static bool s_phonebook_inject_high_index;
 static const uint64_t EXPECTED_TUNE_MASKS[4] = {
     UINT64_C(0x601840A7), UINT64_C(0x00010300),
     UINT64_C(0x1F80BC50), UINT64_C(0x00400008),
@@ -155,12 +145,6 @@ typedef enum {
     TELIT_FAULT_MBN_ERROR_ALWAYS,
     TELIT_FAULT_MWI_ERROR_ONCE,
     TELIT_FAULT_CFU_FLAGS_ERROR_ONCE,
-    TELIT_FAULT_PHONEBOOK_CPBS_ERROR_ONCE,
-    TELIT_FAULT_PHONEBOOK_CPBS_TIMEOUT_ONCE,
-    TELIT_FAULT_PHONEBOOK_CPBR_ERROR_ONCE,
-    TELIT_FAULT_PHONEBOOK_CPBR_TIMEOUT_ONCE,
-    TELIT_FAULT_PHONEBOOK_CPBW_ERROR_ONCE,
-    TELIT_FAULT_PHONEBOOK_CPBW_TIMEOUT_ONCE,
     TELIT_FAULT_DTMF_ERROR_ONCE,
     TELIT_FAULT_DTMF_TIMEOUT_ONCE,
 } telit_fault_t;
@@ -407,82 +391,6 @@ static bool telit_apply_call_forward(const char *command) {
             s_call_forward_delay[target] = 0u;
         }
     }
-    return true;
-}
-
-static void telit_push_phonebook(void) {
-    for (uint16_t i = 0u; i < TELIT_PHONEBOOK_FIXTURE_MAX; i++) {
-        if (!s_phonebook[i].used) {
-            continue;
-        }
-        const modem_phonebook_entry_t *entry = &s_phonebook[i].entry;
-        char line[128];
-        snprintf(line, sizeof(line), "+CPBR: %u,\"%s\",%u,\"%s\"",
-                 (unsigned)entry->index, entry->number,
-                 entry->number[0] == '+' ? 145u : 129u, entry->name);
-        mh_rx_push(line);
-    }
-    if (s_phonebook_inject_malformed) {
-        mh_rx_push("+CPBR: malformed");
-    }
-    if (s_phonebook_inject_oversized) {
-        mh_rx_push(
-            "+CPBR: 250,\"1234567890123456789012345678901234567890\",129,"
-            "\"ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMN\"");
-    }
-    if (s_phonebook_inject_high_index) {
-        mh_rx_push(
-            "+CPBR: 500,\"5550500\",129,\"Last contact\"");
-    }
-}
-
-static bool telit_apply_phonebook_write(const char *command) {
-    unsigned index = 0u;
-    unsigned toa = 0u;
-    int consumed = 0;
-    char number[MODEM_PHONE_MAX + 1u] = {0};
-    char name[MODEM_PHONEBOOK_NAME_MAX + 1u] = {0};
-
-    if (sscanf(command, "AT+CPBW=%u%n", &index, &consumed) == 1 &&
-        command[consumed] == '\0') {
-        if (index == 0u || index > TELIT_PHONEBOOK_FIXTURE_MAX) {
-            return false;
-        }
-        memset(&s_phonebook[index - 1u], 0,
-               sizeof(s_phonebook[index - 1u]));
-        return true;
-    }
-
-    bool add = strncmp(command, "AT+CPBW=,", 9u) == 0;
-    int fields;
-    if (add) {
-        fields = sscanf(command, "AT+CPBW=,\"%32[^\"]\",%u,\"%24[^\"]\"%n",
-                        number, &toa, name, &consumed);
-    } else {
-        fields = sscanf(command, "AT+CPBW=%u,\"%32[^\"]\",%u,\"%24[^\"]\"%n",
-                        &index, number, &toa, name, &consumed);
-    }
-    if (fields != (add ? 3 : 4) || command[consumed] != '\0' ||
-        (toa != 129u && toa != 145u) ||
-        ((toa == 145u) != (number[0] == '+'))) {
-        return false;
-    }
-    if (add) {
-        for (index = 1u; index <= TELIT_PHONEBOOK_FIXTURE_MAX; index++) {
-            if (!s_phonebook[index - 1u].used) {
-                break;
-            }
-        }
-    }
-    if (index == 0u || index > TELIT_PHONEBOOK_FIXTURE_MAX) {
-        return false;
-    }
-    telit_phonebook_fixture_entry_t *slot = &s_phonebook[index - 1u];
-    memset(slot, 0, sizeof(*slot));
-    slot->used = true;
-    slot->entry.index = (uint16_t)index;
-    snprintf(slot->entry.number, sizeof(slot->entry.number), "%s", number);
-    snprintf(slot->entry.name, sizeof(slot->entry.name), "%s", name);
     return true;
 }
 
@@ -926,37 +834,6 @@ static void telit_response(const char *command) {
         snprintf(line, sizeof(line), "#PSMRI: %u",
                  (unsigned)s_psmri_ms);
         mh_rx_push(line);
-    } else if (strcmp(command, "AT+CPBS=\"ME\"") == 0) {
-        if (!s_fault_consumed &&
-            (s_fault == TELIT_FAULT_PHONEBOOK_CPBS_ERROR_ONCE ||
-             s_fault == TELIT_FAULT_PHONEBOOK_CPBS_TIMEOUT_ONCE)) {
-            s_fault_consumed = true;
-            s_mh_final =
-                s_fault == TELIT_FAULT_PHONEBOOK_CPBS_ERROR_ONCE
-                    ? MH_FINAL_ERROR : MH_FINAL_NONE;
-        }
-    } else if (strcmp(command, "AT+CPBR=1,500") == 0) {
-        if (!s_fault_consumed &&
-            (s_fault == TELIT_FAULT_PHONEBOOK_CPBR_ERROR_ONCE ||
-             s_fault == TELIT_FAULT_PHONEBOOK_CPBR_TIMEOUT_ONCE)) {
-            s_fault_consumed = true;
-            s_mh_final =
-                s_fault == TELIT_FAULT_PHONEBOOK_CPBR_ERROR_ONCE
-                    ? MH_FINAL_ERROR : MH_FINAL_NONE;
-        } else {
-            telit_push_phonebook();
-        }
-    } else if (strncmp(command, "AT+CPBW=", 8u) == 0) {
-        if (!s_fault_consumed &&
-            (s_fault == TELIT_FAULT_PHONEBOOK_CPBW_ERROR_ONCE ||
-             s_fault == TELIT_FAULT_PHONEBOOK_CPBW_TIMEOUT_ONCE)) {
-            s_fault_consumed = true;
-            s_mh_final =
-                s_fault == TELIT_FAULT_PHONEBOOK_CPBW_ERROR_ONCE
-                    ? MH_FINAL_ERROR : MH_FINAL_NONE;
-        } else if (!telit_apply_phonebook_write(command)) {
-            s_mh_final = MH_FINAL_ERROR;
-        }
     } else if (strcmp(command, "AT+CPMS?") == 0) {
         mh_rx_push(s_cpms_configured
             ? "+CPMS: \"ME\",0,255,\"ME\",0,255,\"ME\",0,255"
@@ -1307,10 +1184,6 @@ static void begin_telit(bool rxdiv_configured) {
     memset(s_call_forward_active, 0, sizeof(s_call_forward_active));
     memset(s_call_forward_number, 0, sizeof(s_call_forward_number));
     memset(s_call_forward_delay, 0, sizeof(s_call_forward_delay));
-    memset(s_phonebook, 0, sizeof(s_phonebook));
-    s_phonebook_inject_malformed = false;
-    s_phonebook_inject_oversized = false;
-    s_phonebook_inject_high_index = false;
     s_fault = TELIT_FAULT_NONE;
     s_fault_consumed = false;
     s_dtmf_command_count = 0u;
@@ -3548,14 +3421,8 @@ static void test_sms_queue_eviction_is_exact_for_every_operation(void) {
         if (!begin_sms_operation_fixture(names[operation])) {
             return;
         }
-        s_phonebook[0].used = true;
-        s_phonebook[0].entry.index = 1u;
-        strcpy(s_phonebook[0].entry.name, "Queue hold");
-        strcpy(s_phonebook[0].entry.number, "5550001");
-        s_fault = TELIT_FAULT_PHONEBOOK_CPBR_TIMEOUT_ONCE;
-        s_fault_consumed = false;
-        uint32_t phonebook_id = 0u;
-        check(modem_service_request_phonebook_list(&phonebook_id),
+        s_hold_final_command = "AT+CGMI";
+        check(modem_service_request_debug_at("AT+CGMI"),
               "queue-pressure holder is admitted");
         mh_settle();
         check(service_probe().command_active && mh_status().operation_busy,
@@ -6519,293 +6386,6 @@ static void test_newer_call_forward_result_survives_old_final(void) {
           "stale old completion is discarded instead of leaking later");
 }
 
-static void test_phonebook_list_and_crud_contract(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u), "phonebook fixture boots");
-    check(!modem_service_request_phonebook_list(NULL),
-          "phonebook admission requires a request-id owner");
-
-    s_phonebook[0].used = true;
-    s_phonebook[0].entry.index = 1u;
-    strcpy(s_phonebook[0].entry.name, "Ada");
-    strcpy(s_phonebook[0].entry.number, "+15550000001");
-    s_phonebook[2].used = true;
-    s_phonebook[2].entry.index = 3u;
-    strcpy(s_phonebook[2].entry.name, "Bob");
-    strcpy(s_phonebook[2].entry.number, "5550003");
-    s_phonebook_inject_malformed = true;
-
-    uint32_t request_id = 0u;
-    check(modem_service_request_phonebook_list(&request_id) &&
-              request_id != 0u,
-          "phonebook list request is admitted");
-    mh_settle();
-    modem_phonebook_result_t result;
-    modem_phonebook_entry_t entry;
-    check(modem_service_pop_phonebook_result(&result) &&
-              result.request_id == request_id &&
-              result.kind == MODEM_PHONEBOOK_OP_LIST &&
-              result.outcome == MODEM_PHONEBOOK_OUTCOME_ERROR &&
-              !result.sim_not_ready &&
-              modem_service_phonebook_count() == 0u,
-          "malformed CPBR row fails closed without publishing partial contacts");
-
-    s_phonebook_inject_malformed = false;
-    s_phonebook_inject_oversized = true;
-    s_phonebook_inject_high_index = true;
-    request_id = 0u;
-    check(modem_service_request_phonebook_list(&request_id) &&
-              request_id != 0u,
-          "clean full-domain phonebook list is admitted");
-    mh_settle();
-    check(modem_service_pop_phonebook_result(&result) &&
-              result.request_id == request_id &&
-              result.kind == MODEM_PHONEBOOK_OP_LIST &&
-              result.outcome == MODEM_PHONEBOOK_OUTCOME_OK &&
-              !result.sim_not_ready &&
-              modem_service_phonebook_count() == 4u &&
-              modem_service_phonebook_entry(0u, &entry) &&
-              entry.index == 1u && strcmp(entry.name, "Ada") == 0 &&
-              strcmp(entry.number, "+15550000001") == 0,
-          "clean CPBR final atomically publishes normalized modem order");
-    check(modem_service_phonebook_entry(2u, &entry) &&
-              entry.index == 250u &&
-              strlen(entry.number) == MODEM_PHONE_MAX &&
-              strlen(entry.name) == MODEM_PHONEBOOK_NAME_MAX,
-          "oversized fields retain the established bounded previews");
-    check(modem_service_phonebook_entry(3u, &entry) &&
-              entry.index == MODEM_PHONEBOOK_LAST_INDEX &&
-              strcmp(entry.name, "Last contact") == 0 &&
-              !modem_service_phonebook_entry(4u, &entry),
-          "the complete 1..500 ME index domain survives service publication");
-
-    s_phonebook_inject_oversized = false;
-    s_phonebook_inject_high_index = false;
-    request_id = 0u;
-    check(modem_service_request_phonebook_add(
-              "Alice", "+15550000002", &request_id) &&
-              request_id != 0u,
-          "international add is admitted");
-    mh_settle();
-    check(mh_tx_count_exact(
-              "AT+CPBW=,\"+15550000002\",145,\"Alice\"") == 1u &&
-              modem_service_pop_phonebook_result(&result) &&
-              result.request_id == request_id &&
-              result.kind == MODEM_PHONEBOOK_OP_ADD &&
-              result.outcome == MODEM_PHONEBOOK_OUTCOME_OK &&
-              modem_service_phonebook_count() == 3u,
-          "add uses international TOA then refreshes the complete cache");
-    check(modem_service_phonebook_entry(1u, &entry) && entry.index == 2u &&
-              strcmp(entry.name, "Alice") == 0,
-          "post-add readback publishes the modem-assigned index");
-
-    request_id = 0u;
-    check(modem_service_request_phonebook_update(
-              3u, "Robert", "5550103", &request_id) &&
-              request_id != 0u,
-          "national update is admitted");
-    mh_settle();
-    check(mh_tx_count_exact(
-              "AT+CPBW=3,\"5550103\",129,\"Robert\"") == 1u &&
-              modem_service_pop_phonebook_result(&result) &&
-              result.request_id == request_id &&
-              result.kind == MODEM_PHONEBOOK_OP_UPDATE &&
-              result.outcome == MODEM_PHONEBOOK_OUTCOME_OK &&
-              modem_service_phonebook_entry(2u, &entry) &&
-              entry.index == 3u && strcmp(entry.name, "Robert") == 0 &&
-              strcmp(entry.number, "5550103") == 0,
-          "update uses national TOA and returns refreshed contents");
-
-    request_id = 0u;
-    check(modem_service_request_phonebook_delete(1u, &request_id) &&
-              request_id != 0u,
-          "delete is admitted");
-    mh_settle();
-    check(mh_tx_count_exact("AT+CPBW=1") == 1u &&
-              modem_service_pop_phonebook_result(&result) &&
-              result.request_id == request_id &&
-              result.kind == MODEM_PHONEBOOK_OP_DELETE &&
-              result.outcome == MODEM_PHONEBOOK_OUTCOME_OK &&
-              modem_service_phonebook_count() == 2u &&
-              modem_service_phonebook_entry(0u, &entry) && entry.index == 2u,
-          "delete command removes the row and refreshes cache order");
-
-    check(modem_service_phonebook_count() != 0u &&
-              modem_service_phonebook_cache_valid(),
-          "phonebook fixture has a published cache before SIM removal");
-    mh_feed("#QSS: 2,0");
-    s_fault = TELIT_FAULT_PHONEBOOK_CPBS_ERROR_ONCE;
-    s_fault_consumed = false;
-    request_id = 0u;
-    check(modem_service_request_phonebook_list(&request_id) &&
-              request_id != 0u,
-          "missing-SIM list still reaches the modem error path");
-    mh_settle();
-    check(modem_service_pop_phonebook_result(&result) &&
-              result.request_id == request_id &&
-              result.kind == MODEM_PHONEBOOK_OP_LIST &&
-              result.outcome == MODEM_PHONEBOOK_OUTCOME_ERROR &&
-              result.sim_not_ready &&
-              modem_service_phonebook_count() == 0u &&
-              !modem_service_phonebook_cache_valid(),
-          "CPBS failure reports missing SIM and retires its stale cache");
-}
-
-static bool request_phonebook_operation(modem_phonebook_op_t operation,
-                                        uint32_t *request_id_out) {
-    switch (operation) {
-    case MODEM_PHONEBOOK_OP_LIST:
-        return modem_service_request_phonebook_list(request_id_out);
-    case MODEM_PHONEBOOK_OP_ADD:
-        return modem_service_request_phonebook_add(
-            "Fault add", "+15550000999", request_id_out);
-    case MODEM_PHONEBOOK_OP_UPDATE:
-        return modem_service_request_phonebook_update(
-            1u, "Fault update", "5550999", request_id_out);
-    case MODEM_PHONEBOOK_OP_DELETE:
-        return modem_service_request_phonebook_delete(1u, request_id_out);
-    case MODEM_PHONEBOOK_OP_NONE:
-    default:
-        return false;
-    }
-}
-
-static void run_phonebook_fault_case(
-    modem_phonebook_op_t operation, telit_fault_t fault,
-    uint32_t timeout_advance_ms, modem_phonebook_outcome_t expected_outcome,
-    const char *message) {
-    begin_telit(true);
-    if (!boot_until_ready(30000u)) {
-        check(false, message);
-        return;
-    }
-    s_phonebook[0].used = true;
-    s_phonebook[0].entry.index = 1u;
-    strcpy(s_phonebook[0].entry.name, "Seed");
-    strcpy(s_phonebook[0].entry.number, "5550001");
-    s_fault = fault;
-    s_fault_consumed = false;
-
-    uint32_t request_id = 0u;
-    bool admitted = request_phonebook_operation(operation, &request_id);
-    mh_settle();
-    if (timeout_advance_ms != 0u) {
-        mh_advance(timeout_advance_ms);
-    }
-    modem_phonebook_result_t result;
-    bool terminal = admitted && request_id != 0u &&
-        modem_service_pop_phonebook_result(&result) &&
-        result.request_id == request_id && result.kind == operation &&
-        result.outcome == expected_outcome && !result.sim_not_ready &&
-        !mh_status().operation_busy &&
-        !modem_service_pop_phonebook_result(&result);
-    check(terminal, message);
-}
-
-static void test_phonebook_operation_fault_matrix(void) {
-    static const modem_phonebook_op_t operations[] = {
-        MODEM_PHONEBOOK_OP_LIST,
-        MODEM_PHONEBOOK_OP_ADD,
-        MODEM_PHONEBOOK_OP_UPDATE,
-        MODEM_PHONEBOOK_OP_DELETE,
-    };
-    for (size_t i = 0u; i < sizeof(operations) / sizeof(operations[0]); i++) {
-        run_phonebook_fault_case(
-            operations[i], TELIT_FAULT_PHONEBOOK_CPBS_ERROR_ONCE, 0u,
-            MODEM_PHONEBOOK_OUTCOME_ERROR,
-            "every operation terminates once on CPBS ERROR");
-        run_phonebook_fault_case(
-            operations[i], TELIT_FAULT_PHONEBOOK_CPBS_TIMEOUT_ONCE, 5001u,
-            MODEM_PHONEBOOK_OUTCOME_TIMEOUT,
-            "every operation terminates once on CPBS timeout");
-        run_phonebook_fault_case(
-            operations[i], TELIT_FAULT_PHONEBOOK_CPBR_ERROR_ONCE, 0u,
-            MODEM_PHONEBOOK_OUTCOME_ERROR,
-            "every operation terminates once on readback ERROR");
-        run_phonebook_fault_case(
-            operations[i], TELIT_FAULT_PHONEBOOK_CPBR_TIMEOUT_ONCE, 15001u,
-            MODEM_PHONEBOOK_OUTCOME_TIMEOUT,
-            "every operation terminates once on readback timeout");
-    }
-
-    static const modem_phonebook_op_t writes[] = {
-        MODEM_PHONEBOOK_OP_ADD,
-        MODEM_PHONEBOOK_OP_UPDATE,
-        MODEM_PHONEBOOK_OP_DELETE,
-    };
-    for (size_t i = 0u; i < sizeof(writes) / sizeof(writes[0]); i++) {
-        run_phonebook_fault_case(
-            writes[i], TELIT_FAULT_PHONEBOOK_CPBW_ERROR_ONCE, 0u,
-            MODEM_PHONEBOOK_OUTCOME_ERROR,
-            "every write terminates once on CPBW ERROR");
-        run_phonebook_fault_case(
-            writes[i], TELIT_FAULT_PHONEBOOK_CPBW_TIMEOUT_ONCE, 10001u,
-            MODEM_PHONEBOOK_OUTCOME_TIMEOUT,
-            "every write terminates once on CPBW timeout");
-    }
-}
-
-static void test_phonebook_queue_eviction_and_recovery_are_terminal(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "phonebook eviction/recovery fixture boots");
-    s_fault = TELIT_FAULT_PHONEBOOK_CPBR_TIMEOUT_ONCE;
-    s_fault_consumed = false;
-
-    uint32_t request_ids[7];
-    memset(request_ids, 0, sizeof(request_ids));
-    check(modem_service_request_phonebook_list(&request_ids[0]),
-          "phonebook current request is admitted");
-    mh_settle();
-    check(service_probe().command_active && mh_status().operation_busy,
-          "phonebook readback remains on wire for queue-pressure fixture");
-    bool queue_filled = true;
-    for (uint8_t i = 1u; i < 7u; i++) {
-        queue_filled = queue_filled &&
-            modem_service_request_phonebook_list(&request_ids[i]);
-    }
-    uint32_t rejected_id = 99u;
-    check(queue_filled &&
-              !modem_service_request_phonebook_list(&rejected_id) &&
-              rejected_id == 0u &&
-              service_probe().request_queue_depth == 6u,
-          "full FIFO rejects an unaccepted phonebook request without a token");
-
-    mh_feed("RING");
-    mh_feed("+CLIP: \"+15550000000\",145,,,,0");
-    check(modem_service_request_answer(),
-          "incoming call control preempts a full normal FIFO");
-    modem_phonebook_result_t result;
-    check(modem_service_pop_phonebook_result(&result) &&
-              result.request_id == request_ids[6] &&
-              result.kind == MODEM_PHONEBOOK_OP_LIST &&
-              result.outcome == MODEM_PHONEBOOK_OUTCOME_EVICTED,
-          "the exact displaced phonebook request terminates as EVICTED");
-
-    s_mh_supply_pg = false;
-    mh_advance(250u);
-    bool cancelled_once[6] = {false};
-    uint8_t cancelled_count = 0u;
-    while (modem_service_pop_phonebook_result(&result)) {
-        for (uint8_t i = 0u; i < 6u; i++) {
-            if (result.request_id == request_ids[i] &&
-                result.kind == MODEM_PHONEBOOK_OP_LIST &&
-                result.outcome == MODEM_PHONEBOOK_OUTCOME_CANCELLED &&
-                !cancelled_once[i]) {
-                cancelled_once[i] = true;
-                cancelled_count++;
-                break;
-            }
-        }
-    }
-    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
-              cancelled_count == 6u &&
-              modem_service_phonebook_count() == 0u &&
-              !mh_status().operation_busy,
-          "runtime recovery cancels current and queued phonebook requests exactly once");
-}
-
-
 /* ---- direct delivery (+CMT) -------------------------------------------- */
 
 #include "sms_control_fixtures.h"
@@ -8141,9 +7721,6 @@ int main(void) {
     test_supplementary_refresh_recovery();
     test_call_forward_queue_cancellation();
     test_newer_call_forward_result_survives_old_final();
-    test_phonebook_list_and_crud_contract();
-    test_phonebook_operation_fault_matrix();
-    test_phonebook_queue_eviction_and_recovery_are_terminal();
 
     if (s_failures == 0) {
         printf("test_modem_telit_service: OK\n");

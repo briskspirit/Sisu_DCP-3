@@ -17,6 +17,7 @@
 #include "services/standby_sleep_logic.h"
 #include "services/timebase.h"
 #include "storage/store_service.h"
+#include "services/phonebook_service.h"
 
 #define STANDBY_SLEEP_STABLE_MS 32u
 #define STANDBY_SLEEP_RETRY_MS 100u
@@ -93,7 +94,7 @@ static standby_sleep_readiness_t collect_readiness(
         .app_idle = app_idle,
         .audio_idle = !audio_service_is_active(),
         .core1_idle = core1_services_standby_ready(),
-        .storage_idle = store_service_standby_ready(),
+        .storage_idle = store_service_standby_ready() && phonebook_service_idle(),
         .modem_asleep = modem_service_transport_sleep_confirmed(),
         .uart_idle = modem_uart_hal_tx_idle() && modem_uart_hal_rx_idle(),
         .usb_absent = usb_absent,

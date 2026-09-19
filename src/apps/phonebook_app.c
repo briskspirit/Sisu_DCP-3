@@ -1,3 +1,4 @@
+#include "services/phonebook_service.h"
 #include "apps/phonebook_app.h"
 #include "ui/menu_visible.h"
 
@@ -97,22 +98,22 @@ static const char *L(uint16_t sid, const char *en) {
 }
 
 static void build_phonebook_visible(app_t *app, const char *query);
-static bool phonebook_current_entry(const app_t *app, modem_phonebook_entry_t *entry, uint16_t *cache_position);
+static bool phonebook_current_entry(const app_t *app, phonebook_entry_t *entry, uint16_t *cache_position);
 static uint16_t find_phonebook_entry_position(const char *name, const char *number, uint16_t fallback);
-static void begin_phonebook_edit(app_t *app, const modem_phonebook_entry_t *entry, uint16_t cache_position, uint32_t now);
-static void begin_phonebook_erase(app_t *app, const modem_phonebook_entry_t *entry, uint16_t cache_position);
-static void begin_phonebook_assign(app_t *app, const modem_phonebook_entry_t *entry, uint16_t cache_position);
-static void begin_phonebook_send(app_t *app, const modem_phonebook_entry_t *entry, uint16_t cache_position, uint32_t now);
+static void begin_phonebook_edit(app_t *app, const phonebook_entry_t *entry, uint16_t cache_position, uint32_t now);
+static void begin_phonebook_erase(app_t *app, const phonebook_entry_t *entry, uint16_t cache_position);
+static void begin_phonebook_assign(app_t *app, const phonebook_entry_t *entry, uint16_t cache_position);
+static void begin_phonebook_send(app_t *app, const phonebook_entry_t *entry, uint16_t cache_position, uint32_t now);
 static void open_phonebook_send_recipient_editor(app_t *app, const char *value, uint32_t now);
 static void open_phonebook_speed_dials(app_t *app);
-static uint16_t selected_phonebook_speed_contact(const app_t *app);
+static uint32_t selected_phonebook_speed_contact(const app_t *app);
 static void refresh_speed_selected(app_t *app);
 static uint8_t phonebook_view_mode(void);
 static void set_phonebook_view_mode(uint8_t mode);
 static const char *phonebook_label_text(phonebook_label_t label);
 static const char *phonebook_context_return_softkey(phonebook_context_t context);
 static app_route_t phonebook_empty_return_route(phonebook_context_t context);
-static bool phonebook_entry_matches(const modem_phonebook_entry_t *entry, const char *query);
+static bool phonebook_entry_matches(const phonebook_entry_t *entry, const char *query);
 static bool phonebook_root_item_visible(uint8_t raw);
 static uint8_t phonebook_menu_visible_count(phonebook_menu_kind_t kind);
 static uint8_t phonebook_menu_visible_index(phonebook_menu_kind_t kind, uint8_t raw);
@@ -127,9 +128,8 @@ static void phonebook_return_to_parent_menu(app_t *app);
 static void phonebook_clear_request(app_t *app);
 static void phonebook_claim_request_display(app_t *app);
 static bool phonebook_expected_operation(const app_t *app,
-                                         modem_phonebook_op_t *out);
-static void phonebook_sync_start_if_needed(app_t *app, uint32_t now,
-                                           const modem_status_t *status);
+                                         phonebook_op_t *out);
+static void phonebook_sync_start_if_needed(app_t *app, uint32_t now);
 
 void render_phonebook_menu(const app_t *app, framebuffer_t *fb) {
     char breadcrumb[14];
@@ -213,8 +213,8 @@ void render_phonebook_list(const app_t *app, framebuffer_t *fb) {
         }
         for (uint8_t row = 0; row < 3u && start + row < app->phonebook_visible_count; row++) {
             uint16_t pos = app->phonebook_visible_indices[start + row];
-            modem_phonebook_entry_t entry;
-            if (!modem_service_phonebook_entry(pos, &entry)) {
+            phonebook_entry_t entry;
+            if (!phonebook_service_entry(pos, &entry)) {
                 continue;
             }
             int y = 8 + row * 9;
@@ -231,7 +231,7 @@ void render_phonebook_list(const app_t *app, framebuffer_t *fb) {
         draw_softkey(fb, phonebook_label_text((phonebook_label_t)app->phonebook_pending_label));
         return;
     }
-    modem_phonebook_entry_t entry;
+    phonebook_entry_t entry;
     if (!phonebook_current_entry(app, &entry, 0)) {
         return;
     }
@@ -260,15 +260,17 @@ void render_phonebook_memory(const app_t *app, framebuffer_t *fb) {
     (void)app;
     fb_clear(fb, false);
     const font_t *font = asset_font(FONT_FS2);
-    uint16_t used = modem_service_phonebook_count();
-    uint16_t free = used >= MODEM_PHONEBOOK_MAX_RECORDS
-        ? 0u
-        : (uint16_t)(MODEM_PHONEBOOK_MAX_RECORDS - used);
-    char line[18];
-    fb_text(fb, font, ts_or(0x2acu, "SIM card:"), 0, 7, true, FB_WIDTH);
-    snprintf(line, sizeof(line), "%u free", (unsigned)free);
+    uint16_t used = phonebook_service_count();
+    uint32_t allocated = 0u, limit = 0u;
+    bool known = phonebook_service_space(&allocated, &limit);
+    uint32_t free = allocated < limit ? limit - allocated : 0u;
+    char line[32];
+    fb_text(fb, font, ts_or(SID_LOCAL_PHONE_MEMORY, "Phone:"), 0, 7, true, FB_WIDTH);
+    if (known) snprintf(line, sizeof(line), ts_or(SID_LOCAL_KIB_FREE, "%lu KiB free"),
+                        (unsigned long)(free / 1024u));
+    else snprintf(line, sizeof(line), "%s", ts_or(SID_LOCAL_STORAGE_UNAVAILABLE, "Unavailable"));
     fb_text(fb, font, line, 0, 16, true, FB_WIDTH);
-    snprintf(line, sizeof(line), "%u in use", (unsigned)used);
+    snprintf(line, sizeof(line), ts_or(SID_LOCAL_CONTACT_COUNT, "%lu contacts"), (unsigned long)used);
     fb_text(fb, font, line, 0, 25, true, FB_WIDTH);
     draw_softkey(fb, ts_or(0x2e9u, "OK"));
 }
@@ -293,15 +295,15 @@ void render_phonebook_speed_dials(const app_t *app, framebuffer_t *fb) {
     const font_t *large = asset_font(FONT_FS0);
     fb_bitmap(fb, 30u, 0, 0, true, true);
     uint8_t key = PHONEBOOK_SPEED_KEYS[app->phonebook_speed_selected];
-    uint16_t contact_index = selected_phonebook_speed_contact(app);
+    uint32_t contact_index = selected_phonebook_speed_contact(app);
     char line[18];
     snprintf(line, sizeof(line), "Key %u:", (unsigned)key);
     fb_text(fb, small, line, 2, 7, true, 80);
     const char *value = ts_or(0x3a0u, "(empty)");
-    char value_buf[MODEM_PHONEBOOK_NAME_MAX + 1u];
-    modem_phonebook_entry_t entry;
-    for (uint16_t i = 0; i < modem_service_phonebook_count(); i++) {
-        if (modem_service_phonebook_entry(i, &entry) && entry.index == contact_index) {
+    char value_buf[PHONEBOOK_NAME_MAX + 1u];
+    phonebook_entry_t entry;
+    for (uint16_t i = 0; i < phonebook_service_count(); i++) {
+        if (phonebook_service_entry(i, &entry) && entry.index == contact_index) {
             copy_text(value_buf, sizeof(value_buf), entry.name[0] ? entry.name : entry.number);
             value_buf[sizeof(value_buf) - 1u] = '\0';
             value = value_buf;
@@ -497,7 +499,7 @@ bool handle_phonebook_list_key(app_t *app, uint16_t key, uint32_t now) {
     if (key != KEY_NAVI) {
         return true;
     }
-    modem_phonebook_entry_t entry;
+    phonebook_entry_t entry;
     uint16_t cache_position = 0u;
     if (!phonebook_current_entry(app, &entry, &cache_position)) {
         return true;
@@ -590,8 +592,8 @@ bool handle_phonebook_tone_key(app_t *app, uint16_t key, uint32_t now) {
     }
     if (key == KEY_NAVI) {
         stop_ringing_tone_preview();
-        modem_phonebook_entry_t entry;
-        if (modem_service_phonebook_entry(app->phonebook_pending_index, &entry)) {
+        phonebook_entry_t entry;
+        if (phonebook_service_entry(app->phonebook_pending_index, &entry)) {
             store_phonebook_set_contact_tone_value(entry.index, phonebook_tone_picker_value(app->phonebook_tone_selected));
         }
         show_phonebook_list(app, PHONEBOOK_LABEL_ASSIGN, "1-6", PHONEBOOK_CONTEXT_ASSIGN, app->phonebook_pending_selected);
@@ -664,10 +666,10 @@ bool handle_phonebook_speed_options_key(app_t *app, uint16_t key, uint32_t now) 
         open_display_sid_num(app, 3u, 0x39fu, "Speed dial\nkey %N\nerased",
                              (unsigned)app->phonebook_speed_key, APP_ROUTE_PHONEBOOK_SPEED_DIALS, now);
     } else {
-        uint16_t contact_index = selected_phonebook_speed_contact(app);
-        modem_phonebook_entry_t entry;
-        for (uint16_t i = 0; i < modem_service_phonebook_count(); i++) {
-            if (modem_service_phonebook_entry(i, &entry) && entry.index == contact_index) {
+        uint32_t contact_index = selected_phonebook_speed_contact(app);
+        phonebook_entry_t entry;
+        for (uint16_t i = 0; i < phonebook_service_count(); i++) {
+            if (phonebook_service_entry(i, &entry) && entry.index == contact_index) {
                 (void)start_outgoing_call(app, entry.number, entry.name, now,
                                           APP_ROUTE_PHONEBOOK_SPEED_DIAL_OPTIONS);
                 break;
@@ -688,8 +690,8 @@ bool handle_phonebook_edit_choice_key(app_t *app, uint16_t key, uint32_t now) {
         return true;
     }
     if (key == KEY_NAVI) {
-        modem_phonebook_entry_t entry;
-        if (modem_service_phonebook_entry(app->phonebook_pending_index, &entry)) {
+        phonebook_entry_t entry;
+        if (phonebook_service_entry(app->phonebook_pending_index, &entry)) {
             if (app->phonebook_edit_choice_selected == 1u) {
                 start_phonebook_add_with_context(app, app->editor_draft_name, app->editor_draft_number,
                                                  PHONEBOOK_LABEL_EDIT, "1-5", PHONEBOOK_CONTEXT_EDIT, now);
@@ -722,7 +724,7 @@ bool handle_phonebook_security_key(app_t *app, uint16_t key, uint32_t now) {
             app->phonebook_context = PHONEBOOK_CONTEXT_ERASE;
             copy_text(app->phonebook_pending_path, sizeof(app->phonebook_pending_path), "1-4-1");
             uint32_t request_id = 0u;
-            if (modem_service_request_phonebook_list(&request_id)) {
+            if (phonebook_service_request_list(&request_id)) {
                 app->phonebook_request_id = request_id;
                 app->phonebook_request_started_ms = now;
                 open_display_sid(app, PHONEBOOK_REQUEST_DISPLAY_RECORD_ID,
@@ -732,7 +734,7 @@ bool handle_phonebook_security_key(app_t *app, uint16_t key, uint32_t now) {
             } else {
                 app->phonebook_erase_all_started_ms = 0u;
                 phonebook_clear_request(app);
-                open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy",
+                open_display_sid(app, 0u, 0x20du, "Not\nallowed",
                                  APP_ROUTE_MAIN_MENU, now);
             }
         } else {
@@ -764,23 +766,23 @@ static void phonebook_claim_request_display(app_t *app) {
 }
 
 static bool phonebook_expected_operation(const app_t *app,
-                                         modem_phonebook_op_t *out) {
+                                         phonebook_op_t *out) {
     if (app == NULL || out == NULL) {
         return false;
     }
     switch ((phonebook_pending_t)app->phonebook_pending_kind) {
     case PHONEBOOK_PENDING_LIST:
     case PHONEBOOK_PENDING_SEARCH:
-        *out = MODEM_PHONEBOOK_OP_LIST;
+        *out = PHONEBOOK_OP_LIST;
         return true;
     case PHONEBOOK_PENDING_ADD:
-        *out = MODEM_PHONEBOOK_OP_ADD;
+        *out = PHONEBOOK_OP_ADD;
         return true;
     case PHONEBOOK_PENDING_UPDATE:
-        *out = MODEM_PHONEBOOK_OP_UPDATE;
+        *out = PHONEBOOK_OP_UPDATE;
         return true;
     case PHONEBOOK_PENDING_DELETE:
-        *out = MODEM_PHONEBOOK_OP_DELETE;
+        *out = PHONEBOOK_OP_DELETE;
         return true;
     case PHONEBOOK_PENDING_NONE:
     default:
@@ -802,23 +804,18 @@ bool poll_phonebook(app_t *app, uint32_t now) {
         phonebook_clear_request(app);
     }
 
-    modem_status_t status;
-    modem_service_get_status(&status);
-    if (!status.at_ready || !status.sim_ready) {
-        app->phonebook_sync_retry_ms = 0u;
-    }
 
-    modem_phonebook_result_t result;
+    phonebook_result_t result;
     bool matching_result = false;
     bool sync_changed = false;
-    modem_phonebook_op_t expected = MODEM_PHONEBOOK_OP_NONE;
-    while (modem_service_pop_phonebook_result(&result)) {
+    phonebook_op_t expected = PHONEBOOK_OP_NONE;
+    while (phonebook_service_pop_result(&result)) {
         if (app->phonebook_sync_request_id != 0u &&
             result.request_id == app->phonebook_sync_request_id) {
             app->phonebook_sync_request_id = 0u;
-            if (result.kind == MODEM_PHONEBOOK_OP_LIST &&
-                result.outcome == MODEM_PHONEBOOK_OUTCOME_OK &&
-                modem_service_phonebook_cache_valid()) {
+            if (result.kind == PHONEBOOK_OP_LIST &&
+                result.outcome == PHONEBOOK_OUTCOME_OK &&
+                phonebook_service_cache_valid()) {
                 app->phonebook_sync_retry_ms = 0u;
                 app->dirty = true;
                 sync_changed = true;
@@ -844,27 +841,26 @@ bool poll_phonebook(app_t *app, uint32_t now) {
                 (phonebook_context_t)app->phonebook_context);
             app->phonebook_erase_all_started_ms = 0u;
             phonebook_clear_request(app);
-            open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready",
+            open_display_sid(app, 2u, 0x20du, "Not\nallowed",
                              back, now);
             return true;
         }
-        phonebook_sync_start_if_needed(app, now, &status);
+        phonebook_sync_start_if_needed(app, now);
         return sync_changed;
     }
 
     /* A matching id with the wrong operation is an internal contract fault,
      * never permission to enter another operation's UI branch. */
     if (result.kind != expected) {
-        result.outcome = MODEM_PHONEBOOK_OUTCOME_ERROR;
+        result.outcome = PHONEBOOK_OUTCOME_ERROR;
     }
-    if (result.outcome != MODEM_PHONEBOOK_OUTCOME_OK) {
+    if (result.outcome != PHONEBOOK_OUTCOME_OK) {
         app->phonebook_erase_all_started_ms = 0u;
         app_route_t back = phonebook_empty_return_route(
             (phonebook_context_t)app->phonebook_context);
         phonebook_clear_request(app);
-        if (result.sim_not_ready) {
-            open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", back,
-                             now);
+        if (result.outcome == PHONEBOOK_OUTCOME_FULL) {
+            open_display_sid(app, 0u, 0x280u, "Memory\nfull", back, now);
         } else {
             open_display_sid(app, 0u, 0x20du, "Not\nallowed", back, now);
         }
@@ -875,8 +871,8 @@ bool poll_phonebook(app_t *app, uint32_t now) {
         phonebook_clear_request(app);
         build_phonebook_visible(app, "");
         if (app->phonebook_visible_count > 0u) {
-            modem_phonebook_entry_t entry;
-            if (!modem_service_phonebook_entry(
+            phonebook_entry_t entry;
+            if (!phonebook_service_entry(
                     app->phonebook_visible_indices[0], &entry)) {
                 app->phonebook_erase_all_started_ms = 0u;
                 open_display_sid(app, 0u, 0x20du, "Not\nallowed",
@@ -966,20 +962,18 @@ bool poll_phonebook(app_t *app, uint32_t now) {
     return true;
 }
 
-static void phonebook_sync_start_if_needed(app_t *app, uint32_t now,
-                                           const modem_status_t *status) {
-    if (app == NULL || status == NULL || !status->at_ready ||
-        !status->sim_ready || app->route == APP_ROUTE_POWER_OFF ||
+static void phonebook_sync_start_if_needed(app_t *app, uint32_t now) {
+    if (app == NULL || app->route == APP_ROUTE_POWER_OFF ||
         app->phonebook_pending_kind != PHONEBOOK_PENDING_NONE ||
         app->phonebook_sync_request_id != 0u ||
-        modem_service_phonebook_cache_valid() ||
+        phonebook_service_cache_valid() ||
         (app->phonebook_sync_retry_ms != 0u &&
          time_diff_ms(now, app->phonebook_sync_retry_ms) < 0)) {
         return;
     }
 
     uint32_t request_id = 0u;
-    if (modem_service_request_phonebook_list(&request_id)) {
+    if (phonebook_service_request_list(&request_id)) {
         app->phonebook_sync_request_id = request_id;
     } else {
         app->phonebook_sync_retry_ms = now + PHONEBOOK_SYNC_RETRY_MS;
@@ -1072,9 +1066,9 @@ void start_phonebook_list(app_t *app, phonebook_label_t label, const char *path,
     app->phonebook_pending_path[sizeof(app->phonebook_pending_path) - 1u] = '\0';
     app->phonebook_search_query[0] = '\0';
     uint32_t request_id = 0u;
-    if (!modem_service_request_phonebook_list(&request_id)) {
+    if (!phonebook_service_request_list(&request_id)) {
         phonebook_clear_request(app);
-        open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy", phonebook_empty_return_route(context), now);
+        open_display_sid(app, 0u, 0x20du, "Not\nallowed", phonebook_empty_return_route(context), now);
     } else {
         app->phonebook_request_id = request_id;
         app->phonebook_request_started_ms = now;
@@ -1094,9 +1088,9 @@ void start_phonebook_search(app_t *app, const char *query, uint32_t now) {
     app->phonebook_search_query[sizeof(app->phonebook_search_query) - 1u] = '\0';
     close_editor(app);
     uint32_t request_id = 0u;
-    if (!modem_service_request_phonebook_list(&request_id)) {
+    if (!phonebook_service_request_list(&request_id)) {
         phonebook_clear_request(app);
-        open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy", phonebook_empty_return_route(PHONEBOOK_CONTEXT_SEARCH), now);
+        open_display_sid(app, 0u, 0x20du, "Not\nallowed", phonebook_empty_return_route(PHONEBOOK_CONTEXT_SEARCH), now);
     } else {
         app->phonebook_request_id = request_id;
         app->phonebook_request_started_ms = now;
@@ -1115,9 +1109,9 @@ void start_phonebook_add(app_t *app, const char *name, const char *number, uint3
 void start_phonebook_add_with_context(app_t *app, const char *name, const char *number, phonebook_label_t label, const char *path, phonebook_context_t context, uint32_t now) {
     /* Snapshot name/number BEFORE close_editor: some callers pass app->editor_value
      * as `number`, and close_editor() zeroes editor_value -- reading `number` after
-     * would then see an empty string, which the modem add rejects ("SIM card busy").
+     * would then see an empty string, which local contact validation rejects.
      * Copy first so the request always gets the real values regardless of aliasing. */
-    char name_buf[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char name_buf[PHONEBOOK_NAME_MAX + 1u];
     char number_buf[MODEM_PHONE_MAX + 1u];
     copy_text(name_buf, sizeof(name_buf), name);
     copy_text(number_buf, sizeof(number_buf), number);
@@ -1128,13 +1122,13 @@ void start_phonebook_add_with_context(app_t *app, const char *name, const char *
     copy_text(app->phonebook_pending_path, sizeof(app->phonebook_pending_path), path);
     close_editor(app);
     uint32_t request_id = 0u;
-    if (!modem_service_request_phonebook_add(
+    if (!phonebook_service_request_add(
             name_buf, number_buf, &request_id)) {
         phonebook_clear_request(app);
         open_display_sid(app,
                          0u,
-                         0x2b4u,
-                         "SIM card\nbusy",
+                         0x20du,
+                         "Not\nallowed",
                          phonebook_empty_return_route(context),
                          now);
     } else {
@@ -1151,9 +1145,9 @@ void start_phonebook_add_with_context(app_t *app, const char *name, const char *
     }
 }
 
-void start_phonebook_update(app_t *app, uint16_t index, const char *name, const char *number, uint32_t now) {
+void start_phonebook_update(app_t *app, uint32_t index, const char *name, const char *number, uint32_t now) {
     /* Snapshot name/number before close_editor -- see start_phonebook_add_with_context. */
-    char name_buf[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char name_buf[PHONEBOOK_NAME_MAX + 1u];
     char number_buf[MODEM_PHONE_MAX + 1u];
     copy_text(name_buf, sizeof(name_buf), name);
     copy_text(number_buf, sizeof(number_buf), number);
@@ -1164,10 +1158,10 @@ void start_phonebook_update(app_t *app, uint16_t index, const char *name, const 
     copy_text(app->phonebook_pending_path, sizeof(app->phonebook_pending_path), "1-5");
     close_editor(app);
     uint32_t request_id = 0u;
-    if (!modem_service_request_phonebook_update(
+    if (!phonebook_service_request_update(
             index, name_buf, number_buf, &request_id)) {
         phonebook_clear_request(app);
-        open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy", APP_ROUTE_MAIN_MENU, now);
+        open_display_sid(app, 0u, 0x20du, "Not\nallowed", APP_ROUTE_MAIN_MENU, now);
     } else {
         app->phonebook_request_id = request_id;
         app->phonebook_request_started_ms = now;
@@ -1177,13 +1171,13 @@ void start_phonebook_update(app_t *app, uint16_t index, const char *name, const 
     }
 }
 
-bool start_phonebook_delete(app_t *app, uint16_t index, uint32_t now) {
+bool start_phonebook_delete(app_t *app, uint32_t index, uint32_t now) {
     app->phonebook_pending_kind = PHONEBOOK_PENDING_DELETE;
     app->phonebook_pending_selected = app->phonebook_list_selected;
     uint32_t request_id = 0u;
-    if (!modem_service_request_phonebook_delete(index, &request_id)) {
+    if (!phonebook_service_request_delete(index, &request_id)) {
         phonebook_clear_request(app);
-        open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy", APP_ROUTE_MAIN_MENU, now);
+        open_display_sid(app, 0u, 0x20du, "Not\nallowed", APP_ROUTE_MAIN_MENU, now);
         return false;
     } else {
         app->phonebook_request_id = request_id;
@@ -1211,16 +1205,16 @@ void show_phonebook_list(app_t *app, phonebook_label_t label, const char *path, 
 
 static void build_phonebook_visible(app_t *app, const char *query) {
     app->phonebook_visible_count = 0u;
-    uint16_t count = modem_service_phonebook_count();
-    for (uint16_t i = 0; i < count && app->phonebook_visible_count < MODEM_PHONEBOOK_MAX_RECORDS; i++) {
-        modem_phonebook_entry_t entry;
-        if (modem_service_phonebook_entry(i, &entry) && phonebook_entry_matches(&entry, query)) {
+    uint16_t count = phonebook_service_count();
+    for (uint16_t i = 0; i < count && app->phonebook_visible_count < PHONEBOOK_MAX_RECORDS; i++) {
+        phonebook_entry_t entry;
+        if (phonebook_service_entry(i, &entry) && phonebook_entry_matches(&entry, query)) {
             app->phonebook_visible_indices[app->phonebook_visible_count++] = i;
         }
     }
 }
 
-static bool phonebook_current_entry(const app_t *app, modem_phonebook_entry_t *entry, uint16_t *cache_position) {
+static bool phonebook_current_entry(const app_t *app, phonebook_entry_t *entry, uint16_t *cache_position) {
     if (app->phonebook_visible_count == 0u || app->phonebook_list_selected >= app->phonebook_visible_count) {
         return false;
     }
@@ -1228,15 +1222,15 @@ static bool phonebook_current_entry(const app_t *app, modem_phonebook_entry_t *e
     if (cache_position != 0) {
         *cache_position = pos;
     }
-    return modem_service_phonebook_entry(pos, entry);
+    return phonebook_service_entry(pos, entry);
 }
 
 static uint16_t find_phonebook_entry_position(const char *name, const char *number, uint16_t fallback) {
     uint16_t match = fallback;
-    uint16_t count = modem_service_phonebook_count();
+    uint16_t count = phonebook_service_count();
     for (uint16_t i = 0; i < count; i++) {
-        modem_phonebook_entry_t entry;
-        if (!modem_service_phonebook_entry(i, &entry)) {
+        phonebook_entry_t entry;
+        if (!phonebook_service_entry(i, &entry)) {
             continue;
         }
         if (strcmp(entry.number, number != 0 ? number : "") == 0 &&
@@ -1247,19 +1241,19 @@ static uint16_t find_phonebook_entry_position(const char *name, const char *numb
     return match;
 }
 
-static void begin_phonebook_edit(app_t *app, const modem_phonebook_entry_t *entry, uint16_t cache_position, uint32_t now) {
+static void begin_phonebook_edit(app_t *app, const phonebook_entry_t *entry, uint16_t cache_position, uint32_t now) {
     app->phonebook_pending_index = cache_position;
     copy_text(app->editor_original_name, sizeof(app->editor_original_name), entry->name);
     copy_text(app->editor_draft_name, sizeof(app->editor_draft_name), entry->name);
     open_editor(app, ts_or(0x283u, "Name:"), entry->name, 16u, EDITOR_KIND_TEXT, EDITOR_CONTEXT_PHONEBOOK_EDIT_NAME, true, now);
 }
 
-static void begin_phonebook_erase(app_t *app, const modem_phonebook_entry_t *entry, uint16_t cache_position) {
+static void begin_phonebook_erase(app_t *app, const phonebook_entry_t *entry, uint16_t cache_position) {
     app->phonebook_pending_index = cache_position;
     open_confirm(app, CONFIRM_CONTEXT_PHONEBOOK_ERASE, ts_or(0x277u, "Erase?"), entry->name[0] ? entry->name : entry->number, 0, 4);
 }
 
-static void begin_phonebook_assign(app_t *app, const modem_phonebook_entry_t *entry, uint16_t cache_position) {
+static void begin_phonebook_assign(app_t *app, const phonebook_entry_t *entry, uint16_t cache_position) {
     app->phonebook_pending_index = cache_position;
     app->phonebook_pending_selected = app->phonebook_list_selected;
     uint8_t value = store_phonebook_get_contact_tone_value(entry->index);
@@ -1275,7 +1269,7 @@ static void begin_phonebook_assign(app_t *app, const modem_phonebook_entry_t *en
     app->dirty = true;
 }
 
-static void begin_phonebook_send(app_t *app, const modem_phonebook_entry_t *entry, uint16_t cache_position, uint32_t now) {
+static void begin_phonebook_send(app_t *app, const phonebook_entry_t *entry, uint16_t cache_position, uint32_t now) {
     (void)entry;
     app->phonebook_pending_index = cache_position;
     app->phonebook_pending_selected = app->phonebook_list_selected;
@@ -1434,7 +1428,7 @@ static const char *phonebook_tone_value_text(uint8_t value) {
     return label != 0 ? label : ts_or(0x0cfu, "Preset");
 }
 
-static bool phonebook_entry_matches(const modem_phonebook_entry_t *entry, const char *query) {
+static bool phonebook_entry_matches(const phonebook_entry_t *entry, const char *query) {
     if (query == 0 || query[0] == '\0') {
         return true;
     }
@@ -1530,11 +1524,11 @@ void resolve_contact_name(const char *number, char *dst, size_t cap) {
     if (number == 0 || number[0] == '\0') {
         return;
     }
-    uint16_t count = modem_service_phonebook_count();
+    uint16_t count = phonebook_service_count();
     bool found = false;
     for (uint16_t i = 0; i < count; i++) {
-        modem_phonebook_entry_t entry;
-        if (!modem_service_phonebook_entry(i, &entry)) {
+        phonebook_entry_t entry;
+        if (!phonebook_service_entry(i, &entry)) {
             continue;
         }
         if (!phone_match_numbers(entry.number, number)) {
@@ -1553,8 +1547,8 @@ void resolve_contact_name(const char *number, char *dst, size_t cap) {
     }
 }
 
-static uint16_t selected_phonebook_speed_contact(const app_t *app) {
-    uint16_t value = STORE_SPEED_DIAL_EMPTY;
+static uint32_t selected_phonebook_speed_contact(const app_t *app) {
+    uint32_t value = STORE_SPEED_DIAL_EMPTY;
     store_phonebook_get_speed_dial(PHONEBOOK_SPEED_KEYS[app->phonebook_speed_selected], &value);
     return value;
 }

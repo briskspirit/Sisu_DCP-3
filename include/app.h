@@ -1,6 +1,8 @@
 #ifndef APP_H
 #define APP_H
 
+#include "services/phonebook_types.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -226,7 +228,7 @@ typedef struct {
     uint16_t phonebook_pending_selected;
     char phonebook_pending_path[6];
     uint16_t phonebook_pending_index;
-    uint16_t phonebook_visible_indices[MODEM_PHONEBOOK_MAX_RECORDS];
+    uint16_t phonebook_visible_indices[PHONEBOOK_MAX_RECORDS];
     uint16_t phonebook_visible_count;
     uint16_t phonebook_list_selected;
     char phonebook_search_query[17];
@@ -398,11 +400,11 @@ typedef struct {
     modem_call_state_t last_modem_call_state;
     modem_call_result_t last_modem_call_result;
     char call_number[MODEM_PHONE_MAX + 1u];
-    char call_name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char call_name[PHONEBOOK_NAME_MAX + 1u];
     char call_waiting_number[MODEM_PHONE_MAX + 1u];
-    char call_waiting_name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char call_waiting_name[PHONEBOOK_NAME_MAX + 1u];
     char call_held_number[MODEM_PHONE_MAX + 1u];
-    char call_held_name[MODEM_PHONEBOOK_NAME_MAX + 1u];
+    char call_held_name[PHONEBOOK_NAME_MAX + 1u];
     uint8_t call_phase;
     bool call_incoming;
     bool call_answer_pending;
