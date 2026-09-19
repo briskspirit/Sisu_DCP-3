@@ -87,7 +87,8 @@ an active command). The collector therefore reads the body **raw, by
   newlines too. Bare-LF-only termination is accepted only when it cannot
   be mistaken for another body character; the ambiguous case needs CRLF;
 - after a candidate line break becomes data, accumulation is bounded to
-  `ceil(8*L/7) + 1` bytes for the supported plain-body formats. Hex bodies
+  `min(2*L, 160)` bytes for ten-field GSM text (extension pairs count once),
+  or `ceil(8*L/7) + 1` for the other supported plain-body formats. Hex bodies
   contain no CR/LF, so they finish at their first candidate without this
   bound. The overall cap remains 400 bytes. The first byte exceeding a
   bound is returned to the normal line/prompt parser, not discarded;
@@ -312,6 +313,19 @@ Store mode (`+CNMI=1,1`): `$QCMTI: "ME",24` ... `$QCMTI: "ME",29`, rows
 unreadable in every mode.
 
 ## Shared AT Channel
+
+### Outgoing Character Encoding Limitation
+
+Ordinary text sending still submits the application's text bytes directly under
+`+CSCS="GSM"`; it does not yet translate UTF-8 into that character set. The
+September 19 loopback reproduced `@` becoming an inverted exclamation mark and
+braces becoming accented letters. The local sent copy preserved the original
+text, while the inbox file correctly preserved what arrived over the network.
+This path is unchanged from before littlefs and needs a separate transmit
+encoding fix. The receive character-count fix does not solve it, and successful
+ASCII or picture loopbacks do not qualify outgoing Unicode/extension characters.
+
+### Command Scheduling
 
 Startup and re-registration use SIM-stored `#CFF?` flags on every carrier;
 absent flags leave forwarding status unknown. Explicit Call divert requests

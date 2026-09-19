@@ -63,6 +63,31 @@ The [physical power-cut run](storage_powercut_test.md#qualified-run) passed on
 the stage-1 layout; that is not a controlled voltage-ramp brownout qualification
 or a hardware qualification of the newer layout and category policy.
 
+### Integrated DUT Check (2026-09-19)
+
+The 64/384 KiB build was programmed after an explicit erase of the storage
+region. Both volumes formatted, all sixteen defaults initialized, and the
+eight-replacement/remount console test passed in 711 ms with no flash-park or
+resume timeout. Subsequent flashes and reboot checks did not erase storage.
+
+The normal UI created a contact, resolved it in the inbox, read a received SMS,
+and persisted its read flag. A successful send created a separate outbox file.
+A three-part picture loopback reassembled and saved into the fifth picture
+slot. A dialled call updated the call list, and an LCD calibration save updated
+the system volume. A readback of both volumes validated all sixteen semantic
+record envelopes and the contact/inbox/outbox objects. After reboot, these
+records loaded again and the inbox was usable with the modem powered off.
+With the modem still off, the UI deleted the sent copy and saved a new
+recipient-less draft; occupancy reflected each change without touching the inbox.
+
+The full host suite passed 133 tests with ASan/UBSan, including multipart SMS,
+category-full isolation, and interrupted storage operations. Service and release
+builds passed the flash and stack guards. Physical power cuts were not repeated
+on this integrated layout. Ordinary multipart/Unicode SMS storage is covered by
+host tests; additional external live reception was not qualified in this run.
+The loopback also exposed the separate, pre-existing
+[outgoing character-encoding limitation](sms_direct_delivery_design.md#outgoing-character-encoding-limitation).
+
 ## User Space Budgets
 
 The 384 KiB user volume has these starting budgets:
