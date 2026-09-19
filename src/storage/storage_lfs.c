@@ -186,6 +186,7 @@ static int mount_consistent(record_fs_t *fs) {
 
 static int prepare(record_fs_t *fs) {
     fs->io_busy = false;
+    if (fs->hal == NULL) return LFS_ERR_IO;
     if (!fs->mounted && !fs->needs_remount) {
         return LFS_ERR_IO;
     }
@@ -228,24 +229,30 @@ static storage_record_result_t record_read(storage_backend_t *backend, uint16_t 
         return result_for(fs, rc);
     }
     uint8_t header[RECORD_HEADER];
+    bool invalid = false;
     lfs_ssize_t size = lfs_file_size(&fs->fs, &file);
     lfs_ssize_t got = lfs_file_read(&fs->fs, &file, header, sizeof(header));
-    if (got != sizeof(header) || read_u32(header) != RECORD_MAGIC ||
+    if (size < 0 || got < 0) {
+        rc = (int)(size < 0 ? size : got);
+    } else if (got != sizeof(header) || read_u32(header) != RECORD_MAGIC ||
         read_u16(header + 4) != id || read_u16(header + 6) != 1u ||
         read_u32(header + 8) > STORAGE_RECORD_MAX_PAYLOAD ||
         read_u32(header + 8) > cap ||
         size != (lfs_ssize_t)(RECORD_HEADER + read_u32(header + 8))) {
-        rc = LFS_ERR_CORRUPT;
+        invalid = true;
     } else {
         size_t count = read_u32(header + 8);
         got = lfs_file_read(&fs->fs, &file, dst, count);
-        if (got != (lfs_ssize_t)count || record_crc(dst, count) != read_u32(header + 12)) {
-            rc = LFS_ERR_CORRUPT;
+        if (got < 0) {
+            rc = (int)got;
+        } else if (got != (lfs_ssize_t)count || record_crc(dst, count) != read_u32(header + 12)) {
+            invalid = true;
         } else {
             *len = count;
         }
     }
     int close_rc = lfs_file_close(&fs->fs, &file);
+    if (rc == 0 && close_rc == 0 && invalid) return STORAGE_RECORD_CORRUPT;
     return result_for(fs, rc != 0 ? rc : close_rc);
 }
 
@@ -688,23 +695,30 @@ storage_record_result_t storage_object_read(storage_object_collection_t collecti
     int rc = lfs_file_opencfg(&fs->fs, &file, path, LFS_O_RDONLY, &cfg);
     if (rc != 0) return result_for(fs, rc);
     uint8_t header[OBJECT_HEADER];
+    bool invalid = false;
+    lfs_ssize_t size = lfs_file_size(&fs->fs, &file);
     lfs_ssize_t got = lfs_file_read(&fs->fs, &file, header, sizeof(header));
-    if (got != sizeof(header) || read_u32(header) != OBJECT_MAGIC ||
+    if (size < 0 || got < 0) {
+        rc = (int)(size < 0 ? size : got);
+    } else if (got != sizeof(header) || read_u32(header) != OBJECT_MAGIC ||
         read_u16(header + 4u) != 1u || read_u16(header + 6u) != (unsigned)collection ||
         read_u32(header + 8u) != id || read_u32(header + 12u) > STORAGE_OBJECT_MAX_PAYLOAD ||
         read_u32(header + 12u) > cap ||
-        lfs_file_size(&fs->fs, &file) != (lfs_ssize_t)(OBJECT_HEADER + read_u32(header + 12u))) {
-        rc = LFS_ERR_CORRUPT;
+        size != (lfs_ssize_t)(OBJECT_HEADER + read_u32(header + 12u))) {
+        invalid = true;
     } else {
         size_t n = read_u32(header + 12u);
         got = lfs_file_read(&fs->fs, &file, dst, n);
-        if (got != (lfs_ssize_t)n || record_crc(dst, n) != read_u32(header + 16u)) {
-            rc = LFS_ERR_CORRUPT;
+        if (got < 0) {
+            rc = (int)got;
+        } else if (got != (lfs_ssize_t)n || record_crc(dst, n) != read_u32(header + 16u)) {
+            invalid = true;
         } else {
             *len = n;
         }
     }
     int closed = lfs_file_close(&fs->fs, &file);
+    if (rc == 0 && closed == 0 && invalid) return STORAGE_RECORD_CORRUPT;
     return result_for(fs, rc != 0 ? rc : closed);
 }
 
@@ -714,7 +728,8 @@ static int object_state_read(record_fs_t *fs, const char *path, uint8_t state[4]
         memset(state, 0, 4u);
         return 0;
     }
-    return size == 4 ? 0 : size < 0 ? (int)size : LFS_ERR_CORRUPT;
+    /* Positive means malformed attribute contents, not filesystem damage. */
+    return size == 4 ? 0 : size < 0 ? (int)size : 1;
 }
 
 storage_record_result_t storage_object_get_state(storage_object_collection_t collection,
@@ -726,6 +741,7 @@ storage_record_result_t storage_object_get_state(storage_object_collection_t col
     record_fs_t *fs = &s_volumes[STORAGE_LFS_USER];
     uint8_t bytes[4];
     int rc = object_state_read(fs, path, bytes);
+    if (rc > 0) return STORAGE_RECORD_CORRUPT;
     if (rc == 0) *state = read_u32(bytes);
     return result_for(fs, rc);
 }
@@ -739,6 +755,7 @@ storage_record_result_t storage_object_set_state(storage_object_collection_t col
     record_fs_t *fs = &s_volumes[STORAGE_LFS_USER];
     uint8_t bytes[4];
     int rc = object_state_read(fs, path, bytes);
+    if (rc > 0) return STORAGE_RECORD_CORRUPT;
     if (rc != 0) return result_for(fs, rc);
     if (read_u32(bytes) == state) return STORAGE_RECORD_OK;
     write_u32(bytes, state);
@@ -761,6 +778,7 @@ storage_record_result_t storage_object_write(storage_object_collection_t collect
     record_fs_t *fs = &s_volumes[STORAGE_LFS_USER];
     uint8_t state[4] = {0};
     int rc = object_state_read(fs, path, state);
+    if (rc > 0) return STORAGE_RECORD_CORRUPT;
     if (rc == LFS_ERR_NOENT) rc = 0;
     if (rc != 0) return result_for(fs, rc);
     rc = budget_begin(fs, (storage_user_pool_t)collection, false);

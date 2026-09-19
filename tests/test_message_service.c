@@ -10,6 +10,16 @@
 #include "storage/storage_layout.h"
 #include "storage/storage_objects.h"
 #include "storage/storage_user_space.h"
+#include "storage/store_health.h"
+#include "storage/store_service.h"
+
+static unsigned corrupt_detections[STORAGE_OBJECT_COLLECTION_COUNT];
+static uint8_t boot_faults;
+void store_health_note_corrupt(storage_object_collection_t collection, uint32_t id) {
+    assert((unsigned)collection < STORAGE_OBJECT_COLLECTION_COUNT && id != 0u);
+    corrupt_detections[collection]++;
+}
+void store_service_require_service(uint8_t faults) { boot_faults |= faults; }
 
 static uint8_t media[STORAGE_USER_BYTES], baseline[STORAGE_USER_BYTES];
 static unsigned operations, cut_at, tear;
@@ -60,6 +70,7 @@ static void reopen(void) {
 }
 static void fresh(void) {
     storage_lfs_deinit(); memset(media, 0xff, sizeof(media));
+    boot_faults = 0u; memset(corrupt_detections, 0, sizeof(corrupt_detections));
     cut_at = 0; busy = io_error = false; now = 0; wall_valid = false; reopen();
 }
 static void tick(void) { now += 1001u; message_service_tick(now, wall_valid ? &wall : NULL); }
@@ -345,9 +356,13 @@ static void test_io_retry_and_corrupt_record(void) {
     io_error = false; drain();
     assert(status().inbox == 1u && status().queued == 0u && !status().storage_error);
     uint32_t id = first_id(MESSAGE_INBOX);
+    make_pdu(pdu[1], 1, 1, 0, 46, "Healthy neighbour");
+    assert(message_service_receive(pdu[1])); drain();
     assert(storage_object_write(STORAGE_OBJECT_INBOX, id, (const uint8_t *)"bad", 3u) == STORAGE_RECORD_OK);
     reopen();
-    assert(!status().ready && status().storage_error);
+    assert(status().ready && !status().storage_error && status().inbox == 1u);
+    assert(first_id(MESSAGE_INBOX) != id);
+    assert(corrupt_detections[STORAGE_OBJECT_INBOX] != 0u && boot_faults == 0u);
     size_t len = 0u;
     assert(storage_object_read(STORAGE_OBJECT_INBOX, id, wire, sizeof(wire), &len) == STORAGE_RECORD_OK &&
            len == 3u && memcmp(wire, "bad", 3u) == 0);

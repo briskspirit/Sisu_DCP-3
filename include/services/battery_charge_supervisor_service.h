@@ -18,6 +18,7 @@ typedef enum {
 typedef struct {
     battery_charge_supervisor_snapshot_t model;
     bool initialized;
+    bool storage_unavailable;
     bool restore_pending;
     bool restored_after_reset;
     bool persistence_pending;

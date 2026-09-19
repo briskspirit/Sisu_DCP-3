@@ -580,6 +580,6 @@ const store_unit_ops_t g_store_pictures_unit_ops = {
     .reset_ram = reset_pictures_unit,
     .serialize = serialize_pictures_unit,
     .apply = apply_pictures_unit,
-    .fallback_missing_or_corrupt = fallback_pictures_unit,
+    .fallback_missing = fallback_pictures_unit,
     .name = "picture messages",
 };

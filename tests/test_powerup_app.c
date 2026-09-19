@@ -16,6 +16,8 @@ static uint16_t s_audio_arg;
 static bool s_clock_setup_opens_editor;
 static unsigned s_clock_setup_calls;
 static uint32_t s_clock_setup_now;
+static bool s_service_fault;
+bool store_service_contact_service_required(void) { return s_service_fault; }
 
 static void check(bool condition, const char *message) {
     if (!condition) {
@@ -181,6 +183,25 @@ int main(void) {
     test_silent_and_no_logo_paths();
     test_unreadable_setting_uses_default();
     test_interactive_boot_restarts_backlight_timer();
+    app_t app = {0};
+    s_service_fault = true;
+    reset_audio(); reset_clock_setup();
+    start_powerup(&app, 500u);
+    check(app.route == APP_ROUTE_CONTACT_SERVICE, "fatal self-test bypasses normal startup");
+    check(app.powerup_stage == APP_POWERUP_BLANK && !tick_contact_service(&app, 1523u),
+          "failed self-test waits for the original 0x80-tick timer");
+    check(tick_contact_service(&app, 1524u) && app.powerup_stage == APP_POWERUP_DONE,
+          "Contact service appears at 1024 ms, before any success logo");
+    check(!tick_powerup(&app, 60000u) && app.route == APP_ROUTE_CONTACT_SERVICE,
+          "contact service never expires into standby");
+    check(s_audio_posts == 0u && s_clock_setup_calls == 0u,
+          "failed startup does not play success audio or open clock setup");
+    app = (app_t){0};
+    start_powerup_no_logo(&app, 600u);
+    check(app.route == APP_ROUTE_CONTACT_SERVICE, "alarm startup obeys the same self-test gate");
+    enter_contact_service(&app, UINT32_MAX - 500u);
+    check(!tick_contact_service(&app, 522u) && tick_contact_service(&app, 523u),
+          "failure-screen timer crosses uptime wrap safely");
 
     if (s_failures != 0) {
         fprintf(stderr, "%d power-up app test(s) failed\n", s_failures);

@@ -115,6 +115,7 @@ typedef enum {
     APP_ROUTE_SNAKE_RESULT,
     APP_ROUTE_SNAKE_LAST_VIEW,
     APP_ROUTE_CALCULATOR,
+    APP_ROUTE_CONTACT_SERVICE,
 } app_route_t;
 
 typedef enum {

@@ -245,6 +245,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/storage/store_divert.c
     src/storage/store_pictures.c
     src/storage/store_service.c
+    src/storage/store_health.c
     src/storage/store_settings.c
     src/storage/store_t9.c
     src/storage/store_tones.c

@@ -39,6 +39,8 @@ static void assert_softkey(const char *caption, const char *expect, const char *
 static void test_ts_sid(void) {
     strings_set_language(1u);
     assert_true(strings_get_language() == 1u, "active language is 1");
+    assert_ts(SID_CONTACT_SERVICE_CONTACT, "CONTACT", "ROM self-test CONTACT line");
+    assert_ts(SID_CONTACT_SERVICE_SERVICE, "SERVICE", "ROM self-test SERVICE line");
     assert_ts(0x18bu, "Serial No.\n%S",
               "EN SID 0x18b = *#06# serial template");
     assert_ts(0x2ceu, "Phone book", "EN SID 0x2ce = Phone book");

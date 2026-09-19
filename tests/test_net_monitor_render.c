@@ -598,7 +598,7 @@ static void test_state_and_absence_rendering(void) {
           "cross-core heartbeat skew cannot wrap into a false huge age");
 
     const netmon_page_descriptor_t *storage = netmon_registry_find(76u);
-    check(netmon_frame_count(storage, &modem) == 8u, "partition page has eight frames");
+    check(netmon_frame_count(storage, &modem) == 10u, "partition page has ten frames");
     netmon_format_frame(storage, 0u, caps, 1200u, &local, &modem, &control, &frame);
     check_lines(&frame, "SYS 12/64K", "USR 120/384K", "FREE 264K", "RSV 32K",
                 "partition totals and physical free space");
@@ -615,6 +615,19 @@ static void test_state_and_absence_rendering(void) {
     netmon_format_frame(storage, 0u, caps, 1200u, &local, &modem, &control, &frame);
     check(strcmp(frame.lines[0], "FS NOT READY") == 0, "failed sample never displays zero usage");
     local.partitions.valid = true;
+    local.partitions.health_valid = true;
+    for (unsigned i = 0; i < STORAGE_OBJECT_COLLECTION_COUNT; i++)
+        local.partitions.corrupt[i] = UINT32_MAX;
+    netmon_format_frame(storage, 8u, caps, 1200u, &local, &modem, &control, &frame);
+    check_lines(&frame, "FS ERRORS", "C 4294967295", "I 4294967295", "O 4294967295",
+                "saturated corruption counters fit the display");
+    local.partitions.health_dirty = true;
+    netmon_format_frame(storage, 9u, caps, 1200u, &local, &modem, &control, &frame);
+    check_lines(&frame, "PART ERRORS", "P 4294967295", "SAVE PENDING", "BOOT 00",
+                "counter durability remains visible");
+    local.partitions.health_valid = false;
+    netmon_format_frame(storage, 8u, caps, 1200u, &local, &modem, &control, &frame);
+    check(strcmp(frame.lines[1], "UNAVAILABLE") == 0, "unreadable health record is not zero errors");
     local.updated_ms = 18000u;
     netmon_format_frame(storage, 0u, caps, 18000u, &local, &modem, &control, &frame);
     check(strcmp(frame.lines[0], "FS STALE") == 0, "deferred sampling is visibly stale");

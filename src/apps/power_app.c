@@ -12,6 +12,7 @@
 #include "services/strings.h"
 #include "ui/status_chrome.h"
 #include "ui/ui.h"
+#include "storage/store_service.h"
 
 #define POWER_MENU_COUNT 5u
 
@@ -263,6 +264,10 @@ bool power_on(app_t *app, uint32_t now) {
     app->backlight_force_active = false;
     app->backlight_force_on = false;
     app->power_off_failed = false;
+    if (store_service_contact_service_required()) {
+        enter_contact_service(app, now);
+        return true;
+    }
     modem_service_power_on();
     /* Codec was put in power-off standby; full re-init (blocking ~500 ms depop
      * ramp -- fine here, the powerup animation follows). The service wrapper

@@ -203,11 +203,11 @@ to distinguish selected policy from page 3's serving-network identity.
 | 70-71 | LCD calibration/sleep and backlight state |
 | 72-73 | storage health and per-unit dirty/degraded/commit evidence |
 | 74-75 | main-loop timing plus core1 queue/heartbeat/flash/audio-recovery and both-core stack high-water evidence |
-| 76 | littlefs partitions, category budgets/file counts and local SMS cleanup |
+| 76 | littlefs partitions, category budgets/file counts, SMS cleanup and persistent corruption counters |
 | 80-81 | soft-off subsystem state and retained wake evidence |
 | 82-88 | sleep readiness, entry, aborts, POWMAN evidence, clocks, blockers, and boot/wake timing |
 
-Page 76 has eight frames. The first shows system/user allocated versus total
+Page 76 has ten frames. The first shows system/user allocated versus total
 KiB, physical user free space, and the recovery reserve. The next five show
 contacts, inbox, outbox, incomplete SMS and OTHER: allocated/budget KiB, file
 count, and rounded-up file-data KiB (including record envelopes). Filesystem
@@ -215,10 +215,16 @@ metadata makes allocated space larger than file data. Free space includes the
 reserve and does not override category budgets. OTHER includes the existing
 call logs, pictures, tones, dictionary and divert records.
 
-The last two frames show mailbox/pending/queue counts, SMS readiness/full state,
+The next two frames show mailbox/pending/queue counts, SMS readiness/full state,
 retention-clock validity, and boot-local expiry/filter/loss counters (`E/F/L`). `F`
 counts controls consumed by the local message store; modem-side filters retain
-their separate counters. Sampling is at most once per five seconds while page
+their separate counters. The final two frames show persistent corruption
+detections: contacts/inbox/outbox (`C/I/O`), pending SMS (`P`), counter save state,
+and startup-fault bits. Each damaged collection/object counts once per boot,
+not once per rescan. `SAVE PENDING` is not yet durable; `SAVE FAILED` is a parked
+commit failure; `UNAVAILABLE` means the health record could not be loaded.
+Boot bits are backend=01, semantic record=02, collection=04, tracking limit=08.
+Sampling is at most once per five seconds while page
 76 is selected and the phone is on, only in the shared storage-safe window.
 Failed samples show `FS NOT READY`; samples deferred
 for more than 15 seconds show `FS STALE`. Neither case reports unknown

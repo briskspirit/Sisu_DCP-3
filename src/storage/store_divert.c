@@ -79,7 +79,7 @@ const store_unit_ops_t g_store_divert_unit_ops = {
     .reset_ram = reset_divert_unit,
     .serialize = serialize_divert_unit,
     .apply = apply_divert_unit,
-    .fallback_missing_or_corrupt = 0,
+    .fallback_missing = 0,
     .name = "call divert",
 };
 

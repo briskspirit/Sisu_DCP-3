@@ -564,7 +564,7 @@ static void test_detach_after_terminal_retains_useful_history(void) {
            BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE);
 }
 
-static void test_invalid_store_record_is_repaired(void) {
+static void test_unreadable_store_record_is_preserved(void) {
     reset_fixture();
     s_get_status = STORE_STATUS_STORAGE_ERROR;
     s_set_calls = 0u;
@@ -572,9 +572,17 @@ static void test_invalid_store_record_is_repaired(void) {
     battery_charge_supervisor_service_snapshot_t service = snapshot();
     assert(service.initialized);
     assert(!service.persistence_pending);
-    assert(service.persistence_requests == 1u);
-    assert(s_set_calls == 1u);
-    assert(!s_stored.active_session_valid);
+    assert(service.storage_unavailable);
+    assert(service.persistence_requests == 0u && s_set_calls == 0u);
+    assert(battery_charge_supervisor_service_boot_inhibit_required());
+    s_board.battery_mv = 1800u;
+    (void)battery_charge_supervisor_service_poll(1000u);
+    assert((s_control.inhibit_owner_mask & CHARGER_INHIBIT_SUPERVISOR) != 0u);
+    assert(s_set_calls == 0u);
+    s_board.charger_connected = false;
+    (void)battery_charge_supervisor_service_poll(2000u);
+    assert((s_control.inhibit_owner_mask & CHARGER_INHIBIT_SUPERVISOR) != 0u);
+    assert(s_set_calls == 0u);
 }
 
 static void test_old_hardware_profile_evidence_is_repaired(void) {
@@ -1306,7 +1314,7 @@ int main(void) {
     test_restore_identity_mismatch_fails_degraded_once();
     test_detached_before_restore_closes_stored_session();
     test_detach_after_terminal_retains_useful_history();
-    test_invalid_store_record_is_repaired();
+    test_unreadable_store_record_is_preserved();
     test_old_hardware_profile_evidence_is_repaired();
     test_configuration_is_explicit_and_idle_only();
     test_prior_capacity_keeps_only_safety_authority_without_soc();

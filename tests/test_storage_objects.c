@@ -484,6 +484,40 @@ static void test_delete_cuts(void) {
     printf("object deletion: %u torn-write cases passed\n", count * 3u);
 }
 
+static void test_payload_crc_does_not_invalidate_scan(void) {
+    fresh();
+    uint32_t bad, good, id;
+    assert(storage_object_allocate(&bad) == STORAGE_RECORD_OK);
+    /* Out-of-line bytes have the application envelope CRC, independently of
+     * littlefs directory CRCs. Flip one data byte without harming metadata. */
+    memset(data, 0x6a, sizeof(data));
+    assert(storage_object_write(STORAGE_OBJECT_INBOX, bad, data, sizeof(data)) == STORAGE_RECORD_OK);
+    assert(storage_object_allocate(&good) == STORAGE_RECORD_OK);
+    assert(storage_object_write(STORAGE_OBJECT_INBOX, good, (const uint8_t *)"healthy", 7u) == STORAGE_RECORD_OK);
+    storage_lfs_deinit();
+    unsigned matches = 0;
+    for (size_t off = 0; off + 1024u <= sizeof(media); off += 4096u) {
+        if (memcmp(media + off + 20u, data, 1000u) == 0) {
+            media[off + 100u] ^= 1u;
+            matches++;
+        }
+    }
+    assert(matches == 1u);
+    reopen();
+    memcpy(baseline, media, sizeof(media));
+    operations = 0;
+    assert(storage_object_scan_begin(STORAGE_OBJECT_INBOX) == STORAGE_RECORD_OK);
+    assert(storage_object_scan_next(&id) == STORAGE_RECORD_OK && id == bad);
+    size_t len;
+    assert(storage_object_read(STORAGE_OBJECT_INBOX, bad, readback, sizeof(readback), &len) == STORAGE_RECORD_CORRUPT);
+    assert(storage_object_scan_next(&id) == STORAGE_RECORD_OK && id == good);
+    assert(storage_object_read(STORAGE_OBJECT_INBOX, good, readback, sizeof(readback), &len) == STORAGE_RECORD_OK);
+    assert(len == 7u && memcmp(readback, "healthy", 7u) == 0);
+    assert(storage_object_scan_next(&id) == STORAGE_RECORD_NOT_FOUND);
+    storage_object_scan_end();
+    assert(operations == 0 && memcmp(media, baseline, sizeof(media)) == 0);
+}
+
 static void test_busy_and_scan(void) {
     fresh();
     uint32_t id, next;
@@ -574,6 +608,7 @@ int main(void) {
     test_allocator_cuts(true);
     test_delete_cuts();
     test_busy_and_scan();
+    test_payload_crc_does_not_invalidate_scan();
     test_accounting();
     test_category_isolation(180u);
     test_category_isolation(514u);

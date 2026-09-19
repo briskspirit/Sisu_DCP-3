@@ -39,6 +39,7 @@
 #include "storage/store_service.h"
 #include "storage/storage_lfs.h"
 #include "storage/storage_partitions.h"
+#include "storage/store_health.h"
 #include "storage/storage_user_space.h"
 #include "services/timebase.h"
 #include "services/usb_service.h"
@@ -241,6 +242,22 @@ static void command_storeinfo(void) {
            (unsigned long)messages.expired_incomplete, messages.retention_clock_valid);
     storage_partition_diag_t info;
     storage_partitions_get_diag(&info);
+    store_diag_snapshot_t health;
+    store_service_get_diag(&health);
+    uint32_t counts[STORAGE_OBJECT_COLLECTION_COUNT];
+    uint32_t health_bit = UINT32_C(1) << STORE_UNIT_STORAGE_HEALTH;
+    printf("[store] startup=%02X unavailable=%08lX system-status=%u user-status=%u objects-status=%u\n",
+           (unsigned)health.boot_faults, (unsigned long)health.unavailable_mask,
+           (unsigned)info.system_status, (unsigned)info.user_status, (unsigned)info.objects_status);
+    if (store_health_get_counts(counts)) {
+        printf("[store] corruption-detections contacts=%lu inbox=%lu outbox=%lu pending=%lu save=%s\n",
+               (unsigned long)counts[STORAGE_OBJECT_CONTACT],
+               (unsigned long)counts[STORAGE_OBJECT_INBOX],
+               (unsigned long)counts[STORAGE_OBJECT_OUTBOX],
+               (unsigned long)counts[STORAGE_OBJECT_PENDING_SMS],
+               (health.degraded_mask & health_bit) ? "failed" :
+               (health.dirty_mask & health_bit) ? "pending" : "durable");
+    } else printf("[store] corruption-detections unavailable\n");
     printf("[store] ready=%u system=%ld/%ld user=%ld/%ld blocks (4096 bytes each)\n",
            info.ready, (long)info.system_used, (long)info.system_blocks,
            (long)info.user_used, (long)info.user_blocks);
@@ -1305,13 +1322,13 @@ static void command_charge(char *args) {
             1u << STORE_UNIT_BATTERY_CHARGE_SUPERVISOR);
         printf("[charge] restore=%s attempts=%lu ok=%lu fail=%lu "
                "persist=%s flash=%s pfail=%lu release=%u\n",
-               service.restore_pending ? "pending" :
+               service.storage_unavailable ? "unavailable" : service.restore_pending ? "pending" :
                    (service.restored_after_reset ? "done" : "none"),
                (unsigned long)service.restore_attempts,
                (unsigned long)service.restore_successes,
                (unsigned long)service.restore_failures,
-               service.persistence_pending ? "pending" : "accepted",
-               (store.dirty_mask & unit_mask) != 0u ? "dirty" : "clean",
+               service.storage_unavailable ? "unavailable" : service.persistence_pending ? "pending" : "accepted",
+               service.storage_unavailable ? "unknown" : (store.dirty_mask & unit_mask) != 0u ? "dirty" : "clean",
                (unsigned long)service.persistence_failures,
                service.release_inhibit_pending ? 1u : 0u);
         printf("[charge] configured policy=%s factor=%u/1000 %s "

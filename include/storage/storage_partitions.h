@@ -6,6 +6,11 @@
 
 typedef struct {
     bool ready;
+    bool system_ready;
+    bool user_ready;
+    storage_record_result_t system_status;
+    storage_record_result_t user_status;
+    storage_record_result_t objects_status;
     int32_t system_blocks;
     int32_t system_used;
     int32_t user_blocks;

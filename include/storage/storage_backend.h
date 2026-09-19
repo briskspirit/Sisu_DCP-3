@@ -14,6 +14,9 @@ typedef enum {
     STORAGE_RECORD_ERROR,
     STORAGE_RECORD_BUSY,
     STORAGE_RECORD_FULL,
+    /* The filesystem read succeeded, but this record's contents are invalid.
+     * Unlike ERROR/BUSY this is safe to isolate while continuing a scan. */
+    STORAGE_RECORD_CORRUPT,
 } storage_record_result_t;
 
 typedef struct storage_backend storage_backend_t;

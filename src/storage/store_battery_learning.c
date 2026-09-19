@@ -65,12 +65,14 @@ store_status_t store_battery_learning_get(
     if (out_state == NULL) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
+    if (!store_service_unit_ready(STORE_UNIT_BATTERY_LEARNING)) return STORE_STATUS_NOT_READY;
     *out_state = s_battery_learning;
     return STORE_STATUS_OK;
 }
 
 store_status_t store_battery_learning_set(
     const battery_learning_persisted_t *state) {
+    if (!store_service_unit_ready(STORE_UNIT_BATTERY_LEARNING)) return STORE_STATUS_NOT_READY;
     if (!battery_learning_persisted_valid(state, NULL)) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
@@ -285,6 +287,6 @@ const store_unit_ops_t g_store_battery_learning_unit_ops = {
     .reset_ram = reset_battery_learning_unit,
     .serialize = serialize_battery_learning_unit,
     .apply = apply_battery_learning_unit,
-    .fallback_missing_or_corrupt = NULL,
+    .fallback_missing = NULL,
     .name = "battery learning",
 };

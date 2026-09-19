@@ -211,7 +211,7 @@ static void request_persist(
 }
 
 static bool supervisor_store_durable(void) {
-    if (s_snapshot.persistence_pending || !store_service_ready()) {
+    if (s_snapshot.storage_unavailable || s_snapshot.persistence_pending || !store_service_ready()) {
         return false;
     }
     store_diag_snapshot_t store;
@@ -602,8 +602,10 @@ static uint32_t service_maintenance_step(
 
 bool battery_charge_supervisor_service_boot_inhibit_required(void) {
     battery_charge_supervisor_persisted_t stored;
-    return store_battery_charge_supervisor_get(&stored) == STORE_STATUS_OK &&
-        battery_charge_supervisor_persisted_valid(&stored) &&
+    /* Unreadable is not an absent stop latch. Only a valid record (including
+     * genuine first-use defaults) can authorize the initial enabled state. */
+    return store_battery_charge_supervisor_get(&stored) != STORE_STATUS_OK ||
+        !battery_charge_supervisor_persisted_valid(&stored) ||
         stored.supervisor_inhibit_latched;
 }
 
@@ -623,6 +625,7 @@ void battery_charge_supervisor_service_init(void) {
         battery_charge_supervisor_revb2_profile();
     bool structurally_valid = status == STORE_STATUS_OK &&
         battery_charge_supervisor_persisted_valid(&stored);
+    s_snapshot.storage_unavailable = !structurally_valid;
     bool has_profile_evidence = structurally_valid &&
         (stored.active_session_valid || stored.last_terminal_valid ||
          stored.configured_policy != BATTERY_CHARGE_POLICY_OBSERVE ||
@@ -656,7 +659,7 @@ void battery_charge_supervisor_service_init(void) {
             BATTERY_CHARGE_MAINTENANCE_WAIT_INHIBIT;
     }
     s_snapshot.initialized = true;
-    if (!valid && !s_incompatible_latch) {
+    if (!valid && !s_incompatible_latch && !s_snapshot.storage_unavailable) {
         request_persist(&s_pending_persisted);
         try_persist();
     }
@@ -667,6 +670,7 @@ bool battery_charge_supervisor_service_release_for_battery_floor(void) {
     if (!s_snapshot.initialized) {
         battery_charge_supervisor_service_init();
     }
+    if (s_snapshot.storage_unavailable) return false;
 
     charger_control_snapshot_t control;
     charger_control_service_get_snapshot(&control);
@@ -709,6 +713,10 @@ bool battery_charge_supervisor_service_release_for_battery_floor(void) {
 uint32_t battery_charge_supervisor_service_poll(uint32_t now_ms) {
     if (!s_snapshot.initialized) {
         battery_charge_supervisor_service_init();
+    }
+    if (s_snapshot.storage_unavailable) {
+        (void)charger_control_service_set_inhibit(CHARGER_INHIBIT_SUPERVISOR, true);
+        return BATTERY_CHARGE_SUPERVISOR_RESULT_NONE;
     }
 
     try_persist();
@@ -1005,7 +1013,7 @@ battery_charge_supervisor_service_configure(
     if (!s_snapshot.initialized) {
         battery_charge_supervisor_service_init();
     }
-    if (!store_service_ready()) {
+    if (!store_service_ready() || s_snapshot.storage_unavailable) {
         return BATTERY_CHARGE_CONFIG_STORE_NOT_READY;
     }
 

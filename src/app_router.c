@@ -38,6 +38,8 @@ bool app_router_handle_event(app_t *app, const input_event_t *event) {
     }
 
     switch (app->route) {
+    case APP_ROUTE_CONTACT_SERVICE:
+        return true;
     case APP_ROUTE_POWERUP:
         return true;
     case APP_ROUTE_POWER_MENU:
@@ -238,6 +240,9 @@ bool app_router_handle_event(app_t *app, const input_event_t *event) {
 
 void app_router_render(const app_t *app, framebuffer_t *fb) {
     switch (app->route) {
+    case APP_ROUTE_CONTACT_SERVICE:
+        render_contact_service(app, fb);
+        break;
     case APP_ROUTE_POWERUP:
         render_powerup(app, fb);
         break;

@@ -31,7 +31,7 @@ void netmon_render_local(uint8_t id, uint8_t frame_index,
         "SET PHONE", "SET SMS", "SET CALL", "SET PROF", "SET CLOCK",
         "SET SYS", "MISSED", "RECEIVED", "DIALLED", "T9 WORDS",
         "PICT SMS", "OWN TONES", "DIVERT", "WARRANTY", "BAT LRN",
-        "CHG SUP",
+        "CHG SUP", "FS HEALTH",
     };
     switch (id) {
     case 40u:
@@ -518,7 +518,7 @@ void netmon_render_local(uint8_t id, uint8_t frame_index,
         break;
     case 73u: {
         uint8_t unit = (uint8_t)(frame_index % (uint8_t)STORE_UNIT_COUNT);
-        uint16_t bit = (uint16_t)(1u << unit);
+        uint32_t bit = UINT32_C(1) << unit;
         netmon_render_linef(out, 0u, "U%02u %s", (unsigned)unit, STORE_UNIT_NAMES[unit]);
         netmon_render_linef(out, 1u, "DIR %u DEG%u",
               (l->storage.dirty_mask & bit) != 0u ? 1u : 0u,
@@ -621,11 +621,25 @@ void netmon_render_local(uint8_t id, uint8_t frame_index,
             netmon_render_linef(out, 1u, "IN%u OUT%u", (unsigned)s->inbox, (unsigned)s->outbox);
             netmon_render_linef(out, 2u, "PART %u Q%u", (unsigned)s->pending, (unsigned)s->queued);
             netmon_render_linef(out, 3u, "CLOCK %s", s->retention_clock_valid ? "OK" : "UNSET");
-        } else {
+        } else if (frame_index == 7u) {
             netmon_render_linef(out, 0u, "SMS CLEANUP");
             netmon_render_linef(out, 1u, "E %lu", (unsigned long)s->expired);
             netmon_render_linef(out, 2u, "F %lu", (unsigned long)s->filtered);
             netmon_render_linef(out, 3u, "L %lu", (unsigned long)s->lost);
+        } else if (!s->health_valid) {
+            netmon_render_linef(out, 0u, "FS ERRORS");
+            netmon_render_linef(out, 1u, "UNAVAILABLE");
+        } else if (frame_index == 8u) {
+            netmon_render_linef(out, 0u, "FS ERRORS");
+            netmon_render_linef(out, 1u, "C %lu", (unsigned long)s->corrupt[STORAGE_OBJECT_CONTACT]);
+            netmon_render_linef(out, 2u, "I %lu", (unsigned long)s->corrupt[STORAGE_OBJECT_INBOX]);
+            netmon_render_linef(out, 3u, "O %lu", (unsigned long)s->corrupt[STORAGE_OBJECT_OUTBOX]);
+        } else {
+            netmon_render_linef(out, 0u, "PART ERRORS");
+            netmon_render_linef(out, 1u, "P %lu", (unsigned long)s->corrupt[STORAGE_OBJECT_PENDING_SMS]);
+            netmon_render_linef(out, 2u, "SAVE %s", s->health_failed ? "FAILED" :
+                                s->health_dirty ? "PENDING" : "OK");
+            netmon_render_linef(out, 3u, "BOOT %02X", (unsigned)s->boot_faults);
         }
         break;
     }

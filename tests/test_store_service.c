@@ -21,6 +21,7 @@
 #include "services/lcd_calibration.h"
 #include "storage/nvm_hal.h"
 #include "storage/store_service.h"
+#include "storage/store_health.h"
 #define TEST_LOGICAL_SLOT_SIZE 4096u
 #include "storage/storage_lfs.h"
 #include "storage/store_service_internal.h"
@@ -342,6 +343,9 @@ static store_status_t dirty_exact_unit(store_unit_t unit) {
             supervisor.charge_generation++;
             return store_battery_charge_supervisor_set(&supervisor);
         }
+        case STORE_UNIT_STORAGE_HEALTH:
+            store_health_note_corrupt(STORAGE_OBJECT_CONTACT, 42u);
+            return STORE_STATUS_OK;
         default:
             return STORE_STATUS_INVALID_ARGUMENT;
     }
@@ -379,6 +383,7 @@ static void test_unit_handler_registry(void) {
         &g_store_warranty_unit_ops,
         &g_store_battery_learning_unit_ops,
         &g_store_battery_charge_supervisor_unit_ops,
+        &g_store_health_unit_ops,
     };
     static const uint8_t expected_instances[STORE_UNIT_COUNT] = {
         0u, 1u, 2u, 3u, 4u, 5u,
@@ -403,7 +408,7 @@ static void test_unit_handler_registry(void) {
                     "unit binding has a complete mandatory contract");
         bool needs_fallback = unit == STORE_UNIT_PICTURE_MESSAGES ||
                               unit == STORE_UNIT_SERVICE_WARRANTY;
-        assert_true((binding->ops->fallback_missing_or_corrupt != 0) ==
+        assert_true((binding->ops->fallback_missing != 0) ==
                         needs_fallback,
                     "only fallback-owning domains expose a fallback handler");
     }
@@ -1525,6 +1530,7 @@ static const wire_expectation_t WIRE_EXPECTED[STORE_UNIT_COUNT] = {
     [STORE_UNIT_BATTERY_LEARNING] = {96u, UINT64_C(0x3c6dd9f41c1206b2)},
     [STORE_UNIT_BATTERY_CHARGE_SUPERVISOR] = {
         128u, UINT64_C(0x08158b2f629793cb)},
+    [STORE_UNIT_STORAGE_HEALTH] = {24u, UINT64_C(0xc05c645ae8186054)},
 };
 
 static void test_battery_learning_payload_and_persistence(void) {
@@ -2096,16 +2102,78 @@ static void test_default_initialization_power_cuts(void) {
            operation_count);
 }
 
-static void test_corrupt_picture_payload_uses_seeded_fallback(void) {
+static void test_storage_health_persistence(void) {
+    fresh_store();
+    uint32_t counts[STORAGE_OBJECT_COLLECTION_COUNT];
+    for (unsigned c = 0; c < STORAGE_OBJECT_COLLECTION_COUNT; c++) {
+        store_health_note_corrupt((storage_object_collection_t)c, 23u);
+        store_health_note_corrupt((storage_object_collection_t)c, 23u);
+    }
+    assert(store_health_get_counts(counts));
+    for (unsigned c = 0; c < STORAGE_OBJECT_COLLECTION_COUNT; c++) assert(counts[c] == 1u);
+    flush_commits();
+    assert(store_service_init() == STORE_STATUS_OK);
+    assert(store_health_get_counts(counts));
+    for (unsigned c = 0; c < STORAGE_OBJECT_COLLECTION_COUNT; c++) assert(counts[c] == 1u);
+    store_health_note_corrupt(STORAGE_OBJECT_CONTACT, 23u);
+    assert(store_health_get_counts(counts) && counts[0] == 2u);
+    assert(!store_service_contact_service_required());
+
+    uint8_t payload[24] = {0x53, 0x4c, 0x48, 0x31, 1};
+    memset(payload + 8, 0xff, 16);
+    assert(write_unit_fixture(STORE_UNIT_STORAGE_HEALTH, payload, sizeof(payload)));
+    assert(store_service_init() == STORE_STATUS_OK);
+    store_health_note_corrupt(STORAGE_OBJECT_CONTACT, 99u);
+    assert(store_health_get_counts(counts) && counts[0] == UINT32_MAX);
+    assert(write_unit_fixture(STORE_UNIT_STORAGE_HEALTH, payload, 1u));
+    assert(store_service_init() == STORE_STATUS_STORAGE_ERROR);
+    assert(!store_health_get_counts(counts));
+    store_health_note_corrupt(STORAGE_OBJECT_CONTACT, 99u);
+    flush_commits();
+    size_t len;
+    assert(read_unit_payload(STORE_UNIT_STORAGE_HEALTH, payload, sizeof(payload), &len) && len == 1u);
+}
+
+static void test_critical_corruption_is_not_defaulted(void) {
+    for (store_unit_t unit = STORE_UNIT_BATTERY_LEARNING;
+         unit <= STORE_UNIT_BATTERY_CHARGE_SUPERVISOR; unit++) {
+        fresh_store();
+        uint8_t bad[] = {0x01};
+        assert(write_unit_fixture(unit, bad, sizeof(bad)));
+        assert(store_service_init() == STORE_STATUS_STORAGE_ERROR);
+        assert(store_service_contact_service_required());
+        battery_learning_persisted_t learning;
+        battery_charge_supervisor_persisted_t charging;
+        assert(store_battery_learning_get(&learning) ==
+               (unit == STORE_UNIT_BATTERY_LEARNING ? STORE_STATUS_NOT_READY : STORE_STATUS_OK));
+        assert(store_battery_charge_supervisor_get(&charging) ==
+               (unit == STORE_UNIT_BATTERY_CHARGE_SUPERVISOR ? STORE_STATUS_NOT_READY : STORE_STATUS_OK));
+        assert(store_engine_mark_dirty(unit) == STORE_STATUS_NOT_READY);
+        flush_commits();
+        uint8_t readback[16]; size_t len;
+        assert(read_unit_payload(unit, readback, sizeof(readback), &len));
+        assert(len == sizeof(bad) && memcmp(readback, bad, len) == 0);
+    }
+}
+
+static void test_corrupt_picture_payload_is_preserved(void) {
     static const uint8_t corrupt_payload[] = {0x50u, 0x49u, 0x43u};
     fresh_store();
     assert_true(write_unit_fixture(STORE_UNIT_PICTURE_MESSAGES,
                                    corrupt_payload, sizeof(corrupt_payload)),
                 "write corrupt picture journal");
-    assert_true(store_service_init() == STORE_STATUS_OK,
+    assert_true(store_service_init() == STORE_STATUS_STORAGE_ERROR,
                 "re-init with corrupt picture payload");
-    assert_eq_u32(4u, store_picture_message_count(),
-                  "corrupt picture payload seeds built-in slots");
+    assert_true(store_service_contact_service_required() &&
+                !store_service_unit_ready(STORE_UNIT_PICTURE_MESSAGES),
+                "corrupt picture block requires service, never seeded fallback");
+    uint8_t saved[32]; size_t len;
+    assert_true(read_unit_payload(STORE_UNIT_PICTURE_MESSAGES, saved, sizeof(saved), &len) &&
+                len == sizeof(corrupt_payload) && memcmp(saved, corrupt_payload, len) == 0,
+                "damaged picture payload preserved");
+    battery_charge_supervisor_persisted_t supervisor;
+    assert_true(store_battery_charge_supervisor_get(&supervisor) == STORE_STATUS_OK,
+                "healthy supervisor record loads despite another damaged unit");
 }
 
 static void test_corrupt_settings_payload_is_atomic(void) {
@@ -2120,7 +2188,7 @@ static void test_corrupt_settings_payload_is_atomic(void) {
     assert_true(write_unit_fixture(STORE_UNIT_SETTINGS_SMS,
                                    sms_payload, sizeof(sms_payload)),
                 "write truncated SMS settings journal");
-    assert_true(store_service_init() == STORE_STATUS_OK,
+    assert_true(store_service_init() == STORE_STATUS_STORAGE_ERROR,
                 "re-init with truncated SMS settings payload");
     uint8_t profile = 0xffu;
     assert_true(store_setting_get_u8(STORE_SETTING_SMS_DEFAULT_PROFILE,
@@ -2133,15 +2201,15 @@ static void test_corrupt_settings_payload_is_atomic(void) {
         0x31u, 0x54u, 0x45u, 0x53u, /* SETTINGS_MAGIC */
         0x01u, 0x00u,               /* version */
         0x00u, 0x00u,               /* phonebook domain, zero settings */
-        0x4fu, 0x54u, 0x02u,        /* tone block, two records */
-        0x2au, 0x00u, 0x01u, 0x07u, /* contact 42 -> tone 7; second absent */
+        0x32u, 0x54u, 0x02u,        /* tone block, two records */
+        0x2au, 0x00u, 0x00u, 0x00u, 0x01u, 0x07u, /* contact 42 -> tone 7; second absent */
     };
     fresh_store();
     assert_true(write_unit_fixture(STORE_UNIT_SETTINGS_PHONEBOOK,
                                    phonebook_payload,
                                    sizeof(phonebook_payload)),
                 "write truncated phonebook tone journal");
-    assert_true(store_service_init() == STORE_STATUS_OK,
+    assert_true(store_service_init() == STORE_STATUS_STORAGE_ERROR,
                 "re-init with truncated phonebook tone payload");
     assert_eq_u32(STORE_CONTACT_TONE_PRESET,
                   store_phonebook_get_contact_tone_value(42u),
@@ -2355,7 +2423,7 @@ static void test_serializer_failure_is_not_stale_busy(void) {
         .reset_ram = 0,
         .serialize = fail_before_hal_serialize,
         .apply = 0,
-        .fallback_missing_or_corrupt = 0,
+        .fallback_missing = 0,
         .name = "failing test unit",
     };
     static const store_unit_binding_t FAILING_BINDING = {
@@ -2548,7 +2616,9 @@ int main(void) {
     test_persistent_wire_contract();
     test_battery_learning_payload_and_persistence();
     test_charge_supervisor_payload_and_persistence();
-    test_corrupt_picture_payload_uses_seeded_fallback();
+    test_corrupt_picture_payload_is_preserved();
+    test_storage_health_persistence();
+    test_critical_corruption_is_not_defaulted();
     test_corrupt_settings_payload_is_atomic();
     test_standby_readiness_tracks_persistence();
     test_commit_failure_cap_and_no_starvation();

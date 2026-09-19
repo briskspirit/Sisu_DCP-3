@@ -66,6 +66,7 @@ typedef enum {
     STORE_UNIT_SERVICE_WARRANTY,
     STORE_UNIT_BATTERY_LEARNING,
     STORE_UNIT_BATTERY_CHARGE_SUPERVISOR,
+    STORE_UNIT_STORAGE_HEALTH,
     STORE_UNIT_COUNT
 } store_unit_t;
 
@@ -75,8 +76,10 @@ typedef struct {
     bool ready;
     bool commit_active;
     bool defer_active;
-    uint16_t dirty_mask;
-    uint16_t degraded_mask;
+    uint32_t dirty_mask;
+    uint32_t degraded_mask;
+    uint32_t unavailable_mask;
+    uint8_t boot_faults;
     uint8_t current_unit;
     uint8_t last_unit;
     uint8_t next_scan_unit;
@@ -304,7 +307,19 @@ typedef struct {
 } store_warranty_state_t;
 
 store_status_t store_service_init(void);
+/* Commit engine availability, not proof that every unit loaded. Callers that
+ * authorize hardware state must check their own unit; see boot_faults too. */
 bool store_service_ready(void);
+bool store_service_unit_ready(store_unit_t unit);
+enum {
+    STORE_BOOT_FAULT_BACKEND = 1u,
+    STORE_BOOT_FAULT_RECORD = 2u,
+    STORE_BOOT_FAULT_COLLECTION = 4u,
+    STORE_BOOT_FAULT_TRACKING = 8u,
+};
+/* Latched until reboot. Does not disable reads/commits of healthy units. */
+void store_service_require_service(uint8_t faults);
+bool store_service_contact_service_required(void);
 /* Powered-on dormant gate: true when no healthy journal unit still needs a
  * flash commit. Dirty units already parked as degraded do not pin the phone
  * awake forever, matching the power-off flush policy. */

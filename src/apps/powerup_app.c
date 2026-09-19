@@ -8,6 +8,7 @@
 #include "ui/status_chrome.h"
 #include "storage/store_service.h"
 #include "services/timebase.h"
+#include "services/strings.h"
 
 #define POWERUP_ALL_PIXELS_MS 1000u
 #define POWERUP_BLANK_PLAIN_MS 550u
@@ -27,6 +28,9 @@
 #define POWERUP_BOOT_FRAME_DELAY_MS 200u
 #define POWERUP_BLANK_BATTERY_POST_MS 480u
 #define POWERUP_WELCOME_NOTE_MS 5136u
+/* ROM 0x23491c..0x234924 arms timer 0x19 with 0x80 after failed self-test.
+ * Use the same 8 ms timer model as the other ROM-derived UI timers. */
+#define CONTACT_SERVICE_DELAY_MS (128u * 8u)
 
 #ifndef WELCOME_NOTE_TEXT
 #define WELCOME_NOTE_TEXT ""
@@ -49,6 +53,12 @@ void start_powerup_no_logo(app_t *app, uint32_t now_ms) {
 }
 
 static void start_powerup_common(app_t *app, uint32_t now_ms, bool skip_boot_logo) {
+    /* Storage qualification precedes normal UI startup, like the ROM's
+     * self-test gate. Never show the success logo before a known fatal fault. */
+    if (store_service_contact_service_required()) {
+        enter_contact_service(app, now_ms);
+        return;
+    }
     app->route = APP_ROUTE_POWERUP;
     app->backlight_force_active = false;
     app->backlight_force_on = false;
@@ -63,6 +73,35 @@ static void start_powerup_common(app_t *app, uint32_t now_ms, bool skip_boot_log
     if (store_service_ready()) {
         store_setting_get_text(STORE_SETTING_SYSTEM_WELCOME_NOTE, app->welcome_note, sizeof(app->welcome_note));
     }
+}
+
+void enter_contact_service(app_t *app, uint32_t now_ms) {
+    app->route = APP_ROUTE_CONTACT_SERVICE;
+    app->powerup_stage = APP_POWERUP_BLANK;
+    app->powerup_deadline_ms = now_ms + CONTACT_SERVICE_DELAY_MS;
+    app->backlight_force_active = false;
+    app->backlight_force_on = false;
+    app->backlight_activity_pending = true;
+    app->backlight_activity_ms = now_ms;
+    app->dirty = true;
+}
+
+bool tick_contact_service(app_t *app, uint32_t now_ms) {
+    if (app->route != APP_ROUTE_CONTACT_SERVICE || app->powerup_stage == APP_POWERUP_DONE ||
+        time_diff_ms(now_ms, app->powerup_deadline_ms) < 0) return false;
+    app->powerup_stage = APP_POWERUP_DONE;
+    app->dirty = true;
+    return true;
+}
+
+void render_contact_service(const app_t *app, framebuffer_t *fb) {
+    fb_clear(fb, false);
+    if (app->powerup_stage != APP_POWERUP_DONE) return;
+    /* ROM 0x237b62/0x237b6c: x=13, baselines=15/32, embedded FS4
+     * (0x2e0a24). Its ascent is 5 pixels; our blitter takes the top row. */
+    const font_t *font = asset_font(FONT_FS4);
+    fb_text(fb, font, ts(SID_CONTACT_SERVICE_CONTACT), 13, 10, true, 71);
+    fb_text(fb, font, ts(SID_CONTACT_SERVICE_SERVICE), 13, 27, true, 71);
 }
 
 bool tick_powerup(app_t *app, uint32_t now_ms) {

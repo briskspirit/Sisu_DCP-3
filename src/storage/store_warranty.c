@@ -254,6 +254,6 @@ const store_unit_ops_t g_store_warranty_unit_ops = {
     .reset_ram = reset_warranty_unit,
     .serialize = serialize_warranty_unit,
     .apply = apply_warranty_unit,
-    .fallback_missing_or_corrupt = fallback_warranty_unit,
+    .fallback_missing = fallback_warranty_unit,
     .name = "service warranty",
 };

@@ -27,6 +27,7 @@
 #include "services/core1_services.h"
 #include "services/timebase.h"
 #include "ui/ui.h"
+#include "storage/store_service.h"
 
 void app_runtime_init(app_t *app) {
     app->route = APP_ROUTE_POWER_OFF;
@@ -51,6 +52,18 @@ void app_runtime_init(app_t *app) {
 
 bool app_runtime_tick(app_t *app, uint32_t now_ms) {
     bool changed = false;
+    if (store_service_contact_service_required()) {
+        if (app->route != APP_ROUTE_POWER_OFF && app->route != APP_ROUTE_CONTACT_SERVICE) {
+            enter_contact_service(app, now_ms);
+            changed = true;
+        }
+        /* No alarm, incoming-call, SMS or clock editor can escape this state.
+         * Battery protection and the ordinary power-off path remain live. */
+        changed |= tick_power_off(app);
+        changed |= tick_contact_service(app, now_ms);
+        changed |= poll_battery(app, now_ms);
+        return changed;
+    }
 
     if (app->route == APP_ROUTE_POWERUP && tick_powerup(app, now_ms)) {
         changed = true;

@@ -10,6 +10,8 @@ enum {
     SID_LOCAL_CONTACT_COUNT,
     SID_LOCAL_STORAGE_UNAVAILABLE,
     SID_DATA_MESSAGE,
+    SID_CONTACT_SERVICE_CONTACT,
+    SID_CONTACT_SERVICE_SERVICE,
 };
 
 /* UI localization by v6.00 string id (SID), exactly like the ROM: each UI site

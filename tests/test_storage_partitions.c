@@ -6,6 +6,7 @@
 #include "storage/storage_layout.h"
 #include "storage/storage_lfs.h"
 #include "storage/storage_partitions.h"
+#include "storage/storage_objects.h"
 
 static uint8_t media[STORAGE_RESERVED_BYTES], saved[STORAGE_RESERVED_BYTES];
 static uint8_t data[STORAGE_RECORD_MAX_PAYLOAD], readback[STORAGE_RECORD_MAX_PAYLOAD];
@@ -165,6 +166,39 @@ static void test_no_legacy_import(void) {
     assert(operations == 0u && memcmp(saved, media, sizeof(media)) == 0);
 }
 
+static void test_failed_volume_keeps_other_volume_readable(void) {
+    for (unsigned failed = 0; failed < 2; failed++) {
+        seed();
+        storage_lfs_deinit();
+        unsigned offset = failed == 0 ? 0u : STORAGE_SYSTEM_BYTES;
+        unsigned size = failed == 0 ? STORAGE_SYSTEM_BYTES : STORAGE_USER_BYTES;
+        memset(media + offset, 0xa5, size);
+        memcpy(saved, media, sizeof(media));
+        operations = 0;
+        assert(storage_partitions_open(&router, &system_hal, &user_hal) == STORAGE_RECORD_ERROR);
+        assert(operations == 0 && memcmp(saved, media, sizeof(media)) == 0);
+        unsigned good = failed == 0 ? 6u : 15u;
+        fill(good, sizes[good]);
+        verify_record(&router, (uint16_t)(0x3210u + good), data, sizes[good]);
+        storage_partition_diag_t diag;
+        storage_partitions_get_diag(&diag);
+        assert(!diag.ready && diag.system_ready == (failed != 0) &&
+               diag.user_ready == (failed == 0));
+        size_t len;
+        uint16_t bad = failed == 0 ? 0x3210u : 0x3216u;
+        assert(router.read(&router, bad, readback, sizeof(readback), &len) == STORAGE_RECORD_ERROR);
+        assert(router.write(&router, bad, data, 10u) == STORAGE_RECORD_ERROR);
+        assert(memcmp(saved, media, sizeof(media)) == 0);
+    }
+    seed();
+    assert(storage_partitions_open(&router, &system_hal, NULL) == STORAGE_RECORD_ERROR);
+    fill(15u, sizes[15]);
+    verify_record(&router, 0x321fu, data, sizes[15]);
+    for (unsigned retry = 0; retry < 3; retry++) {
+        assert(storage_object_scan_begin(STORAGE_OBJECT_INBOX) == STORAGE_RECORD_ERROR);
+    }
+}
+
 static unsigned fill_volume(storage_backend_t *backend) {
     memset(data, 0x6a, sizeof(data));
     unsigned count = 0;
@@ -292,6 +326,7 @@ static void test_split_update_cuts(void) {
 int main(void) {
     test_fresh_formats();
     test_no_legacy_import();
+    test_failed_volume_keeps_other_volume_readable();
     test_full_and_isolation();
     test_split_update_cuts();
     storage_lfs_deinit();

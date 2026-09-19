@@ -9,7 +9,7 @@ Rev B2 reserves the last 448 KiB of internal flash for two littlefs volumes:
 | System | `0x10190000..0x1019ffff` | 64 KiB | Settings, board identity, battery and charge state |
 | User | `0x101a0000..0x101fffff` | 384 KiB | Call lists, T9, pictures, tones, divert history, contacts, SMS |
 
-The build guard protects both regions. All sixteen existing persistent units
+The build guard protects both regions. All seventeen persistent units
 use littlefs. The old journal's flash allocation has been reclaimed. Its code
 is retained for a possible FRAM backend, but is not linked into normal firmware.
 Contacts and logical SMS are separate local files, independent of SIM or
@@ -49,7 +49,7 @@ normal audio deferral to exercise the flash/DMA handshake.
 Host tests interrupt each program/erase boundary before, halfway through, and
 after the media change. They cover inline records, empty records, maximum-sized
 records, grow/shrink replacements, cuts during recovery, and initialization
-of all sixteen default records. Other cases cover full media, repeated remounts, allocation
+of all seventeen default records. Other cases cover full media, repeated remounts, allocation
 churn, transient busy/error recovery, corruption handling, HAL bounds and
 critical-section ordering. Split-volume tests interrupt initial formatting,
 verify that updates leave the other volume byte-identical, and fill both volumes
@@ -88,6 +88,51 @@ host tests; additional external live reception was not qualified in this run.
 The loopback also exposed a separate, pre-existing outgoing character-encoding
 bug, subsequently fixed in the Telit adapter. See
 [outgoing character encoding](sms_direct_delivery_design.md#outgoing-character-encoding).
+
+## Startup Failure Handling
+
+Both volumes are qualified independently before normal phone startup. A failed
+mount, structural collection error, unreadable semantic record, or rejected
+record payload latches a service fault. The bytes remain intact; unavailable
+units cannot be committed over with their RAM defaults. Loading continues for
+other units, so a user-volume fault cannot hide the system volume's charge-stop
+latch. An unreadable charge-supervisor record keeps charging inhibited. Missing
+records use defaults; an ordinary FULL result when saving them stays a pending
+write, not a corruption diagnosis.
+
+An individually malformed contact or SMS is excluded from the RAM index, not
+deleted or rewritten. Healthy neighbours remain available. Corrupt pending SMS
+are also excluded from expiry cleanup. Contact-binding pruning is suppressed
+when damaged contacts exist. Filesystem/I/O errors are not treated as individual
+bad records: an incomplete scan cannot masquerade as a healthy empty list.
+
+System record `3220` holds four saturating 32-bit corruption-detection counters:
+contacts, inbox, outbox and incomplete SMS. A given collection/object ID counts
+once per boot, including repeated scans; a later boot detecting the same damage
+counts another observation. This is not a count of unique lifetime failures.
+Deduplication uses 10 KiB of bounded RAM. Exhausting that diagnostic bound also
+requires service. Counters use the normal atomic record writer; NetMonitor 76
+and `storeinfo` distinguish durable, pending, failed and unavailable evidence.
+Power loss before a counter commit can lose that observation, but the preserved
+file is detected again next boot.
+
+On a power-on attempt with a latched fault, the UI takes the dedicated
+`CONTACT SERVICE` startup route instead of starting the modem or showing the
+success logo. It cannot be dismissed by normal keys or replaced by messages,
+calls, alarms, or clock setup. Power-off and battery protection remain live.
+Battery insertion or USB attachment alone does not turn on the screen.
+
+The v6.00 ROM's failing self-test branch at `0x23491c..0x234924` arms timer
+`0x19` with `0x80` ticks. We use the existing 8 ms UI timer model: a 1,024 ms
+blank interval after the failed power-on gate, then the persistent screen.
+The draw path at `0x237b62..0x237b76` uses the embedded FS4 font at `0x2e0a24`,
+x=13 and baselines 15/32 (top rows 10/27 in our framebuffer). It draws uppercase
+`CONTACT` and `SERVICE`, with no icon, softkey, status bars or dismissal timer.
+These ROM literals are outside PPM; our string service exposes them centrally.
+All 4,032 rendered pixels were compared with glyphs read directly from the ROM.
+The host tests pin the delay boundary and uptime wrap. This reproduces the UI
+timer model and startup phase, not the original hardware's self-test execution
+time from battery insertion.
 
 ## User Space Budgets
 
@@ -284,6 +329,7 @@ Each unit is one independently replaced record:
 - charge supervisor: frozen charge-generation accounting, policy/factor trust,
   latest terminal summary, qualified-FULL authority, and durable `/CE` stop and
   attached-maintenance latches
+- storage health: corruption-detection counters for contacts and three SMS collections
 
 The non-resettable Life timer lives in the settings/calls unit beside the four
 ordinary duration counters. This matches v6.00's call-accounting ownership and
@@ -291,7 +337,7 @@ lets a completed call persist all five values in one record update.
 
 The flash budget guard protects the combined 448 KiB reservation, leaving
 1600 KiB for firmware. The unit-count guard
-preserves the legacy ID/order contract and 16-bit diagnostics mask. Small
+preserves the legacy ID/order contract and uses a 32-bit diagnostics mask. Small
 records share filesystem metadata blocks instead of owning 8 KiB sector pairs.
 
 Battery learning occupies unit 14 and the charge supervisor unit 15. The charge

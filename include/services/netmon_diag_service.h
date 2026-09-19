@@ -12,6 +12,7 @@
 #include "services/stack_monitor.h"
 #include "storage/store_service.h"
 #include "storage/storage_user_space.h"
+#include "storage/storage_objects.h"
 
 typedef struct {
     bool codec_ready;
@@ -203,6 +204,9 @@ typedef struct {
     uint8_t queued;
     bool messages_ready, messages_full, retention_clock_valid;
     uint32_t expired, filtered, lost;
+    uint32_t corrupt[STORAGE_OBJECT_COLLECTION_COUNT];
+    bool health_valid, health_dirty, health_failed;
+    uint8_t boot_faults;
 } netmon_storage_diag_t;
 
 typedef struct {

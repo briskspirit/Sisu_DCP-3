@@ -322,6 +322,6 @@ const store_unit_ops_t g_store_calls_unit_ops = {
     .reset_ram = reset_calls_unit,
     .serialize = serialize_calls_unit,
     .apply = apply_calls_unit,
-    .fallback_missing_or_corrupt = 0,
+    .fallback_missing = 0,
     .name = "calls",
 };

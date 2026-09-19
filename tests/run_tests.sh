@@ -819,7 +819,7 @@ run test_phonebook_service src/services/phonebook_service.c src/storage/storage_
 run test_message_service src/services/message_service.c src/services/message_file_codec.c src/services/sms_picture_codec.c src/services/sms_deliver_codec.c src/services/sms_vvm_filter.c src/services/sms_control_filter.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_powercut    src/diag/storage_powercut_test.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I src/storage -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_partitions  src/storage/storage_partitions.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
-run test_store_service       src/storage/store_calls.c src/storage/store_battery_learning.c src/storage/store_battery_charge_supervisor.c src/storage/store_service.c src/storage/store_divert.c src/storage/store_pictures.c src/storage/store_settings.c src/storage/store_t9.c src/storage/store_tones.c src/storage/store_warranty.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c src/services/battery_learning_logic.c src/services/battery_charge_supervisor_logic.c src/services/battery_charge_logic.c src/services/sms_picture_codec.c -I src -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
+run test_store_service       src/storage/store_calls.c src/storage/store_battery_learning.c src/storage/store_battery_charge_supervisor.c src/storage/store_health.c src/storage/store_service.c src/storage/store_divert.c src/storage/store_pictures.c src/storage/store_settings.c src/storage/store_t9.c src/storage/store_tones.c src/storage/store_warranty.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c src/services/battery_learning_logic.c src/services/battery_charge_supervisor_logic.c src/services/battery_charge_logic.c src/services/sms_picture_codec.c -I src -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_t9_service          src/services/t9_service.c "$GENERATED_SRC_DIR/t9_ldb.c"
 run test_phone_match         src/services/phone_match.c
 run test_clock_alarm_logic   src/apps/clock_alarm_logic.c
@@ -836,6 +836,7 @@ run test_profiles_app       src/apps/profiles_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_settings_restore   src/apps/settings_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_power_app          src/apps/power_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_powerup_app        src/apps/powerup_app.c src/audio/audio_levels.c "${DEAD_CODE_FLAGS[@]}"
+run test_contact_service_render src/apps/powerup_app.c src/ui/framebuffer.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c" "${DEAD_CODE_FLAGS[@]}"
 run test_snake_app          src/apps/snake_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_display_wait        src/apps/dialogs_app.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c "$GENERATED_SRC_DIR/assets_data.c" "${DEAD_CODE_FLAGS[@]}"
 run test_calculator_app      src/apps/calculator_app.c src/services/key_utils.c "${DEAD_CODE_FLAGS[@]}"

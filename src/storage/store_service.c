@@ -8,8 +8,8 @@
 #include "services/timebase.h"
 
 /* Domain codecs use stable record IDs, independently of filesystem layout. */
-_Static_assert(STORE_UNIT_COUNT <= 16,
-               "store diagnostics use 16-bit dirty/degraded masks");
+_Static_assert(STORE_UNIT_COUNT <= 32,
+               "store diagnostics use 32-bit unit masks");
 
 static store_commit_result_t commit_unit(store_unit_t unit);
 static bool load_unit(store_unit_t unit);
@@ -33,6 +33,7 @@ static const store_unit_binding_t STORE_UNIT_BINDINGS[STORE_UNIT_COUNT] = {
     [STORE_UNIT_BATTERY_LEARNING] = {&g_store_battery_learning_unit_ops, 0u},
     [STORE_UNIT_BATTERY_CHARGE_SUPERVISOR] = {
         &g_store_battery_charge_supervisor_unit_ops, 0u},
+    [STORE_UNIT_STORAGE_HEALTH] = {&g_store_health_unit_ops, 0u},
 };
 
 _Static_assert(sizeof(STORE_UNIT_BINDINGS) / sizeof(STORE_UNIT_BINDINGS[0]) ==
@@ -57,6 +58,8 @@ static uint8_t s_commit_scan_start;
  * every change, yet a transiently-parked unit still self-heals without a reboot. */
 static uint32_t s_park_rearm_base_ms;
 static bool s_ready;
+static uint32_t s_available_units;
+static uint8_t s_boot_faults;
 static uint32_t s_commit_defer_until_ms;
 static uint32_t s_last_commit_ms; /* base for the min-interval pace (elapsed-since,
                                    * wrap-safe -- replaces an absolute next-commit
@@ -88,6 +91,9 @@ const store_unit_binding_t *store_engine_unit_binding(store_unit_t unit) {
 
 store_status_t store_service_init(void) {
     s_ready = false;
+    s_available_units = 0u;
+    s_boot_faults = 0u;
+    memset(&s_backend, 0, sizeof(s_backend));
     for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
         const store_unit_binding_t *binding = store_engine_unit_binding(unit);
         if (binding == 0 || binding->ops == 0 ||
@@ -108,30 +114,42 @@ store_status_t store_service_init(void) {
     memset(&s_diag, 0, sizeof(s_diag));
     s_diag.current_unit = STORE_DIAG_NO_UNIT;
     s_diag.last_unit = STORE_DIAG_NO_UNIT;
-    if (storage_backend_open(&s_backend) != STORAGE_RECORD_OK) {
-        s_ready = false;
-        s_diag.ready = false;
+    storage_record_result_t opened = storage_backend_open(&s_backend);
+    if (opened != STORAGE_RECORD_OK) {
+        store_service_require_service(STORE_BOOT_FAULT_BACKEND);
         LOGW("store", "record backend unavailable; media left intact");
+    }
+    if (s_backend.read == NULL || s_backend.write == NULL) {
         return STORE_STATUS_STORAGE_ERROR;
     }
 
     for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
-        if (!load_unit(unit)) {
+        if (load_unit(unit)) {
+            s_available_units |= UINT32_C(1) << unit;
+        } else {
+            store_service_require_service(STORE_BOOT_FAULT_RECORD);
             LOGE("store", "record %u unavailable", (unsigned)unit);
-            return STORE_STATUS_STORAGE_ERROR;
         }
     }
-    store_warranty_post_load();
+    if (store_service_unit_ready(STORE_UNIT_SERVICE_WARRANTY)) store_warranty_post_load();
 
     s_ready = true;
     s_diag.ready = true;
     LOGI("store", "record backend ready; %u units", (unsigned)STORE_UNIT_COUNT);
-    return STORE_STATUS_OK;
+    return s_boot_faults == 0u ? STORE_STATUS_OK : STORE_STATUS_STORAGE_ERROR;
 }
 
 bool store_service_ready(void) {
     return s_ready;
 }
+
+bool store_service_unit_ready(store_unit_t unit) {
+    return (unsigned)unit < STORE_UNIT_COUNT &&
+        (s_available_units & (UINT32_C(1) << unit)) != 0u;
+}
+
+void store_service_require_service(uint8_t faults) { s_boot_faults |= faults; }
+bool store_service_contact_service_required(void) { return s_boot_faults != 0u; }
 
 bool store_service_standby_ready(void) {
     if (!s_ready) {
@@ -155,6 +173,8 @@ void store_service_get_diag(store_diag_snapshot_t *out) {
     }
     store_diag_snapshot_t snapshot = s_diag;
     snapshot.ready = s_ready;
+    snapshot.boot_faults = s_boot_faults;
+    snapshot.unavailable_mask = (UINT32_MAX >> (32u - STORE_UNIT_COUNT)) & ~s_available_units;
     snapshot.next_scan_unit = s_commit_scan_start;
     snapshot.defer_active =
         (uint32_t)(s_commit_defer_until_ms - time_ms()) <=
@@ -163,10 +183,10 @@ void store_service_get_diag(store_diag_snapshot_t *out) {
     snapshot.degraded_mask = 0u;
     for (uint8_t i = 0u; i < (uint8_t)STORE_UNIT_COUNT; i++) {
         if (s_dirty_units[i]) {
-            snapshot.dirty_mask |= (uint16_t)(1u << i);
+            snapshot.dirty_mask |= UINT32_C(1) << i;
         }
         if (s_commit_fail_count[i] >= STORE_COMMIT_FAIL_LIMIT) {
-            snapshot.degraded_mask |= (uint16_t)(1u << i);
+            snapshot.degraded_mask |= UINT32_C(1) << i;
         }
         snapshot.consecutive_failures[i] = s_commit_fail_count[i];
     }
@@ -328,6 +348,7 @@ store_status_t store_engine_mark_dirty(store_unit_t unit) {
     if (unit >= STORE_UNIT_COUNT) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
+    if (!store_service_unit_ready(unit)) return STORE_STATUS_NOT_READY;
     s_dirty_units[unit] = true;
     /* Do NOT reset s_commit_fail_count here. The cap counts CONSECUTIVE commit
      * failures of a unit's (degraded) sector -- it is cleared only by a SUCCESSFUL
@@ -375,7 +396,7 @@ static store_commit_result_t commit_unit(store_unit_t unit) {
         .flash_busy = false,
     };
     const store_unit_binding_t *binding = store_engine_unit_binding(unit);
-    if (!s_ready) {
+    if (!s_ready || !store_service_unit_ready(unit)) {
         result.status = STORE_STATUS_NOT_READY;
         return result;
     }
@@ -395,21 +416,26 @@ static bool load_unit(store_unit_t unit) {
         if (binding->ops->apply(binding->instance, s_payload, len)) {
             return true;
         }
-        LOGW("store", "ignored corrupt %s unit %u", binding->ops->name,
+        /* A codec can fail after partially applying fields. Keep safe RAM
+         * defaults, but never publish them over the damaged record. */
+        binding->ops->reset_ram(binding->instance);
+        LOGW("store", "preserved corrupt %s unit %u", binding->ops->name,
              (unsigned)unit);
+        return false;
     } else if (result != STORAGE_RECORD_NOT_FOUND) {
         return false;
     }
-    if (binding->ops->fallback_missing_or_corrupt != 0) {
-        binding->ops->fallback_missing_or_corrupt(binding->instance);
+    if (binding->ops->fallback_missing != 0) {
+        binding->ops->fallback_missing(binding->instance);
     }
     if (result == STORAGE_RECORD_NOT_FOUND) {
         /* Each default is independently atomic. An interrupted first boot
          * resumes only missing files; it never consults old journal bytes. */
         store_commit_result_t committed = store_engine_commit_binding(
             binding, &s_backend, unit_id_for_index(unit), s_payload, sizeof(s_payload));
-        if (committed.status != STORE_STATUS_OK) return false;
-        s_dirty_units[unit] = false;
+        /* Space pressure is not corruption. Missing defaults may remain in RAM
+         * and be retried by the ordinary bounded commit scheduler. */
+        s_dirty_units[unit] = committed.status != STORE_STATUS_OK;
     }
     return true;
 }

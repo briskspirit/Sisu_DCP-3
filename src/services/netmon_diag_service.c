@@ -23,6 +23,7 @@
 #include "services/stack_monitor.h"
 #include "services/message_service.h"
 #include "storage/storage_partitions.h"
+#include "storage/store_health.h"
 
 #define NETMON_DIAG_SAMPLE_MS 250u
 
@@ -86,6 +87,13 @@ void netmon_diag_service_poll_storage(uint32_t now_ms) {
     netmon_storage_diag_t *out = &s_snapshot.partitions;
     memset(out, 0, sizeof(*out));
     out->sampled_ms = now_ms;
+    store_diag_snapshot_t health;
+    store_service_get_diag(&health);
+    uint32_t health_bit = UINT32_C(1) << STORE_UNIT_STORAGE_HEALTH;
+    out->health_valid = store_health_get_counts(out->corrupt);
+    out->health_dirty = (health.dirty_mask & health_bit) != 0u;
+    out->health_failed = (health.degraded_mask & health_bit) != 0u;
+    out->boot_faults = health.boot_faults;
     message_status_t messages;
     message_service_get_status(&messages);
     out->inbox = messages.inbox; out->outbox = messages.outbox;
@@ -462,7 +470,7 @@ void netmon_diag_service_note_main_loop(uint32_t duration_us,
     }
 }
 
-_Static_assert(sizeof(netmon_storage_diag_t) <= 96u,
+_Static_assert(sizeof(netmon_storage_diag_t) <= 128u,
                "Net Monitor partition projection unexpectedly large");
-_Static_assert(sizeof(netmon_local_diag_snapshot_t) <= 1024u + 96u,
+_Static_assert(sizeof(netmon_local_diag_snapshot_t) <= 1024u + 128u,
                "Net Monitor local snapshot unexpectedly large");

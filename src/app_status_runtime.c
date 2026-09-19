@@ -188,6 +188,7 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
     uint32_t battery_sample_sequence =
         board_diag_battery_sample_sequence();
     bool powered_off = app->route == APP_ROUTE_POWER_OFF;
+    bool contact_service = app->route == APP_ROUTE_CONTACT_SERVICE;
     bool standby = app->route == APP_ROUTE_STANDBY;
     bool empty_action_started = false;
 
@@ -232,7 +233,7 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
         app->battery_anim_level = charge_active ? 0u : bars;
         app->battery_anim_ms = now_ms;
         if (full_notice.show) {
-            if (!powered_off &&
+            if (!powered_off && !contact_service &&
                 app->route != APP_ROUTE_DISPLAY_MESSAGE) {
                 open_display_sid(
                     app, 14u, 0u, "Battery\nfull", app->route, now_ms);
@@ -370,6 +371,7 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
             app->battery_low_next_warn_ms = now_ms; /* fire this poll */
         }
         if (time_diff_ms(now_ms, app->battery_low_next_warn_ms) >= 0 &&
+            !contact_service &&
             app->route != APP_ROUTE_DISPLAY_MESSAGE) {
             open_display_sid(app, 16u, 0x62u, "Battery\nlow", app->route, now_ms);
             app->battery_low_next_warn_ms =
@@ -395,7 +397,7 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
     if (empty_action_started) {
         /* Don't stomp an in-progress display; the countdown remains armed and
          * powers off regardless of whether the notice can be shown. */
-        if (app->route != APP_ROUTE_DISPLAY_MESSAGE) {
+        if (!contact_service && app->route != APP_ROUTE_DISPLAY_MESSAGE) {
             open_display_sid(
                 app, 15u, 0x259u, "Battery\nempty", app->route, now_ms);
         }

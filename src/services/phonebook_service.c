@@ -5,6 +5,7 @@
 #include "storage/storage_objects.h"
 #include "storage/storage_user_space.h"
 #include "storage/store_service.h"
+#include "storage/store_health.h"
 
 #define CONTACT_HEADER 4u
 #define CONTACT_WIRE_MAX (CONTACT_HEADER + PHONEBOOK_NAME_MAX + MODEM_PHONE_MAX)
@@ -19,6 +20,7 @@ typedef struct {
 static phonebook_entry_t s_contacts[PHONEBOOK_MAX_RECORDS];
 static uint16_t s_count;
 static bool s_ready;
+static bool s_has_corrupt;
 static request_t s_requests[PHONEBOOK_RESULT_CAPACITY];
 static phonebook_result_t s_results[PHONEBOOK_RESULT_CAPACITY];
 static uint8_t s_request_head, s_request_count, s_result_head, s_result_count;
@@ -68,25 +70,31 @@ static size_t encode(const phonebook_entry_t *entry, uint8_t *wire) {
 static storage_record_result_t reload(void) {
     s_ready = false;
     s_count = 0u;
+    s_has_corrupt = false;
     storage_record_result_t rc = storage_object_scan_begin(STORAGE_OBJECT_CONTACT);
     if (rc != STORAGE_RECORD_OK) return rc;
     uint32_t id;
     while ((rc = storage_object_scan_next(&id)) == STORAGE_RECORD_OK) {
         uint8_t wire[CONTACT_WIRE_MAX];
         size_t len = 0u;
-        if (s_count == PHONEBOOK_MAX_RECORDS) { rc = STORAGE_RECORD_FULL; break; }
         rc = storage_object_read(STORAGE_OBJECT_CONTACT, id, wire, sizeof(wire), &len);
-        if (rc != STORAGE_RECORD_OK) break;
-        if (!decode(id, wire, len, &s_contacts[s_count])) {
-            rc = STORAGE_RECORD_ERROR;
-            break;
+        phonebook_entry_t entry;
+        if (rc == STORAGE_RECORD_OK && !decode(id, wire, len, &entry))
+            rc = STORAGE_RECORD_CORRUPT;
+        if (rc == STORAGE_RECORD_CORRUPT) {
+            store_health_note_corrupt(STORAGE_OBJECT_CONTACT, id);
+            s_has_corrupt = true;
+            continue;
         }
-        s_count++;
+        if (rc != STORAGE_RECORD_OK) break;
+        if (s_count == PHONEBOOK_MAX_RECORDS) { rc = STORAGE_RECORD_FULL; break; }
+        s_contacts[s_count++] = entry;
     }
     storage_object_scan_end();
     if (rc == STORAGE_RECORD_NOT_FOUND) {
         s_ready = true;
-        store_phonebook_prune_bindings(contact_exists);
+        /* A binding to a preserved damaged contact is not an orphan. */
+        if (!s_has_corrupt) store_phonebook_prune_bindings(contact_exists);
         return STORAGE_RECORD_OK;
     }
     s_count = 0u;
@@ -98,7 +106,8 @@ void phonebook_service_init(void) {
     s_next_request = 0u;
     memset(s_requests, 0, sizeof(s_requests));
     memset(s_results, 0, sizeof(s_results));
-    (void)reload();
+    if (reload() != STORAGE_RECORD_OK)
+        store_service_require_service(STORE_BOOT_FAULT_COLLECTION);
     refresh_space();
 }
 
@@ -188,7 +197,7 @@ void phonebook_service_tick(void) {
             s_count--;
             memmove(&s_contacts[position], &s_contacts[position + 1],
                     (s_count - (uint16_t)position) * sizeof(s_contacts[0]));
-            store_phonebook_prune_bindings(contact_exists);
+            if (!s_has_corrupt) store_phonebook_prune_bindings(contact_exists);
         }
     }
     /* Even BUSY may follow a committed rename. Invalidate before retrying so

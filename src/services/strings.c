@@ -42,6 +42,9 @@ const char *ts(uint16_t sid) {
     case SID_LOCAL_CONTACT_COUNT: return "%lu contacts";
     case SID_LOCAL_STORAGE_UNAVAILABLE: return "Unavailable";
     case SID_DATA_MESSAGE: return "Data message";
+    /* v6.00 keeps these emergency strings outside PPM at 0x237cc4/0x237ccc. */
+    case SID_CONTACT_SERVICE_CONTACT: return "CONTACT";
+    case SID_CONTACT_SERVICE_SERVICE: return "SERVICE";
     default: break;
     }
     if (sid < STRINGS_SID_BASE) {

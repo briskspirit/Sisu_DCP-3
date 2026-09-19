@@ -180,6 +180,8 @@ int main(void) {
     store_service_init();
     phonebook_service_init();
     message_service_init();
+    /* Persist startup corruption observations before normal app activity. */
+    (void)store_service_flush_all();
     if (!backlight_calibration_service_init()) {
         LOGW("boot", "backlight calibration apply failed; using 100%%");
     }
@@ -396,16 +398,19 @@ int main(void) {
         }
         store_service_tick(now);
         if (store_service_write_window_open(now)) {
-            phonebook_service_tick();
-            rtc_datetime_t wall_time;
-            rtc_alarm_hal_get_datetime(&wall_time);
-            message_service_tick(now, rtc_alarm_hal_time_valid() ? &wall_time : NULL);
+            if (!store_service_contact_service_required()) {
+                phonebook_service_tick();
+                rtc_datetime_t wall_time;
+                rtc_alarm_hal_get_datetime(&wall_time);
+                message_service_tick(now, rtc_alarm_hal_time_valid() ? &wall_time : NULL);
+            }
             if (s_app.net_monitor_selector == 76u && s_app.route != APP_ROUTE_POWER_OFF)
                 netmon_diag_service_poll_storage(now);
         }
         debug_console_tick(&s_app);
         core1_services_audio_gate_tick(now); /* A2+R2: park idle audio plumbing */
-        if (s_app.route != APP_ROUTE_POWER_OFF) {
+        if (s_app.route != APP_ROUTE_POWER_OFF &&
+            s_app.route != APP_ROUTE_CONTACT_SERVICE) {
             /* Self-heal a runtime codec I2C wedge -- but NOT in soft-off: a
              * wedge that tripped the latch during graceful power-down must not
              * re-power the codec. Power-on re-inits it explicitly. */
@@ -586,6 +591,7 @@ static bool keypad_audio_command_for_event(const app_t *app,
     if ((event->type != EVENT_KEY_DOWN && !standby_clear_hold) ||
         app->route == APP_ROUTE_POWER_OFF ||
         app->route == APP_ROUTE_POWERUP ||
+        app->route == APP_ROUTE_CONTACT_SERVICE ||
         app->route == APP_ROUTE_INCOMING_CALL) {
         /* No keypad click while a call is ringing: the ring stream and a keypad
          * click share the single synth voice, so a click would clobber the ring

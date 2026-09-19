@@ -2,6 +2,8 @@
 #include <stdio.h>
 
 #include "apps/power_app.h"
+#include "apps/powerup_app.h"
+#include "storage/store_service.h"
 
 static int s_failures;
 static bool s_failure_pending;
@@ -9,6 +11,18 @@ static bool s_modem_powered_off;
 static uint32_t s_failure_reads;
 static unsigned s_battery_draws;
 static uint8_t s_last_battery_level;
+static bool s_service_fault, s_power_allowed = true;
+static unsigned s_modem_starts, s_codec_starts, s_success_starts, s_service_starts;
+bool store_service_contact_service_required(void) { return s_service_fault; }
+bool board_diag_battery_power_on_allowed(void) { return s_power_allowed; }
+void modem_service_power_on(void) { s_modem_starts++; }
+void core1_services_codec_init(void) { s_codec_starts++; }
+void start_powerup(app_t *app, uint32_t now) {
+    (void)now; s_success_starts++; app->route = APP_ROUTE_POWERUP;
+}
+void enter_contact_service(app_t *app, uint32_t now) {
+    (void)now; s_service_starts++; app->route = APP_ROUTE_CONTACT_SERVICE;
+}
 
 static void check(bool condition, const char *message) {
     if (!condition) {
@@ -69,6 +83,21 @@ void draw_text_block(framebuffer_t *fb,
 
 int main(void) {
     app_t app = {0};
+    app.route = APP_ROUTE_POWER_OFF;
+    s_service_fault = true;
+    check(power_on(&app, 100u) && app.route == APP_ROUTE_CONTACT_SERVICE,
+          "failed self-test enters service route at the power-on gate");
+    check(s_service_starts == 1u && s_success_starts == 0u &&
+          s_modem_starts == 0u && s_codec_starts == 0u,
+          "known fatal fault never starts modem, codec or success animation");
+    app.route = APP_ROUTE_POWER_OFF; s_power_allowed = false;
+    check(!power_on(&app, 200u) && app.route == APP_ROUTE_POWER_OFF,
+          "battery power-on floor still applies to service-fault startup");
+    app.route = APP_ROUTE_POWER_OFF; s_power_allowed = true; s_service_fault = false;
+    check(power_on(&app, 300u) && app.route == APP_ROUTE_POWERUP &&
+          s_success_starts == 1u && s_modem_starts == 1u && s_codec_starts == 1u,
+          "healthy storage retains normal power-on sequence");
+    app = (app_t){0};
     app.route = APP_ROUTE_POWER_OFF;
 
     check(power_off_display_should_sleep(&app),

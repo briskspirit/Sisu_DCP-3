@@ -33,7 +33,8 @@ typedef struct {
                       size_t cap,
                       size_t *out_len);
     bool (*apply)(uint8_t instance, const uint8_t *payload, size_t len);
-    void (*fallback_missing_or_corrupt)(uint8_t instance);
+    /* Only positively absent records may be seeded; invalid records survive. */
+    void (*fallback_missing)(uint8_t instance);
     const char *name;
 } store_unit_ops_t;
 
@@ -66,6 +67,7 @@ extern const store_unit_ops_t g_store_divert_unit_ops;
 extern const store_unit_ops_t g_store_warranty_unit_ops;
 extern const store_unit_ops_t g_store_battery_learning_unit_ops;
 extern const store_unit_ops_t g_store_battery_charge_supervisor_unit_ops;
+extern const store_unit_ops_t g_store_health_unit_ops;
 
 const store_unit_binding_t *store_engine_unit_binding(store_unit_t unit);
 store_commit_result_t store_engine_commit_binding(

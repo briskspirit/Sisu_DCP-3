@@ -9,6 +9,15 @@
 #include "storage/storage_user_space.h"
 #include "services/phonebook_service.h"
 #include "storage/store_service.h"
+#include "storage/store_health.h"
+
+static unsigned corrupt_detections;
+static uint8_t boot_faults;
+void store_health_note_corrupt(storage_object_collection_t collection, uint32_t id) {
+    assert(collection == STORAGE_OBJECT_CONTACT && id != 0u);
+    corrupt_detections++;
+}
+void store_service_require_service(uint8_t faults) { boot_faults |= faults; }
 
 static uint8_t media[STORAGE_USER_BYTES], baseline[sizeof(media)];
 static unsigned operations, cut_at, tear;
@@ -62,6 +71,8 @@ static void fresh(void) {
     storage_lfs_deinit();
     memset(media, 0xff, sizeof(media));
     cut_at = 0;
+    boot_faults = 0u;
+    corrupt_detections = 0u;
     busy = io_error = return_error = false;
     reopen();
 }
@@ -207,11 +218,17 @@ static void test_full_and_corrupt(void) {
     assert(phonebook_service_count() == added - 1u);
     fresh();
     uint32_t id = add("Corrupt", "123");
+    uint32_t good = add("Healthy", "456");
     uint8_t bad[] = {'C', 1, 250, 1};
     assert(storage_object_write(STORAGE_OBJECT_CONTACT, id, bad, sizeof(bad)) == STORAGE_RECORD_OK);
     unsigned before = prunes;
     reopen();
-    assert(!phonebook_service_cache_valid() && phonebook_service_count() == 0 && prunes == before);
+    assert(phonebook_service_cache_valid() && phonebook_service_count() == 1 && prunes == before);
+    assert(phonebook_service_entry(0, &entry) && entry.index == good);
+    assert(corrupt_detections == 1u && boot_faults == 0u);
+    uint8_t saved[32]; size_t len;
+    assert(storage_object_read(STORAGE_OBJECT_CONTACT, id, saved, sizeof(saved), &len) == STORAGE_RECORD_OK);
+    assert(len == sizeof(bad) && memcmp(saved, bad, len) == 0);
 }
 int main(void) {
     test_crud();

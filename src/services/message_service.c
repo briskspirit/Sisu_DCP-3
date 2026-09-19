@@ -3,6 +3,8 @@
 #include <string.h>
 #include "services/message_file_codec.h"
 #include "storage/storage_objects.h"
+#include "storage/store_health.h"
+#include "storage/store_service.h"
 
 #define PENDING_LIMIT 64u
 #define RECEIVE_LIMIT 8u
@@ -57,7 +59,8 @@ static storage_record_result_t load(storage_object_collection_t c, uint32_t id) 
     size_t len;
     storage_record_result_t rc = storage_object_read(c, id, s_wire, sizeof(s_wire), &len);
     if (rc == STORAGE_RECORD_OK && !message_file_decode(&s_file, s_wire, len))
-        rc = STORAGE_RECORD_ERROR;
+        rc = STORAGE_RECORD_CORRUPT;
+    if (rc == STORAGE_RECORD_CORRUPT) store_health_note_corrupt(c, id);
     return rc;
 }
 
@@ -70,11 +73,11 @@ static storage_record_result_t save(storage_object_collection_t c, uint32_t id) 
 static storage_record_result_t index_current(storage_object_collection_t c, uint32_t id, index_t *entry) {
     message_metadata_t meta;
     uint32_t state;
-    if (!message_file_metadata(&s_file, &meta)) return STORAGE_RECORD_ERROR;
+    if (!message_file_metadata(&s_file, &meta)) return STORAGE_RECORD_CORRUPT;
     storage_record_result_t rc = storage_object_get_state(c, id, &state);
     if (rc != STORAGE_RECORD_OK) return rc;
     bool pending = c == STORAGE_OBJECT_PENDING_SMS;
-    if (!pending && (state & ~STATE_READ)) return STORAGE_RECORD_ERROR;
+    if (!pending && (state & ~STATE_READ)) return STORAGE_RECORD_CORRUPT;
     /* Pending objects use their attribute for first local receipt time. Inbox
      * and outbox attributes retain the read flag; publication copies only body. */
     *entry = (index_t){.id=id, .time=pending ? state : message_timestamp_seconds(meta.timestamp),
@@ -110,17 +113,21 @@ static storage_record_result_t scan(storage_object_collection_t c, index_t *inde
     if (rc != STORAGE_RECORD_OK) return rc;
     uint32_t id;
     while ((rc = storage_object_scan_next(&id)) == STORAGE_RECORD_OK) {
-        if (*count == limit) { rc = STORAGE_RECORD_FULL; break; }
         rc = load(c, id);
-        if (rc != STORAGE_RECORD_OK) break;
-        bool draft = (s_file.flags & MESSAGE_FILE_DRAFT) != 0u;
-        if ((c == STORAGE_OBJECT_OUTBOX) != draft ||
-            (c != STORAGE_OBJECT_PENDING_SMS && !message_file_complete(&s_file))) {
-            rc = STORAGE_RECORD_ERROR; break;
+        if (rc == STORAGE_RECORD_OK) {
+            bool draft = (s_file.flags & MESSAGE_FILE_DRAFT) != 0u;
+            if ((c == STORAGE_OBJECT_OUTBOX) != draft ||
+                (c != STORAGE_OBJECT_PENDING_SMS && !message_file_complete(&s_file)))
+                rc = STORAGE_RECORD_CORRUPT;
         }
         index_t entry;
-        rc = index_current(c, id, &entry);
+        if (rc == STORAGE_RECORD_OK) rc = index_current(c, id, &entry);
+        if (rc == STORAGE_RECORD_CORRUPT) {
+            store_health_note_corrupt(c, id);
+            continue;
+        }
         if (rc != STORAGE_RECORD_OK) break;
+        if (*count == limit) { rc = STORAGE_RECORD_FULL; break; }
         insert(index, count, &entry, c == STORAGE_OBJECT_INBOX);
     }
     storage_object_scan_end();
@@ -154,7 +161,8 @@ static void failure(storage_record_result_t rc, uint32_t now) {
     if (rc == STORAGE_RECORD_FULL) {
         if (!s_status.full) s_status.full_events++;
         s_status.full = true;
-    } else if (rc == STORAGE_RECORD_ERROR || rc == STORAGE_RECORD_NOT_FOUND) {
+    } else if (rc == STORAGE_RECORD_ERROR || rc == STORAGE_RECORD_NOT_FOUND ||
+               rc == STORAGE_RECORD_CORRUPT) {
         s_status.storage_error = true;
     }
     /* A failed call may have committed before the I/O error was reported. */
@@ -170,7 +178,10 @@ void message_service_init(void) {
     s_head = s_queued = 0u;
     s_token = s_retry_at = 0u;
     s_retry_pending = false;
-    if (reload() != STORAGE_RECORD_OK) s_status.storage_error = true;
+    if (reload() != STORAGE_RECORD_OK) {
+        s_status.storage_error = true;
+        store_service_require_service(STORE_BOOT_FAULT_COLLECTION);
+    }
 }
 
 static bool request(message_op_t kind, message_mailbox_t mailbox, uint32_t id, uint32_t *token) {

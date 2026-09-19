@@ -573,7 +573,7 @@ static bool walk_settings_payload(store_domain_t domain,
             pos += 2u;
             uint8_t tone_count = payload[pos++];
             if (block != PHONEBOOK_TONES_BLOCK) {
-                return true;
+                return false;
             }
             uint8_t slot = 0u;
             for (uint8_t i = 0; i < tone_count; i++) {
@@ -598,7 +598,7 @@ static bool walk_settings_payload(store_domain_t domain,
             }
         }
     }
-    return true;
+    return pos == len;
 }
 
 static store_setting_key_t speed_dial_key(uint8_t key) {
@@ -632,6 +632,6 @@ const store_unit_ops_t g_store_settings_unit_ops = {
     .reset_ram = reset_settings_unit,
     .serialize = serialize_settings_unit,
     .apply = apply_settings_unit,
-    .fallback_missing_or_corrupt = 0,
+    .fallback_missing = 0,
     .name = "settings",
 };

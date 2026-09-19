@@ -129,7 +129,7 @@ const store_unit_ops_t g_store_tones_unit_ops = {
     .reset_ram = reset_tones_unit,
     .serialize = serialize_tones_unit,
     .apply = apply_tones_unit,
-    .fallback_missing_or_corrupt = 0,
+    .fallback_missing = 0,
     .name = "own tones",
 };
 

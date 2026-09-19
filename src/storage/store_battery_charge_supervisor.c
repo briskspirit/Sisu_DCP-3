@@ -89,12 +89,14 @@ store_status_t store_battery_charge_supervisor_get(
     if (out_state == NULL) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
+    if (!store_service_unit_ready(STORE_UNIT_BATTERY_CHARGE_SUPERVISOR)) return STORE_STATUS_NOT_READY;
     *out_state = s_charge_supervisor;
     return STORE_STATUS_OK;
 }
 
 store_status_t store_battery_charge_supervisor_set(
     const battery_charge_supervisor_persisted_t *state) {
+    if (!store_service_unit_ready(STORE_UNIT_BATTERY_CHARGE_SUPERVISOR)) return STORE_STATUS_NOT_READY;
     if (!battery_charge_supervisor_persisted_valid(state)) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
@@ -386,6 +388,6 @@ const store_unit_ops_t g_store_battery_charge_supervisor_unit_ops = {
     .reset_ram = reset_charge_supervisor_unit,
     .serialize = serialize_charge_supervisor_unit,
     .apply = apply_charge_supervisor_unit,
-    .fallback_missing_or_corrupt = NULL,
+    .fallback_missing = NULL,
     .name = "charge supervisor",
 };
