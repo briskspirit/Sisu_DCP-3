@@ -277,10 +277,28 @@ copy. Delete removes staging first to prevent resurrection. Conflicting fragment
 are quarantined, never silently spliced or overwritten. See the storage tests
 for interruption at each program/erase boundary.
 
-Unexpected stored-message indications (`+CMTI` or Telit's `$QCMTI`) are
-reported as receive losses: the production path has no ME fallback. Network-send
-results remain separate from local sent-copy persistence; a confirmed `+CMGS`
-must not become a false transmission failure because the outbox is full.
+Startup and `+CMTI: "ME",...` schedule bounded text-mode recovery of received
+ME records, including records already marked read by an interrupted attempt.
+Each record enters the same local message/picture path as direct delivery. The
+modem copy is deleted only after its exact fragment is durably stored (or a
+recognized control is deliberately filtered), then a second read proves the
+slot still contains the same message. Calls and foreground requests take
+priority between commands. SIM/session changes and privileged AT commands
+invalidate pending deletion authority. Unreadable, unsupported, conflicting,
+or locally uncommittable records stay in ME; failed passes retry after one
+minute. Recovery does not make Telit's unreadable 3GPP2 ME backend readable.
+
+Provisioning checks the boot-loaded text/direct receive profile before RF
+activation, repairs it when needed, and explicitly saves/selects profile zero.
+A SIM-ready completion check covers modules that reject those early queries.
+The setup keeps CMGF=1, CSDH=1, GSM character representation and direct CNMI;
+recovery never switches to PDU mode. A matching profile avoids another NVM
+write. Two observed automatic startup status drops are recoverable within a
+three-minute window; further drops still fail with the modem rail retained.
+
+Network-send results remain separate from local sent-copy persistence; a
+confirmed `+CMGS` must not become a false transmission failure because the
+outbox is full.
 
 ## Evidence (bench, 2026-09-16, Verizon SIM, FW M0F.103008)
 

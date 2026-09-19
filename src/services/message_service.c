@@ -30,6 +30,7 @@ typedef struct {
         struct { char address[MODEM_SMS_SENDER_MAX + 1u], text[MODEM_SMS_TEXT_MAX + 1u]; } sent;
     };
     uint32_t id;
+    uint32_t receipt;
     uint32_t retry_at;
     bool deferred;
     bool outgoing;
@@ -39,6 +40,8 @@ static index_t s_index[2][MESSAGE_MAILBOX_LIMIT], s_pending[PENDING_LIMIT];
 static uint16_t s_count[2], s_pending_count;
 static request_t s_requests[MESSAGE_OP_COUNT];
 static uint32_t s_token, s_retry_at;
+static uint32_t s_receipt_next, s_receipt_active;
+static bool s_receipt_committed;
 static bool s_retry_pending;
 static uint8_t s_io_failures;
 static bool s_io_deferred;
@@ -182,6 +185,8 @@ static void failure(storage_record_result_t rc, uint32_t now) {
 }
 
 void message_service_init(void) {
+    s_receipt_active = 0u;
+    s_receipt_committed = false;
     memset(&s_status, 0, sizeof(s_status));
     memset(s_requests, 0, sizeof(s_requests));
     memset(s_receive, 0, sizeof(s_receive));
@@ -338,6 +343,29 @@ bool message_service_receive(const char *pdu) {
         s_retry_pending = false;
     }
     return true;
+}
+
+bool message_service_receive_tracked(const char *pdu, uint32_t *receipt) {
+    if (receipt == NULL || s_receipt_active != 0u) return false;
+    uint8_t queued = s_queued;
+    if (!message_service_receive(pdu)) return false;
+    if (++s_receipt_next == 0u) ++s_receipt_next;
+    s_receipt_active = s_receipt_next;
+    s_receipt_committed = s_queued == queued; /* Recognized control, no write. */
+    if (!s_receipt_committed)
+        s_receive[(s_head + s_queued - 1u) % RECEIVE_LIMIT].receipt = s_receipt_active;
+    *receipt = s_receipt_active;
+    return true;
+}
+
+bool message_service_receive_committed(uint32_t receipt) {
+    return receipt != 0u && receipt == s_receipt_active && s_receipt_committed;
+}
+
+void message_service_receive_forget(uint32_t receipt) {
+    if (receipt == 0u || receipt != s_receipt_active) return;
+    s_receipt_active = 0u;
+    s_receipt_committed = false;
 }
 
 bool message_service_sent(const char *address, const char *text) {
@@ -577,6 +605,8 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
             failure(rc, now);
             return;
         }
+        if (r->receipt != 0u && r->receipt == s_receipt_active)
+            s_receipt_committed = true;
         memset(&s_receive[s_head], 0, sizeof(s_receive[s_head]));
         s_head = (s_head + 1u) % RECEIVE_LIMIT; s_queued--;
         break;

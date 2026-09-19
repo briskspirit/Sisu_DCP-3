@@ -195,6 +195,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/message_service.c
     src/services/message_file_codec.c
     src/services/modem_sms_direct.c
+    src/services/modem_sms_recovery.c
     src/services/modem_sms_protocol.c
     src/services/modem_sms_state.c
     src/services/modem_supplementary_state.c

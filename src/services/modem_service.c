@@ -20,6 +20,7 @@
 #include "services/modem_line_framer.h"
 #include "services/modem_line_parser.h"
 #include "services/modem_sms_direct.h"
+#include "services/modem_sms_recovery.h"
 #include "services/operator_name_db.h"
 #include "modem_sms_protocol_internal.h"
 #include "modem_sms_state_internal.h"
@@ -48,6 +49,8 @@
 #define MODEM_RAIL_OFF_DWELL_MS 2000u
 #define MODEM_RAIL_OFF_POLL_MS 20u
 #define MODEM_POWER_OBSERVATION_MS 250u
+#define MODEM_STARTUP_RESTART_LIMIT 2u
+#define MODEM_STARTUP_RESTART_WINDOW_MS 180000u
 /* Power-sequence timings (rail settle, PWR pulse width, ready budget) + the
  * off-command/timeouts live in g_modem_vendor.power. */
 #define MODEM_POST_READY_SETTLE_MS 500u
@@ -144,7 +147,18 @@ typedef enum {
     MODEM_AT_CALL_FORWARD_FLAGS,
     MODEM_AT_SIM_PROVIDER,
     MODEM_AT_SIM_PROVIDER_DRAIN,
+    MODEM_AT_SMS_RECOVERY,
+    MODEM_AT_SMS_RECOVERY_DRAIN,
 } modem_at_kind_t;
+
+static modem_sms_recovery_t s_sms_recovery;
+static uint32_t s_recovery_receipt;
+static bool s_recovery_admitted, s_recovery_picture, s_direct_from_storage;
+static bool s_recovery_invalidated;
+static char s_recovery_header[MODEM_SMS_DIRECT_LINE_MAX];
+static void sms_recovery_reset(void);
+static bool sms_recovery_start(uint32_t now_ms);
+static void sms_recovery_finish(bool ok, const char *line, uint32_t now_ms);
 
 typedef enum {
     MODEM_PROVISION_QUERY = 0,
@@ -540,7 +554,8 @@ static bool s_provision_reboot_required;
 static bool s_provision_rebooted;
 static bool s_provision_reboot_cycle_active;
 static bool s_provision_reboot_drop_seen;
-static bool s_startup_restart_recovered;
+static uint8_t s_startup_restart_count;
+static uint32_t s_startup_restart_deadline_ms;
 static bool s_startup_complete;
 static bool s_provision_all_verified;
 static bool s_provision_non_sim_verified;
@@ -1024,6 +1039,9 @@ void modem_service_init(void) {
     }
 
     s_state = MODEM_STATE_OFF;
+    sms_recovery_reset();
+    memset(&s_sms_recovery, 0, sizeof(s_sms_recovery));
+    s_direct_from_storage = false;
     s_active_kind = MODEM_AT_NONE;
     s_operation = MODEM_OP_NONE;
     s_binary_restore_pending = false;
@@ -1042,7 +1060,8 @@ void modem_service_init(void) {
     s_provision_rebooted = false;
     s_provision_reboot_cycle_active = false;
     s_provision_reboot_drop_seen = false;
-    s_startup_restart_recovered = false;
+    s_startup_restart_count = 0u;
+    s_startup_restart_deadline_ms = 0u;
     s_startup_complete = false;
     s_provision_all_verified = false;
     s_provision_non_sim_verified = false;
@@ -1332,7 +1351,8 @@ void modem_service_power_on(void) {
      * the already-consumed one-reboot allowance. */
     if (s_state == MODEM_STATE_OFF || s_state == MODEM_STATE_FAILED) {
         s_startup_recycled = false;
-        s_startup_restart_recovered = false;
+        s_startup_restart_count = 0u;
+        s_startup_restart_deadline_ms = 0u;
         s_startup_complete = false;
         s_provision_rebooted = false;
         s_provision_reboot_required = false;
@@ -1422,6 +1442,9 @@ void modem_service_get_status(modem_status_t *out) {
     out->debug_active_kind = (uint8_t)s_active_kind;
     out->debug_init_index = s_init_index;
     out->debug_init_retries = s_init_retries;
+    out->sms_recovered = s_sms_recovery.recovered;
+    out->sms_recovery_errors = s_sms_recovery.failures;
+    out->sms_recovery_step = (uint8_t)s_sms_recovery.step;
     copy_bounded(out->debug_last_command, sizeof(out->debug_last_command), s_debug_last_command);
     copy_bounded(out->debug_last_line, sizeof(out->debug_last_line), s_debug_last_line);
 }
@@ -2591,6 +2614,7 @@ static uint32_t s_direct_body_deadline_ms;
 static char s_direct_pdu[SMS_DELIVER_HEX_MAX];
 
 static void direct_ring_reset(void) {
+    s_direct_from_storage = false;
     s_direct_body_deadline_armed = false;
     modem_sms_direct_reset();
 }
@@ -2606,15 +2630,87 @@ static void direct_body_deadline_tick(uint32_t now_ms) {
     if (time_diff_ms(now_ms, s_direct_body_deadline_ms) < 0) {
         return;
     }
-    /* The body never completed: the delivery is lost (the module already
-     * acknowledged the network); later bytes go back to the line framer. */
+    /* Direct delivery has no modem backup; recovery leaves its ME copy. */
     s_direct_body_deadline_armed = false;
     modem_sms_direct_reset();
     critical_section_enter_blocking(&s_status_lock);
     s_status.command_errors++;
     critical_section_exit(&s_status_lock);
-    LOGW("modem", "direct SMS body did not complete; message lost");
-    message_service_note_receive_loss();
+    if (s_direct_from_storage) {
+        LOGW("modem", "stored SMS body did not complete; ME copy retained");
+        modem_sms_recovery_payload(&s_sms_recovery, MODEM_SMS_DIRECT_STEP_REJECTED, "");
+        s_direct_from_storage = false;
+    } else {
+        LOGW("modem", "direct SMS body did not complete; message lost");
+        message_service_note_receive_loss();
+    }
+}
+
+static void sms_recovery_release_receipt(void) {
+    message_service_receive_forget(s_recovery_receipt);
+    s_recovery_receipt = 0u;
+    s_recovery_admitted = s_recovery_picture = false;
+}
+
+static void sms_recovery_reset(void) {
+    sms_recovery_release_receipt();
+    modem_sms_recovery_reset(&s_sms_recovery);
+    s_recovery_invalidated = true;
+}
+
+static bool sms_recovery_start(uint32_t now_ms) {
+    if (s_operation != MODEM_OP_NONE || !status_sim_ready_snapshot() ||
+        modem_sms_direct_pending()) return false;
+    if (s_sms_recovery.step == MODEM_SMS_RECOVERY_STORE) {
+        if (!s_recovery_admitted) {
+            if (s_sms_recovery.filtered) {
+                modem_sms_recovery_committed(&s_sms_recovery);
+            } else {
+                store_status_t result = store_picture_receive_pdu(s_sms_recovery.pdu, now_ms);
+                s_recovery_picture = result != STORE_STATUS_NOT_FOUND;
+                s_recovery_admitted = s_recovery_picture ? result == STORE_STATUS_OK :
+                    message_service_receive_tracked(s_sms_recovery.pdu, &s_recovery_receipt);
+                if (!s_recovery_admitted) {
+                    LOGW("modem", "stored SMS retained: local admission unavailable index=%u", s_sms_recovery.index);
+                    modem_sms_recovery_defer(&s_sms_recovery, now_ms);
+                }
+            }
+        }
+        if (s_recovery_admitted) {
+            bool committed = s_recovery_picture
+                ? store_picture_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
+                : message_service_receive_committed(s_recovery_receipt);
+            if (committed) modem_sms_recovery_committed(&s_sms_recovery);
+        }
+    }
+    if (s_sms_recovery.step != MODEM_SMS_RECOVERY_STORE &&
+        s_sms_recovery.step != MODEM_SMS_RECOVERY_VERIFY &&
+        s_sms_recovery.step != MODEM_SMS_RECOVERY_DELETE) sms_recovery_release_receipt();
+    char command[32];
+    if (!modem_sms_recovery_command(&s_sms_recovery, now_ms, command, sizeof(command))) return false;
+    s_recovery_invalidated = false;
+    send_command(MODEM_AT_SMS_RECOVERY, command, 5000u, now_ms);
+    return true;
+}
+
+static void sms_recovery_finish(bool ok, const char *line, uint32_t now_ms) {
+    if (s_recovery_invalidated) {
+        sms_recovery_reset();
+        if (status_sim_ready_snapshot()) modem_sms_recovery_request(&s_sms_recovery);
+        return;
+    }
+    uint32_t failures = s_sms_recovery.failures;
+    uint32_t recovered = s_sms_recovery.recovered;
+    uint16_t index = s_sms_recovery.index;
+    bool empty = line != NULL &&
+        (strcmp(line, "+CMS ERROR: 321") == 0 ||
+         strcmp(line, "+CMS ERROR: invalid memory index") == 0);
+    modem_sms_recovery_final(&s_sms_recovery, ok, empty, now_ms);
+    if (s_sms_recovery.failures != failures)
+        LOGW("modem", "stored SMS retained after recovery failure index=%u", index);
+    if (s_sms_recovery.recovered != recovered)
+        LOGI("modem", "stored SMS durably recovered and removed from ME index=%u count=%lu",
+             index, (unsigned long)s_sms_recovery.recovered);
 }
 
 static void direct_count_error_locked_free(void) {
@@ -2626,6 +2722,13 @@ static void direct_count_error_locked_free(void) {
 
 /* The collector builds into static scratch to preserve the RX stack budget. */
 static void direct_apply_step(modem_sms_direct_step_t step, uint8_t tpdu_len) {
+    if (s_direct_from_storage && step != MODEM_SMS_DIRECT_STEP_HEADER &&
+        step != MODEM_SMS_DIRECT_STEP_IGNORED) {
+        s_direct_body_deadline_armed = false;
+        modem_sms_recovery_payload(&s_sms_recovery, step, s_direct_pdu);
+        s_direct_from_storage = false;
+        return;
+    }
     switch (step) {
     case MODEM_SMS_DIRECT_STEP_HEADER:
         s_direct_body_deadline_armed = true;
@@ -2867,11 +2970,16 @@ static void route_urc(const char *line) {
         LOGI("modem", "%s", line);
     } else if (starts_with(line, "+CMTI:")) {
         critical_section_enter_blocking(&s_status_lock);
-        s_status.command_errors++;
         s_status.urc_count++;
         critical_section_exit(&s_status_lock);
-        message_service_note_receive_loss();
-        LOGW("modem", "unexpected stored SMS indication in direct mode: %s", line);
+        uint16_t index;
+        if (modem_line_parse_cmti(line, "ME", &index)) {
+            modem_sms_recovery_request(&s_sms_recovery);
+            LOGI("modem", "stored SMS recovery requested index=%u", index);
+        } else {
+            message_service_note_receive_loss();
+            LOGW("modem", "unsupported stored SMS indication: %s", line);
+        }
     } else if (starts_with(line, "+CMT:")) {
         critical_section_enter_blocking(&s_status_lock);
         s_status.urc_count++;
@@ -3022,6 +3130,19 @@ static void process_timeout(uint32_t now_ms) {
     }
     LOGW("modem", "AT timeout kind=%u cmd=%s", (unsigned)kind,
          s_debug_last_command);
+
+    if (kind == MODEM_AT_SMS_RECOVERY) {
+        /* CMGR/CMGD are non-abortable. A late final must not complete a call. */
+        modem_sms_recovery_defer(&s_sms_recovery, now_ms);
+        s_active = true;
+        s_active_kind = MODEM_AT_SMS_RECOVERY_DRAIN;
+        s_command_deadline_ms = now_ms + 5000u;
+        return;
+    }
+    if (kind == MODEM_AT_SMS_RECOVERY_DRAIN) {
+        modem_fail_power_state("stored SMS command did not release AT channel", true);
+        return;
+    }
 
     if (kind == MODEM_AT_CLCC_MODEL) {
         call_model_clcc_error(&s_call_model);
@@ -3544,6 +3665,8 @@ static void advance_state(uint32_t now_ms) {
             start_next_request(now_ms);
         } else if (call_model_background_work_blocked(&s_call_model)) {
             s_next_action_ms = now_ms + 50u;
+        } else if (sms_recovery_start(now_ms)) {
+            /* One bounded record operation, yielding to every call/request. */
         } else if (sim_provider_start_query(now_ms)) {
             /* Only unknown PLMNs need a local SIM read. Calls, SMS requests,
              * and other foreground operations retain their normal priority. */
@@ -3751,6 +3874,10 @@ static void start_next_request(uint32_t now_ms) {
         (void)sms_start_current_request(now_ms);
         break;
     case MODEM_REQ_DEBUG_AT:
+        /* Privileged commands can change CPMS, SIM or profile state. Never
+         * carry a delete authorization across that boundary. */
+        sms_recovery_reset();
+        modem_sms_recovery_request(&s_sms_recovery);
         s_operation = MODEM_OP_DEBUG_AT;
         set_operation_busy(true);
         LOGI("modem", "debug AT request: %s", s_current_request.text);
@@ -4088,7 +4215,8 @@ static void modem_runtime_power_tick(uint32_t now_ms) {
     } else if (g_modem_vendor.power_is_on != NULL &&
                observation.module_status_valid && !module_on &&
                !module_drop_expected) {
-        if (!s_startup_complete && !s_startup_restart_recovered &&
+        if (!s_startup_complete && s_startup_restart_count < MODEM_STARTUP_RESTART_LIMIT &&
+            (s_startup_restart_count == 0u || time_diff_ms(now_ms, s_startup_restart_deadline_ms) < 0) &&
             !s_provision_reboot_cycle_active) {
             modem_recover_startup_restart(now_ms);
             return;
@@ -4191,6 +4319,19 @@ static void finish_command_result(bool ok, const char *line) {
     s_active_sms_wake_arm = false;
     if (sms_wake_arm_command) {
         s_sms_wake_armed = ok;
+    }
+
+    if (kind == MODEM_AT_SMS_RECOVERY || kind == MODEM_AT_SMS_RECOVERY_DRAIN) {
+        if (kind == MODEM_AT_SMS_RECOVERY) sms_recovery_finish(ok, line, s_now_ms);
+        else {
+            sms_recovery_reset();
+            modem_sms_recovery_defer(&s_sms_recovery, s_now_ms);
+        }
+        if (s_power_off_pending) {
+            s_power_off_pending = false;
+            modem_begin_power_off(s_now_ms);
+        }
+        return;
     }
 
     if (line != NULL && strcmp(line, "CONNECT") == 0 && is_call_at_kind(kind)) {
@@ -4460,6 +4601,7 @@ static void modem_enter_ready(uint32_t now_ms) {
     s_operator_refresh_needed = true;
 
     s_next_sms_setup_ms = now_ms + 1200u;
+    if (sim_ready) modem_sms_recovery_request(&s_sms_recovery);
 
     LOGI("modem", "AT init and provisioning complete");
 }
@@ -4844,10 +4986,12 @@ static void provision_begin_reboot_wait(uint32_t now_ms) {
 }
 
 static void modem_recover_startup_restart(uint32_t now_ms) {
-    /* FWAUTOSIM may restart Telit during the first AT exchanges. Wait once for
-     * the observed drop with PG still good; do not pulse ON_OFF, cut VCC, or
-     * spend the separate provisioning-reboot allowance. */
-    s_startup_restart_recovered = true;
+    /* FWAUTOSIM may restart Telit during the first AT exchanges. Wait through
+     * bounded observed drops with PG still good; do not pulse ON_OFF, cut VCC,
+     * or spend the separate provisioning-reboot allowance. */
+    if (s_startup_restart_count == 0u)
+        s_startup_restart_deadline_ms = now_ms + MODEM_STARTUP_RESTART_WINDOW_MS;
+    s_startup_restart_count++;
     s_diag_automatic_recoveries++;
     s_diag_last_recovery_reason = MODEM_DIAG_RECOVERY_STARTUP_RESTART;
     s_diag_last_transition_ms = now_ms;
@@ -4864,7 +5008,10 @@ static void modem_recover_startup_restart(uint32_t now_ms) {
         s_uart_parked = true;
     }
     modem_begin_reinit_wait(now_ms);
-    LOGW("modem", "startup module status dropped; waiting once for restart");
+    if (time_diff_ms(s_boot_deadline_ms, s_startup_restart_deadline_ms) > 0)
+        s_boot_deadline_ms = s_startup_restart_deadline_ms;
+    LOGW("modem", "startup module status dropped; waiting for restart %u/%u",
+         s_startup_restart_count, MODEM_STARTUP_RESTART_LIMIT);
 }
 
 static void modem_begin_reinit_wait(uint32_t now_ms) {
@@ -5087,6 +5234,21 @@ static bool parse_expected_line(const char *line) {
                 &request, &s_sms_protocol_hooks);
     }
     switch (s_active_kind) {
+    case MODEM_AT_SMS_RECOVERY:
+    case MODEM_AT_SMS_RECOVERY_DRAIN:
+        /* Cancellation revokes deletion, but a late CMGR body still owns
+         * its bytes. Never let text inside it masquerade as RING or OK. */
+        if ((s_recovery_invalidated || s_active_kind == MODEM_AT_SMS_RECOVERY_DRAIN) &&
+            starts_with(line, "+CMGR:")) s_sms_recovery.step = MODEM_SMS_RECOVERY_READ;
+        if (modem_sms_recovery_line(&s_sms_recovery, line,
+                s_recovery_header, sizeof(s_recovery_header))) {
+            if (s_recovery_header[0] != '\0') {
+                s_direct_from_storage = true;
+                direct_feed_line(s_recovery_header);
+            }
+            return true;
+        }
+        break;
     case MODEM_AT_INIT:
         if (s_init_index < g_modem_vendor.init_step_count) {
             const modem_init_step_t *step =
@@ -5812,6 +5974,7 @@ static void cancel_request(const modem_request_t *request,
 }
 
 static void cancel_request_session(void) {
+    sms_recovery_reset();
     typedef struct {
         uint32_t call_token;
         uint32_t request_id;
@@ -6508,6 +6671,7 @@ static void apply_sim_observation(modem_sim_observation_t observation) {
     critical_section_exit(&s_status_lock);
 
     if (observation != MODEM_SIM_OBSERVATION_READY) {
+        sms_recovery_reset();
         /* SIM removal/PIN lock invalidates runtime settings owned by the SIM
          * subsystem. Wait for the next trustworthy readiness edge before
          * attempting their bounded completion pass. */
@@ -7009,9 +7173,11 @@ static void modem_begin_power_off(uint32_t now_ms) {
     }
     cancel_request_session();
     if (s_active && (s_active_kind == MODEM_AT_SIM_PROVIDER ||
-                     s_active_kind == MODEM_AT_SIM_PROVIDER_DRAIN)) {
+                     s_active_kind == MODEM_AT_SIM_PROVIDER_DRAIN ||
+                     s_active_kind == MODEM_AT_SMS_RECOVERY ||
+                     s_active_kind == MODEM_AT_SMS_RECOVERY_DRAIN)) {
         s_power_off_pending = true;
-        LOGI("modem", "power-off waiting for the non-abortable SIM read");
+        LOGI("modem", "power-off waiting for the non-abortable storage read");
         return;
     }
     if (s_active) {

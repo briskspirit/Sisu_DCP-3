@@ -27,6 +27,7 @@ MODEM_SERVICE_SOURCES=(
     src/services/modem_line_parser.c
     src/services/modem_maintenance.c
     src/services/modem_sms_direct.c
+    src/services/modem_sms_recovery.c
     src/services/modem_sms_protocol.c
     src/services/modem_sms_state.c
     src/services/modem_supplementary_state.c
@@ -788,6 +789,7 @@ run test_ui_wrap             src/ui/ui.c src/ui/text_layout.c src/ui/assets.c "$
 run test_sms_picture_codec   src/services/sms_picture_codec.c
 run test_sms_deliver_codec   src/services/sms_deliver_codec.c src/services/sms_picture_codec.c
 run test_modem_sms_direct    src/services/modem_sms_direct.c src/services/sms_deliver_codec.c src/services/sms_picture_codec.c src/services/sms_control_filter.c src/services/sms_vvm_filter.c
+run test_modem_sms_recovery src/services/modem_sms_recovery.c src/services/modem_line_parser.c
 run test_sms_control_filter  src/services/sms_control_filter.c src/services/sms_vvm_filter.c src/services/sms_picture_codec.c src/services/sms_deliver_codec.c
 run test_sms_vvm_filter      src/services/sms_vvm_filter.c
 run test_sms_types
@@ -819,7 +821,7 @@ run test_phonebook_service src/services/phonebook_service.c src/storage/storage_
 run test_message_service src/services/message_service.c src/services/message_file_codec.c src/services/sms_picture_codec.c src/services/sms_deliver_codec.c src/services/sms_vvm_filter.c src/services/sms_control_filter.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_powercut    src/diag/storage_powercut_test.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I src/storage -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_partitions  src/storage/storage_partitions.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
-run test_store_service       src/storage/store_calls.c src/storage/store_battery_learning.c src/storage/store_battery_charge_supervisor.c src/storage/store_health.c src/storage/store_service.c src/storage/store_divert.c src/storage/store_pictures.c src/storage/store_settings.c src/storage/store_t9.c src/storage/store_tones.c src/storage/store_warranty.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c src/services/battery_learning_logic.c src/services/battery_charge_supervisor_logic.c src/services/battery_charge_logic.c src/services/sms_picture_codec.c -I src -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
+run test_store_service       src/storage/store_calls.c src/storage/store_battery_learning.c src/storage/store_battery_charge_supervisor.c src/storage/store_health.c src/storage/store_service.c src/storage/store_divert.c src/storage/store_pictures.c src/storage/store_settings.c src/storage/store_t9.c src/storage/store_tones.c src/storage/store_warranty.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c src/services/battery_learning_logic.c src/services/battery_charge_supervisor_logic.c src/services/battery_charge_logic.c src/services/sms_picture_codec.c src/services/sms_deliver_codec.c -I src -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_t9_service          src/services/t9_service.c "$GENERATED_SRC_DIR/t9_ldb.c"
 run test_phone_match         src/services/phone_match.c
 run test_clock_alarm_logic   src/apps/clock_alarm_logic.c

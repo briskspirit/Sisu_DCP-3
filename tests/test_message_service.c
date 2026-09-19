@@ -613,10 +613,42 @@ static void test_control_admission(void) {
     assert(status().inbox == 1u && status().pending == 0u && status().filtered_controls == 1u);
 }
 
+static void test_durable_receive_receipts(void) {
+    fresh();
+    make_pdu(pdu[0], 2u, 1u, 41u, 1u, "First ");
+    make_pdu(pdu[1], 2u, 2u, 41u, 2u, "second");
+    uint32_t receipt, next;
+    assert(message_service_receive_tracked(pdu[0], &receipt));
+    assert(!message_service_receive_committed(receipt));
+    assert(!message_service_receive_tracked(pdu[1], &next));
+    busy = true; tick();
+    assert(!message_service_receive_committed(receipt));
+    busy = false; write_error = true; drain();
+    assert(!message_service_receive_committed(receipt));
+    write_error = false; now += 60001u; drain();
+    assert(message_service_receive_committed(receipt) && status().pending == 1u);
+    /* The modem still has its copy after a cut. Reimport is idempotent. */
+    reopen();
+    assert(!message_service_receive_committed(receipt));
+    assert(message_service_receive_tracked(pdu[0], &next));
+    drain();
+    assert(message_service_receive_committed(next) && status().pending == 1u);
+    message_service_receive_forget(next);
+    assert(message_service_receive_tracked(pdu[1], &receipt));
+    message_service_receive_forget(receipt);
+    assert(message_service_receive_tracked(pdu[0], &next) && next != receipt);
+    tick();
+    assert(!message_service_receive_committed(next));
+    drain();
+    assert(message_service_receive_committed(next) && status().inbox == 1u);
+    message_service_receive_forget(next);
+}
+
 int main(void) {
     test_codec(); test_mailboxes(); test_multipart(); test_power_cuts(); test_busy_and_full();
     test_sent_copy_and_category_isolation(); test_failed_queue_sleep();
     test_io_retry_and_corrupt_record(); test_publication_conflict_isolation(); test_delete_power_cuts();
     test_expiry(); test_expiry_power_cuts(); test_control_admission();
+    test_durable_receive_receipts();
     storage_lfs_deinit(); puts("PASS: local messages");
 }

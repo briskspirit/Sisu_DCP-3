@@ -2,6 +2,7 @@
 
 #include "harness/modem_service_harness.h"
 #include "services/modem_supplementary_state.h"
+#include "services/modem_sms_recovery.h"
 #include "services/sms_identity.h"
 #include "services/sms_submit_codec.h"
 
@@ -21,6 +22,10 @@ static bool s_ring_pulse_mode;
 static uint16_t s_e2smsri_ms;
 static uint16_t s_psmri_ms;
 static uint8_t s_cnmi_mode;
+static const char SMS_PROFILE_QUERY[] = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?";
+static const char SMS_PROFILE_SET[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0";
+static bool s_recovery_test_message, s_recovery_test_changed;
+static unsigned s_recovery_test_reads, s_recovery_test_deletes;
 static bool s_psmri_live_armed;
 static bool s_late_psmri_invalidated_latch;
 static bool s_stune_enabled;
@@ -515,6 +520,36 @@ static void telit_sms_raw_write(const uint8_t *data, size_t len) {
 }
 
 static void telit_response(const char *command) {
+    if (s_hold_final_command != NULL && strcmp(command, s_hold_final_command) == 0) {
+        s_mh_final = MH_FINAL_NONE;
+        return;
+    }
+    if (strcmp(command, SMS_PROFILE_QUERY) == 0) {
+        mh_rx_push("+CMGF: 1"); mh_rx_push("+CSDH: 1");
+        mh_rx_push("+CSCS: \"GSM\""); mh_rx_push("#CSCSEXT: 0");
+        mh_rx_push(s_cnmi_mode == 2u ? "+CNMI: 2,2,0,0,0" : "+CNMI: 0,0,0,0,0");
+        return;
+    }
+    if (strcmp(command, SMS_PROFILE_SET) == 0) { s_cnmi_mode = 2u; return; }
+    if (strcmp(command, "AT+CPMS=\"ME\"") == 0) {
+        mh_rx_push(s_recovery_test_message ? "+CPMS: 1,4,1,4,1,4" : "+CPMS: 0,255,0,255,0,255");
+        return;
+    }
+    if (s_recovery_test_message && strncmp(command, "AT+CMGR=", 8u) == 0) {
+        if (strcmp(command, "AT+CMGR=3") != 0) {
+            mh_rx_push("+CMS ERROR: 321"); s_mh_final = MH_FINAL_NONE;
+        } else {
+            s_recovery_test_reads++;
+            mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,0,0,0,\"\",129,5");
+            mh_rx_push(s_recovery_test_changed ? "other" : "hello");
+        }
+        return;
+    }
+    if (strcmp(command, "AT+CMGD=3,0") == 0 && s_recovery_test_message) {
+        s_recovery_test_deletes++;
+        s_recovery_test_message = false;
+        return;
+    }
     if (strcmp(command, "AT") == 0 &&
         (s_fault == TELIT_FAULT_REBOOT_RI_BEFORE_DROP ||
          s_fault == TELIT_FAULT_REBOOT_RI_LOST_FINAL) &&
@@ -1129,6 +1164,8 @@ static void begin_telit(bool rxdiv_configured) {
     s_e2smsri_ms = 0u;
     s_psmri_ms = 1000u;
     s_cnmi_mode = 0u;
+    s_recovery_test_message = s_recovery_test_changed = false;
+    s_recovery_test_reads = s_recovery_test_deletes = 0u;
     s_psmri_live_armed = false;
     s_late_psmri_invalidated_latch = false;
     s_stune_enabled = true;
@@ -1413,7 +1450,7 @@ static void test_cold_boot_matching_provision(void) {
     check(status.sim_checked && status.sim_present,
           "ready SIM publishes checked and physically present");
     check(status.provisioning_verified &&
-              status.provisioning_schema_version == 12u,
+              status.provisioning_schema_version == 13u,
           "complete readback pass publishes versioned provisioning result");
     check(s_mh_rail_enabled && s_mh_status_raw >= 1024u,
           "READY retains the modem rail with high PWRMON evidence");
@@ -1723,7 +1760,7 @@ static void test_cold_boot_repairs_dvi_and_restores_runtime_mode(void) {
           "fresh DVI profile converges through one controlled reboot");
     modem_status_t status = mh_status();
     check(status.provisioning_verified && status.audio_init_ok &&
-              status.provisioning_schema_version == 12u,
+              status.provisioning_schema_version == 13u,
           "repaired DVI profile reaches READY with audio qualified");
     check(s_dviext_configured && s_dvi_configured &&
               mh_tx_count_exact("AT#DVIEXT=1,1") == 1u &&
@@ -1776,7 +1813,7 @@ static void test_cold_boot_provisions_antenna_before_rf_online(void) {
               final_verify < rf_online,
           "RF stays off through GPIO setup and final table verification");
     check(mh_status().provisioning_verified &&
-              mh_status().provisioning_schema_version == 12u,
+              mh_status().provisioning_schema_version == 13u,
           "antenna provisioning participates in the versioned contract");
 }
 
@@ -1996,10 +2033,17 @@ static void test_autonomous_startup_restart_reinitializes_once(void) {
     begin_telit(true);
     s_startup_drop_command = "AT";
     s_startup_drops_remaining = 2u;
-    check(!boot_until_ready(70000u) &&
+    check(boot_until_ready(100000u) &&
+              s_startup_drops_remaining == 0u && s_mh_rail_enabled &&
+              s_mh_rail_transition_count == 1u,
+          "two profile startup restarts recover without rail cycles");
+    begin_telit(true);
+    s_startup_drop_command = "AT";
+    s_startup_drops_remaining = 3u;
+    check(!boot_until_ready(100000u) &&
               service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
               s_startup_drops_remaining == 0u && s_mh_rail_enabled,
-          "a second autonomous startup drop is bounded and retains the uncertain rail");
+          "a third autonomous startup drop is bounded and retains the uncertain rail");
 }
 
 static void begin_startup_restart_wait(void) {
@@ -3141,7 +3185,7 @@ static void test_sms_crossed_urcs_remain_routed(void) {
               send_result.request_id == s_last_sms_request_id &&
               send_result.kind == MODEM_SMS_REQUEST_SEND_TEXT &&
               send_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              s_mh_local_lost == 1u &&
+              s_mh_local_lost == 0u &&
               mh_status().ring_active &&
               mh_status().call_state == MODEM_CALL_RINGING,
           "CMTI and RING crossing CMGS remain URCs while send succeeds");
@@ -3166,7 +3210,7 @@ static void test_sms_crossed_urcs_remain_routed(void) {
               send_result.request_id == s_last_sms_request_id &&
               send_result.kind == MODEM_SMS_REQUEST_SEND_TEXT &&
               send_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              s_mh_local_lost == 1u &&
+              s_mh_local_lost == 0u &&
               mh_status().ring_active && !mh_status().operation_busy,
           "URCs crossing the post-prompt final remain routed and do not steal it");
 }
@@ -6554,7 +6598,109 @@ static void test_sim_provider_unreleased_channel_and_shutdown(void) {
     }
 }
 
+static void recovery_tick_until_store(void) {
+    for (unsigned i = 0u; i < 100u && s_mh_local_received == 0u; i++) mh_advance(50u);
+    check(s_mh_local_received == 1u && s_recovery_test_reads == 1u &&
+              s_recovery_test_deletes == 0u &&
+              mh_status().sms_recovery_step == MODEM_SMS_RECOVERY_STORE,
+          "stored SMS waits for durable local commit before reread/delete");
+}
+
+static void begin_stored_recovery(void) {
+    begin_telit(true);
+    boot_until_ready(30000u);
+    s_recovery_test_message = true;
+    s_mh_local_commit_held = true;
+    mh_feed("+CMTI: \"ME\",3");
+    recovery_tick_until_store();
+}
+
+static void test_stored_sms_durable_recovery(void) {
+    begin_stored_recovery();
+    mh_advance(1000u);
+    check(s_recovery_test_reads == 1u && s_recovery_test_deletes == 0u,
+          "busy local storage cannot release a modem record");
+    mh_rx_push("+CMT: \"+15551234568\",\"\",\"26/09/19,12:01:00+00\",145,0,0,0,\"\",129,4");
+    mh_feed("live");
+    check(s_mh_local_received == 2u && s_mh_local_lost == 0u,
+          "live direct SMS remains independent of the parked ME transfer");
+    s_mh_local_commit_held = false;
+    for (unsigned i = 0; i < 100u && s_recovery_test_deletes == 0u; i++) mh_advance(50u);
+    check(s_recovery_test_reads == 2u && s_recovery_test_deletes == 1u &&
+              mh_status().sms_recovered == 1u && s_mh_local_received == 2u,
+          "exact reread authorizes one deletion without duplicating local delivery");
+
+    begin_stored_recovery();
+    s_recovery_test_changed = true;
+    s_mh_local_commit_held = false;
+    for (unsigned i = 0; i < 100u; i++) mh_advance(50u);
+    check(s_recovery_test_reads == 2u && s_recovery_test_deletes == 0u &&
+              mh_status().sms_recovery_errors != 0u,
+          "a changed modem slot never inherits the previous record's commit receipt");
+
+    begin_stored_recovery();
+    s_mh_sim_present = s_mh_sim_ready = false;
+    mh_feed("#QSS: 0");
+    s_mh_local_commit_held = false;
+    for (unsigned i = 0; i < 100u; i++) mh_advance(50u);
+    check(s_recovery_test_deletes == 0u,
+          "SIM removal revokes a pending stored-message deletion");
+}
+
+static void test_stored_sms_call_and_timeout_ownership(void) {
+    begin_stored_recovery();
+    s_clcc_row = "+CLCC: 1,1,4,0,0,\"15557654321\",145";
+    mh_feed("RING");
+    s_mh_local_commit_held = false;
+    mh_advance(100u);
+    check(s_recovery_test_reads == 1u && s_recovery_test_deletes == 0u,
+          "incoming call pauses ME recovery between commands");
+    check(modem_service_request_answer(), "answer is admitted during parked recovery");
+    s_clcc_row = "+CLCC: 1,1,0,0,0,\"15557654321\",145";
+    mh_advance(100u);
+    check(mh_tx_count_exact("ATA") == 1u && s_recovery_test_deletes == 0u,
+          "call answer takes priority over verification and deletion");
+
+    begin_telit(true);
+    boot_until_ready(30000u);
+    s_recovery_test_message = true;
+    s_hold_final_command = "AT+CMGR=3";
+    mh_feed("+CMTI: \"ME\",3");
+    for (unsigned i = 0; i < 100u && mh_tx_count_exact("AT+CMGR=3") == 0u; i++) mh_advance(50u);
+    check(mh_tx_count_exact("AT+CMGR=3") == 1u, "recovery fixture reaches held CMGR");
+    mh_advance(5001u);
+    mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,0,0,0,\"\",129,4");
+    mh_rx_push("RING");
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    mh_advance(100u);
+    check(s_mh_local_received == 0u && s_recovery_test_deletes == 0u &&
+              mh_status().sms_recovery_step == MODEM_SMS_RECOVERY_NONE &&
+              mh_tx_count_exact("AT+CMGR=0") == 0u,
+          "late CMGR body/final are drained without publication or stale recovery commands");
+    check(!mh_status().ring_active && mh_status().incoming_number[0] == '\0',
+          "RING inside a late stored body is not an incoming call");
+}
+
+static void test_early_sms_profile_order_and_wear(void) {
+    begin_telit(true);
+    check(boot_until_ready(30000u), "early SMS profile fixture boots");
+    check(tx_first_index("AT+CFUN=4") < tx_first_index(SMS_PROFILE_QUERY) &&
+              tx_first_index(SMS_PROFILE_QUERY) < tx_first_index(SMS_PROFILE_SET) &&
+              tx_first_index(SMS_PROFILE_SET) < tx_first_index("AT+CFUN=5"),
+          "SMS delivery format is repaired and saved before RF activation");
+    check(mh_tx_count_exact(SMS_PROFILE_SET) == 1u,
+          "completion pass does not rewrite the already repaired SMS profile");
+    begin_telit(true);
+    s_cnmi_mode = 2u;
+    check(boot_until_ready(30000u) && mh_tx_count_exact(SMS_PROFILE_SET) == 0u,
+          "a matching boot-loaded SMS profile incurs no additional NVM write");
+}
+
 int main(void) {
+    test_early_sms_profile_order_and_wear();
+    test_stored_sms_durable_recovery();
+    test_stored_sms_call_and_timeout_ownership();
     test_operator_name_fallbacks();
     test_operator_name_registration_and_sim_lifetimes();
     test_sim_provider_query_keeps_receiving(false);

@@ -360,6 +360,35 @@ store_status_t store_picture_receive_pdu(const char *pdu, uint32_t now_ms) {
     return store_picture_receive(&s_receive_part, now_ms);
 }
 
+store_status_t store_picture_received_pdu_status(const char *pdu) {
+    if (!sms_pdu_decode(pdu, &s_receive_part) || !s_receive_part.has_ports ||
+        s_receive_part.dest_port != SMS_CODEC_PICTURE_PORT)
+        return STORE_STATUS_NOT_FOUND;
+    const sms_codec_message_t *part = &s_receive_part;
+    uint8_t seq = part->has_concat ? part->concat_seq : 1u;
+    uint8_t total = part->has_concat ? part->concat_total : 1u;
+    if (!part->binary || part->submit || part->udh_unhandled || part->trailing_data ||
+        part->pid != 0u || seq == 0u || seq > MODEM_SMS_SEGMENT_MAX || seq > total)
+        return STORE_STATUS_INVALID_ARGUMENT;
+    store_status_t committed = store_picture_commit_status();
+    if (committed != STORE_STATUS_OK) return committed;
+    for (unsigned i = 0u; i < STORE_PICTURE_PENDING_COUNT; i++) {
+        const picture_pending_t *p = &s_picture_messages.pending[i];
+        if (p->state == 0u || p->state == 4u || p->total != total ||
+            p->reference != part->concat_ref || p->ref16 != part->concat_ref_16bit ||
+            p->concat != part->has_concat || p->source_port != part->source_port ||
+            p->dcs != part->dcs || !(p->seen & (1u << (seq - 1u))) ||
+            strcmp(p->sender, part->address) != 0 ||
+            !picture_timestamp_matches(p->timestamp, part->timestamp, part->has_concat)) continue;
+        uint16_t offset = 0u;
+        for (unsigned j = 0u; j + 1u < seq; j++) offset += p->lengths[j];
+        if (p->lengths[seq - 1u] == part->binary_len &&
+            memcmp(p->data + offset, part->binary_data, part->binary_len) == 0)
+            return STORE_STATUS_OK;
+    }
+    return STORE_STATUS_NOT_FOUND;
+}
+
 uint32_t store_picture_pending_first(void) {
     if (store_picture_commit_status() != STORE_STATUS_OK) return 0u;
     uint32_t id = 0u;

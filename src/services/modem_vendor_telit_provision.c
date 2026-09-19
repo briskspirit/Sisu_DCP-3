@@ -64,6 +64,53 @@ static bool telit_init_parse_cfun1(const char *line) {
            value == 1u;
 }
 
+static uint8_t s_sms_profile_seen;
+static bool s_sms_profile_match, s_sms_profile_invalid, s_sms_profile_save_needed;
+static void telit_sms_profile_begin(void) {
+    s_sms_profile_seen = 0u;
+    s_sms_profile_match = true;
+    s_sms_profile_invalid = false;
+}
+static modem_provision_line_t telit_sms_profile_line(const char *line) {
+    static const char *const prefixes[] = {"+CMGF:", "+CSDH:", "+CSCS:", "#CSCSEXT:", "+CNMI:"};
+    static const uint8_t single[] = {1u, 1u, 0u, 0u};
+    static const uint8_t cnmi[] = {2u, 2u, 0u, 0u, 0u};
+    for (unsigned i = 0u; i < 5u; i++) {
+        if (!telit_starts_with(line, prefixes[i])) continue;
+        modem_provision_line_t result;
+        if (i == 2u) {
+            telit_csv_view_t fields[1]; size_t count = 0u;
+            if (!telit_view_split_prefixed(line, prefixes[i], fields, 1u, &count) || count != 1u)
+                result = MODEM_PROVISION_LINE_INVALID;
+            else result = telit_view_equals(fields[0], "GSM")
+                ? MODEM_PROVISION_LINE_MATCH : MODEM_PROVISION_LINE_MISMATCH;
+        } else result = telit_provision_values(line, prefixes[i],
+            i == 4u ? cnmi : &single[i], i == 4u ? 5u : 1u);
+        if ((s_sms_profile_seen & (1u << i)) || result == MODEM_PROVISION_LINE_INVALID)
+            s_sms_profile_invalid = true;
+        s_sms_profile_seen |= (uint8_t)(1u << i);
+        if (result != MODEM_PROVISION_LINE_MATCH) s_sms_profile_match = false;
+        /* The aggregate final owns comparison, not individual mixed rows. */
+        return MODEM_PROVISION_LINE_MATCH;
+    }
+    return MODEM_PROVISION_LINE_IGNORE;
+}
+static modem_provision_line_t telit_sms_profile_finish(bool ok, bool timed_out) {
+    if (!ok || timed_out || s_sms_profile_seen != 31u || s_sms_profile_invalid) {
+        s_sms_profile_save_needed = true;
+        return MODEM_PROVISION_LINE_INVALID;
+    }
+    return s_sms_profile_match && !s_sms_profile_save_needed
+        ? MODEM_PROVISION_LINE_MATCH : MODEM_PROVISION_LINE_MISMATCH;
+}
+static bool telit_sms_profile_set(char *out, size_t cap) {
+    const char *command = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0";
+    if (strlen(command) >= cap) return false;
+    strcpy(out, command);
+    s_sms_profile_save_needed = false;
+    return true;
+}
+
 /* The ordinary pass remains RF-safe in CFUN=4 through antenna provisioning.
  * Once its final CFUN=5 activates the SIM, a focused completion pass enters
  * CFUN=1, applies SIM-owned URCs and the generic sleep-URC RI profile, then
@@ -106,16 +153,16 @@ const modem_init_step_t TELIT_INIT_STEPS[] = {
     TELIT_INIT("AT+CPIN?",             2500u, 10u, false, MODEM_DEGRADE_SIM_GATE,
                MODEM_INIT_PREREQ_NONE, MODEM_SETTING_RUNTIME, NULL),
     TELIT_INIT("AT+CMGF=1",            2500u, 3u, false, MODEM_DEGRADE_NONE,
-               MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
+               MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION, MODEM_SETTING_PROFILE, NULL),
     /* Text-mode +CMT/+CMGR/+CMGL carry <tooa>,<fo>,<pid>,<dcs>,<length>
      * (3GPP) or <tooa>,<tele_id>,<priority>,<enc>,<length> (Telit 3GPP2)
      * only with +CSDH=1. Direct delivery needs them to rebuild a PDU. */
     TELIT_INIT("AT+CSDH=1",            2500u, 3u, false, MODEM_DEGRADE_NONE,
-               MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
+               MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT("AT+CSCS=\"GSM\"",      2500u, 3u, false, MODEM_DEGRADE_NONE,
-               MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
+               MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT("AT#CSCSEXT=0",          2500u, 3u, false, MODEM_DEGRADE_NONE,
-               MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
+               MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT("AT+CSMP=17,167,0,0",   15000u, 2u, true,
                MODEM_DEGRADE_SMS_SETUP, MODEM_INIT_PREREQ_SIM_READY,
                MODEM_SETTING_RUNTIME, NULL),
@@ -125,7 +172,7 @@ const modem_init_step_t TELIT_INIT_STEPS[] = {
      * to a 23.040 PDU, and queued for local littlefs storage. Mode 2 buffers the URC while the
      * TA-TE link is reserved and flushes it afterwards; DTR sleep unchanged. */
     TELIT_INIT("AT+CNMI=2,2,0,0,0",    2500u, 3u, false, MODEM_DEGRADE_NONE,
-               MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
+               MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT("AT+CLIP=1",             2500u, 3u, false, MODEM_DEGRADE_NONE,
                MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT("AT+CCWA=1",             2500u, 3u, false, MODEM_DEGRADE_NONE,
@@ -398,6 +445,19 @@ static const char TELIT_SMS_WAKE_SAVED_PROFILE_SET[] =
  * controlled reboot after the full pass. DVI remains a separately gated step:
  * ordinary boot must not change an unqualified voice transport. */
 const modem_provision_step_t TELIT_PROVISION_STEPS[] = {
+    /* Inspect the boot-loaded SMS profile before any runtime SMS writes and
+     * before RF resumes. Some images defer these commands until SIM activation;
+     * the completion-only row below then repairs and saves the same profile.
+     * CSAS does not save CNMI/CMGF: these belong to &W's AT-instance profile. */
+    {
+        .query_cmd = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?",
+        .timeout_ms = 5000u, .retry_limit = 1u, .recoverable = true,
+        .persistence = MODEM_SETTING_PROFILE,
+        .build_set_cmd = telit_sms_profile_set,
+        .parse_readback = telit_sms_profile_line,
+        .readback_begin = telit_sms_profile_begin,
+        .readback_finish = telit_sms_profile_finish,
+    },
     /* Enable persistent SIM-based selection, not a fixed carrier or one-shot
      * mode. Query/repair before board settings; never issue FWSWITCH here. */
     TELIT_PROVISION("AT#FWAUTOSIM?", "AT#FWAUTOSIM=1", 5000u, 2u, true,
@@ -608,6 +668,16 @@ const modem_provision_step_t TELIT_PROVISION_STEPS[] = {
     },
     /* RF may only resume after the antenna table and all persistent safety
      * rows have verified. This is runtime state and causes no NVM wear. */
+    {
+        .query_cmd = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?",
+        .timeout_ms = 5000u, .retry_limit = 2u, .recoverable = false,
+        .prerequisites = MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION,
+        .persistence = MODEM_SETTING_PROFILE,
+        .build_set_cmd = telit_sms_profile_set,
+        .parse_readback = telit_sms_profile_line,
+        .readback_begin = telit_sms_profile_begin,
+        .readback_finish = telit_sms_profile_finish,
+    },
     TELIT_PROVISION("AT+CFUN?", "AT+CFUN=5", 5000u, 2u, false,
                     MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_NONE,
                     MODEM_SETTING_RUNTIME, telit_provision_cfun5),

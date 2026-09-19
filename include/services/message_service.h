@@ -39,6 +39,12 @@ bool message_service_idle(void);
  * New work and transient BUSY results remain blockers. */
 bool message_service_sleep_ready(void);
 bool message_service_receive(const char *pdu);
+/* One tracked external copy at a time. Completion means its contents are
+ * durable (possibly as an incomplete fragment), or deliberately filtered.
+ * Forgetting a receipt never removes the admitted delivery. */
+bool message_service_receive_tracked(const char *pdu, uint32_t *receipt);
+bool message_service_receive_committed(uint32_t receipt);
+void message_service_receive_forget(uint32_t receipt);
 void message_service_note_receive_loss(void);
 /* Queue a copy only after the modem confirms transmission. A storage failure
  * must not turn an accepted transmission into a retryable send failure. */

@@ -19,6 +19,7 @@
 
 #include "services/backlight_service.h"
 #include "services/lcd_calibration.h"
+#include "services/sms_deliver_codec.h"
 #include "storage/nvm_hal.h"
 #include "storage/store_service.h"
 #include "storage/store_health.h"
@@ -2485,8 +2486,27 @@ static void test_picture_receive_journal(void) {
     assert_true(store_picture_receive(&part, 100u) == STORE_STATUS_OK, "out of order final part staged");
     picture_part(&part, payload, len, 1u, 17u);
     assert_true(store_picture_receive(&part, 101u) == STORE_STATUS_OK, "first part staged");
+    sms_deliver_t deliver = {.dcs = 4u, .udhi = true};
+    strcpy(deliver.address, part.address);
+    assert_true(sms_deliver_scts_encode(2026u, 9u, 18u, 12u, 0u, 0u, 0, deliver.scts),
+                "encode durable receipt timestamp");
+    const uint8_t udh[] = {11u, 0u, 3u, 17u, 3u, 1u, 5u, 4u, 0x15u, 0x8au, 0u, 0u};
+    memcpy(deliver.ud, udh, sizeof(udh));
+    memcpy(deliver.ud + sizeof(udh), part.binary_data, part.binary_len);
+    deliver.ud_len = deliver.udl = (uint8_t)(sizeof(udh) + part.binary_len);
+    char pdu[SMS_DELIVER_HEX_MAX];
+    uint8_t tpdu_len;
+    assert_true(sms_deliver_build(&deliver, pdu, sizeof(pdu), &tpdu_len), "encode receipt PDU");
+    assert_true(store_picture_received_pdu_status(pdu) == STORE_STATUS_NOT_READY,
+                "uncommitted picture part cannot release its external copy");
     flush_commits();
     assert_true(store_service_init() == STORE_STATUS_OK, "restart during assembly");
+    assert_true(store_picture_received_pdu_status(pdu) == STORE_STATUS_OK,
+                "exact incomplete fragment is durable across restart");
+    deliver.ud[sizeof(udh)] ^= 1u;
+    assert_true(sms_deliver_build(&deliver, pdu, sizeof(pdu), &tpdu_len) &&
+                store_picture_received_pdu_status(pdu) == STORE_STATUS_NOT_FOUND,
+                "different fragment bytes cannot inherit a picture receipt");
     assert_eq_u32(0u, store_picture_pending_first(), "incomplete picture is not announced");
     picture_part(&part, payload, len, 2u, 17u);
     assert_true(store_picture_receive(&part, 102u) == STORE_STATUS_OK, "assembly resumes after restart");

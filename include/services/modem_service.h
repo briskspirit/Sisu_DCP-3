@@ -98,6 +98,9 @@ typedef struct {
     uint32_t urc_count;
     uint32_t command_errors;
     uint32_t sms_received_count; /* normalized incoming transport segments */
+    uint32_t sms_recovered;
+    uint32_t sms_recovery_errors;
+    uint8_t sms_recovery_step;
     uint32_t sms_sent_count;
     uint32_t sms_filtered_type0;
     uint32_t sms_filtered_vvm;

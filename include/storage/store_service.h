@@ -385,6 +385,9 @@ store_status_t store_picture_message_sender(uint8_t slot, char *dst, size_t cap)
 store_status_t store_picture_receive(const sms_codec_message_t *part, uint32_t now_ms);
 /* NOT_FOUND leaves ordinary SMS on their existing modem-storage path. */
 store_status_t store_picture_receive_pdu(const char *pdu, uint32_t now_ms);
+/* Read-only proof for an external copy: the exact fragment must still be
+ * present in the committed picture record, not merely accepted in RAM. */
+store_status_t store_picture_received_pdu_status(const char *pdu);
 uint32_t store_picture_pending_first(void);
 store_status_t store_picture_pending_get(uint32_t id, store_picture_message_t *out,
                                          char *sender, size_t sender_cap);

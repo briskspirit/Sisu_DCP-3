@@ -2273,6 +2273,10 @@ static void command_status(void) {
            (unsigned long)status.picture_receive_errors,
            (unsigned long)store_picture_pending_first(),
            (unsigned)store_picture_commit_status());
+    printf("[debug] sms_recovery recovered=%lu errors=%lu step=%u\n",
+           (unsigned long)status.sms_recovered,
+           (unsigned long)status.sms_recovery_errors,
+           (unsigned)status.sms_recovery_step);
     const char *operator_source =
         status.operator_name_source == MODEM_OPERATOR_NAME_DATABASE ? "db" :
         status.operator_name_source == MODEM_OPERATOR_NAME_SIM ? "sim" :

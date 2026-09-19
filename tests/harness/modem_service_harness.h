@@ -361,11 +361,26 @@ static unsigned s_mh_picture_parts;
 static char s_mh_local_pdu[SMS_DELIVER_HEX_MAX];
 static unsigned s_mh_local_received, s_mh_local_sent, s_mh_local_lost;
 static bool s_mh_local_reject;
+static bool s_mh_local_commit_held;
+static uint32_t s_mh_receive_receipt;
 bool message_service_receive(const char *pdu) {
     if (s_mh_local_reject) { s_mh_local_lost++; return false; }
     snprintf(s_mh_local_pdu, sizeof(s_mh_local_pdu), "%s", pdu);
     s_mh_local_received++;
     return true;
+}
+bool message_service_receive_tracked(const char *pdu, uint32_t *receipt) {
+    if (!message_service_receive(pdu)) return false;
+    *receipt = ++s_mh_receive_receipt;
+    return true;
+}
+bool message_service_receive_committed(uint32_t receipt) {
+    return receipt != 0u && receipt == s_mh_receive_receipt && !s_mh_local_commit_held;
+}
+void message_service_receive_forget(uint32_t receipt) { (void)receipt; }
+store_status_t store_picture_received_pdu_status(const char *pdu) {
+    (void)pdu;
+    return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : STORE_STATUS_OK;
 }
 bool message_service_sent(const char *address, const char *text) {
     (void)address; (void)text;
@@ -558,6 +573,8 @@ void mh_begin(void) {
     s_mh_local_pdu[0] = 0;
     s_mh_local_received = s_mh_local_sent = s_mh_local_lost = 0u;
     s_mh_local_reject = false;
+    s_mh_local_commit_held = false;
+    s_mh_receive_receipt = 0u;
     s_mh_now = 0u;
     s_mh_rx_len = s_mh_rx_pos = 0u;
     s_mh_rx_stuck_readable = false;

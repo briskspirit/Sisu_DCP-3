@@ -161,7 +161,7 @@ static void test_production_descriptor(void) {
           "manual-supported call operations exposed at protocol layer");
     check(g_modem_vendor.call.progress_finals_may_complete_command,
           "usual Telit finals can complete call commands");
-    check(g_modem_vendor.provision_schema_version == 12u,
+    check(g_modem_vendor.provision_schema_version == 13u,
           "Telit provisioning contract has an explicit schema version");
     check(g_modem_vendor.supplementary.supported &&
               g_modem_vendor.supplementary.call_forward_step_count != NULL &&
@@ -254,16 +254,16 @@ static void test_production_descriptor(void) {
                       MODEM_SETTING_RUNTIME);
     check_init_policy("AT+CPIN?", MODEM_INIT_PREREQ_NONE,
                       MODEM_SETTING_RUNTIME);
-    check_init_policy("AT+CMGF=1", MODEM_INIT_PREREQ_SIM_READY,
+    check_init_policy("AT+CMGF=1", MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION,
                       MODEM_SETTING_PROFILE);
-    check_init_policy("AT+CSCS=\"GSM\"", MODEM_INIT_PREREQ_SIM_READY,
+    check_init_policy("AT+CSCS=\"GSM\"", MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION,
                       MODEM_SETTING_PROFILE);
     check_init_policy("AT+CSMP=17,167,0,0",
                       MODEM_INIT_PREREQ_SIM_READY,
                       MODEM_SETTING_RUNTIME);
-    check_init_policy("AT+CSDH=1", MODEM_INIT_PREREQ_SIM_READY,
+    check_init_policy("AT+CSDH=1", MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION,
                       MODEM_SETTING_PROFILE);
-    check_init_policy("AT+CNMI=2,2,0,0,0", MODEM_INIT_PREREQ_SIM_READY,
+    check_init_policy("AT+CNMI=2,2,0,0,0", MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION,
                       MODEM_SETTING_PROFILE);
     check_init_policy("AT+CLIP=1", MODEM_INIT_PREREQ_SIM_READY,
                       MODEM_SETTING_PROFILE);
@@ -358,7 +358,7 @@ static void test_production_descriptor(void) {
               "provisioning never forces a carrier or issues factory restore");
     }
     if (auto_profile != NULL) {
-        check(auto_profile == &g_modem_vendor.provision_steps[0] &&
+        check(auto_profile == &g_modem_vendor.provision_steps[1] &&
                   auto_profile->prerequisites == MODEM_INIT_PREREQ_NONE &&
                   auto_profile->persistence == MODEM_SETTING_NVM &&
                   auto_profile->recoverable && !auto_profile->set_each_pass &&
@@ -2258,7 +2258,45 @@ static void test_3gpp_ucs2_character_length(void) {
           "UDH outside the UCS2 body is rejected");
 }
 
+static void test_sms_profile_readback(void) {
+    const char *query = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?";
+    const modem_provision_step_t *early = find_provision_step_nth(query, 0u);
+    const modem_provision_step_t *late = find_provision_step_nth(query, 1u);
+    check(early && late && early->recoverable && !late->recoverable,
+          "early optional SMS inspection has a strict SIM-ready completion counterpart");
+    if (!early || !late) return;
+    const char *rows[] = {"+CNMI: 2,2,0,0,0", "#CSCSEXT: 0", "+CSCS: \"GSM\"", "+CMGF: 1", "+CSDH: 1"};
+    char command[MODEM_PROVISION_COMMAND_MAX];
+    check(early->build_set_cmd(command, sizeof(command)) &&
+              strcmp(command, "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0") == 0,
+          "profile writer orders representation before delivery and explicitly saves default profile zero");
+    early->readback_begin();
+    for (unsigned i = 0; i < 5u; i++) early->parse_readback(rows[i]);
+    check(early->readback_finish(true, false) == MODEM_PROVISION_LINE_MATCH,
+          "profile verification requires all five settings and tolerates row order");
+    early->readback_begin();
+    for (unsigned i = 0; i < 4u; i++) early->parse_readback(rows[i]);
+    check(early->readback_finish(true, false) == MODEM_PROVISION_LINE_INVALID,
+          "an OK missing one SMS setting cannot qualify the profile");
+    late->readback_begin();
+    for (unsigned i = 0; i < 5u; i++) late->parse_readback(rows[i]);
+    check(late->readback_finish(true, false) == MODEM_PROVISION_LINE_MISMATCH,
+          "failed early inspection requires saving even after late runtime setters match");
+    early->build_set_cmd(command, sizeof(command));
+    early->readback_begin();
+    for (unsigned i = 0; i < 5u; i++) early->parse_readback(rows[i]);
+    early->parse_readback(rows[0]);
+    check(early->readback_finish(true, false) == MODEM_PROVISION_LINE_INVALID,
+          "duplicate profile fields cannot manufacture a verified aggregate");
+    early->build_set_cmd(command, sizeof(command));
+    early->readback_begin();
+    for (unsigned i = 0; i < 5u; i++) early->parse_readback(i == 0u ? "+CNMI: 0,0,0,0,0" : rows[i]);
+    check(early->readback_finish(true, false) == MODEM_PROVISION_LINE_MISMATCH,
+          "stored-message delivery profile is a repairable mismatch");
+}
+
 int main(void) {
+    test_sms_profile_readback();
     test_text_transmit_encoding();
     test_3gpp_ucs2_character_length();
     test_production_descriptor();
