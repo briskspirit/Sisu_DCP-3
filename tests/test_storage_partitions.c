@@ -8,10 +8,9 @@
 #include "storage/storage_partitions.h"
 
 static uint8_t media[STORAGE_RESERVED_BYTES], saved[STORAGE_RESERVED_BYTES];
-static uint8_t intermediate[STORAGE_RESERVED_BYTES];
 static uint8_t data[STORAGE_RECORD_MAX_PAYLOAD], readback[STORAGE_RECORD_MAX_PAYLOAD];
 static storage_backend_t router, raw;
-static unsigned operations, cut_at, mode, cut_cases;
+static unsigned operations, cut_at, mode;
 static jmp_buf power_cut;
 static bool busy;
 
@@ -61,7 +60,6 @@ static nvm_hal_t user_hal = {
     .erase_block = 4096u, .write_block = 256u, .erase_required = true,
     .read = read_media, .erase = erase_media, .write = prog_media,
 };
-static nvm_hal_t stage1_hal;
 static const uint16_t sizes[16] = {
     75, 52, 98, 228, 64, 187, 678, 1492, 1492, 8, 3824, 1120, 178, 47, 96, 128,
 };
@@ -88,149 +86,83 @@ static void verify_all(void) {
         fill(i, sizes[i]);
         verify_record(&router, (uint16_t)(0x3210u + i), data, sizes[i]);
     }
-    verify_record(&router, 0xffffu, (const uint8_t *)"SIS\1", 4u);
     storage_partition_diag_t diag;
     storage_partitions_get_diag(&diag);
-    assert(diag.ready && diag.split && diag.system_blocks == 16 && diag.user_blocks == 96);
+    assert(diag.ready && diag.system_blocks == 16 && diag.user_blocks == 96);
 }
 
-static void seed(bool format_system) {
+static void seed(void) {
     storage_lfs_deinit();
     memset(media, 0xff, sizeof(media));
-    /* Growing must not interpret the old journal's non-erased bytes as files. */
-    memset(media + sizeof(media) - STORAGE_LEGACY_BYTES, 0xa5, STORAGE_LEGACY_BYTES);
-    stage1_hal = user_hal;
-    stage1_hal.capacity = STORAGE_RECORD_BYTES;
-    assert(storage_lfs_init(&raw, &stage1_hal) == STORAGE_RECORD_OK);
+    open_ok();
     for (unsigned i = 0; i < 16u; i++) {
         fill(i, sizes[i]);
-        assert(raw.write(&raw, (uint16_t)(0x3210u + i), data, sizes[i]) == STORAGE_RECORD_OK);
+        assert(router.write(&router, (uint16_t)(0x3210u + i), data, sizes[i]) == STORAGE_RECORD_OK);
     }
-    assert(raw.write(&raw, 0xffffu, (const uint8_t *)"SIS\1", 4u) == STORAGE_RECORD_OK);
-    for (uint16_t id = 0xfff7u; id <= 0xfff9u; id++) {
-        assert(raw.write(&raw, id, data, sizeof(data)) == STORAGE_RECORD_OK);
-    }
-    assert(raw.write(&raw, 0xfffeu, data, sizeof(data)) == STORAGE_RECORD_OK);
-    if (format_system) {
-        assert(storage_lfs_init_volume(&raw, &system_hal, STORAGE_LFS_SYSTEM,
-                                      STORAGE_SYSTEM_BYTES) == STORAGE_RECORD_OK);
-    }
-    storage_lfs_deinit();
 }
 
-static void test_migration_cuts(void) {
-    seed(true);
-    memcpy(saved, media, sizeof(media));
+static void test_fresh_formats(void) {
+    storage_lfs_deinit();
+    memset(media, 0xff, sizeof(media));
     operations = 0u;
     open_ok();
-    unsigned count = operations;
-    verify_all();
+    unsigned count = operations, refused = 0u;
     for (unsigned point = 1u; point <= count; point++) {
-        for (unsigned tear = 0; tear < 3; tear++) {
+        for (unsigned tear = 0u; tear < 3u; tear++) {
             storage_lfs_deinit();
-            memcpy(media, saved, sizeof(media));
-            operations = 0;
+            memset(media, 0xff, sizeof(media));
+            operations = 0u;
             cut_at = point;
             mode = tear;
             if (setjmp(power_cut) == 0) {
                 open_ok();
-                assert(!"migration fault must be reached");
+                assert(!"initialization fault must be reached");
             }
-            cut_at = 0;
-            /* Interrupt the recovery itself at another program/erase boundary. */
-            if (point % 11u == 0u && tear == 1u) {
-                storage_lfs_deinit();
-                memcpy(intermediate, media, sizeof(media));
-                operations = 0;
-                open_ok();
-                unsigned recovery_ops = operations;
-                storage_lfs_deinit();
-                memcpy(media, intermediate, sizeof(media));
-                operations = 0;
-                cut_at = recovery_ops == 0u ? 0u : recovery_ops / 2u + 1u;
-                if (setjmp(power_cut) == 0) {
-                    open_ok();
-                    assert(cut_at == 0u);
-                }
-                cut_at = 0;
-            }
-            open_ok();
-            verify_all();
-            cut_cases++;
-        }
-    }
-    printf("partition migration: %u boundaries x 3 torn-write modes (%u cases) passed\n",
-           count, cut_cases);
-}
-
-static void test_first_format_cuts(void) {
-    seed(false);
-    memcpy(saved, media, sizeof(media));
-    operations = 0;
-    assert(storage_lfs_init_volume(&raw, &system_hal, STORAGE_LFS_SYSTEM,
-                                  STORAGE_SYSTEM_BYTES) == STORAGE_RECORD_OK);
-    unsigned count = operations;
-    unsigned refused = 0;
-    for (unsigned point = 1u; point <= count; point++) {
-        for (unsigned tear = 0; tear < 3; tear++) {
+            cut_at = 0u;
             storage_lfs_deinit();
-            memcpy(media, saved, sizeof(media));
-            operations = 0;
-            cut_at = point;
-            mode = tear;
-            if (setjmp(power_cut) == 0) {
-                open_ok();
-                assert(!"first format cut must be reached");
-            }
-            cut_at = 0;
             storage_record_result_t rc = storage_partitions_open(&router, &system_hal, &user_hal);
             if (rc != STORAGE_RECORD_OK) {
                 assert(rc == STORAGE_RECORD_ERROR);
-                assert(memcmp(media + STORAGE_SYSTEM_BYTES, saved + STORAGE_SYSTEM_BYTES,
-                              STORAGE_USER_BYTES) == 0);
-                /* Explicit test-operator recovery, never an automatic policy:
-                 * the source has been proven unchanged and new volume is unused. */
+                /* Explicit operator recovery of a torn initial format.
+                 * Normal boot never erases a non-erased, unmountable volume. */
                 storage_lfs_deinit();
-                memset(media, 0xff, STORAGE_SYSTEM_BYTES);
+                memset(media, 0xff, sizeof(media));
                 open_ok();
                 refused++;
             }
-            verify_all();
+            size_t len;
+            assert(router.read(&router, 0x3210u, readback, sizeof(readback), &len) == STORAGE_RECORD_NOT_FOUND);
         }
     }
-    printf("first format: %u cuts checked; %u failed closed with original source intact\n",
-           count * 3u, refused);
+    printf("fresh volumes: %u cuts, %u torn initial formats failed closed\n", count * 3u, refused);
 }
 
-static void test_authority(void) {
-    seed(true);
+static void test_no_legacy_import(void) {
+    storage_lfs_deinit();
+    memset(media, 0xff, sizeof(media));
+    assert(storage_lfs_init_volume(&raw, &system_hal, STORAGE_LFS_SYSTEM,
+                                  STORAGE_SYSTEM_BYTES) == STORAGE_RECORD_OK);
+    assert(storage_lfs_init_volume(&raw, &user_hal, STORAGE_LFS_USER,
+                                  STORAGE_RECORD_BYTES) == STORAGE_RECORD_OK);
+    storage_lfs_deinit();
+    memcpy(saved, media, sizeof(media));
+    operations = 0u;
+    assert(storage_partitions_open(&router, &system_hal, &user_hal) == STORAGE_RECORD_ERROR);
+    assert(operations == 0u && memcmp(saved, media, sizeof(media)) == 0);
+
+    seed();
     busy = true;
-    assert(storage_partitions_open(&router, &system_hal, &user_hal) == STORAGE_RECORD_BUSY);
+    fill(5u, 128u);
+    assert(router.write(&router, 0x3210u, data, 128u) == STORAGE_RECORD_BUSY);
     busy = false;
     open_ok();
     verify_all();
-    /* A subsequent scratch replacement survives every ordinary remount. */
-    fill(9u, sizeof(data));
-    assert(router.write(&router, 0xfffeu, data, sizeof(data)) == STORAGE_RECORD_OK);
-    open_ok();
-    verify_record(&router, 0xfffeu, data, sizeof(data));
-    assert(storage_lfs_init_volume(&raw, &system_hal, STORAGE_LFS_SYSTEM,
-                                  STORAGE_SYSTEM_BYTES) == STORAGE_RECORD_OK);
-    assert(storage_lfs_remove(&raw, 0xffffu) == STORAGE_RECORD_OK);
-    assert(storage_partitions_open(&router, &system_hal, &user_hal) == STORAGE_RECORD_ERROR);
-
-    seed(true);
-    open_ok();
-    assert(storage_lfs_init_volume(&raw, &system_hal, STORAGE_LFS_SYSTEM,
-                                  STORAGE_SYSTEM_BYTES) == STORAGE_RECORD_OK);
-    assert(storage_lfs_remove(&raw, 0xfff0u) == STORAGE_RECORD_OK);
-    assert(storage_partitions_open(&router, &system_hal, &user_hal) == STORAGE_RECORD_ERROR);
-
-    seed(true);
-    open_ok();
     storage_lfs_deinit();
-    memset(media + STORAGE_SYSTEM_BYTES, 0xff, STORAGE_USER_BYTES);
+    memset(media, 0xa5, STORAGE_SYSTEM_BYTES);
+    memcpy(saved, media, sizeof(media));
+    operations = 0u;
     assert(storage_partitions_open(&router, &system_hal, &user_hal) == STORAGE_RECORD_ERROR);
+    assert(operations == 0u && memcmp(saved, media, sizeof(media)) == 0);
 }
 
 static unsigned fill_volume(storage_backend_t *backend) {
@@ -252,7 +184,7 @@ static unsigned fill_volume(storage_backend_t *backend) {
 }
 
 static void test_full_and_isolation(void) {
-    seed(true);
+    seed();
     open_ok();
     unsigned user_count = fill_volume(&router);
     verify_all();
@@ -284,7 +216,7 @@ static void test_full_and_isolation(void) {
     open_ok();
     verify_record(&router, 0x3210u, previous, sizeof(previous));
     assert(storage_lfs_init_volume(&raw, &user_hal, STORAGE_LFS_USER,
-                                  STORAGE_RECORD_BYTES) == STORAGE_RECORD_OK);
+                                  STORAGE_USER_BYTES) == STORAGE_RECORD_OK);
     for (unsigned i = 0; i < user_count; i++) {
         assert(storage_lfs_remove(&raw, (uint16_t)(0x4000u + i)) == STORAGE_RECORD_OK);
     }
@@ -303,7 +235,7 @@ static void test_full_and_isolation(void) {
 }
 
 static void test_split_update_cuts(void) {
-    seed(true);
+    seed();
     open_ok();
     storage_lfs_deinit();
     memcpy(saved, media, sizeof(media));
@@ -357,32 +289,11 @@ static void test_split_update_cuts(void) {
     printf("split updates: %u torn writes recovered; other volume byte-identical\n", cases);
 }
 
-static void test_fresh_staging(void) {
-    storage_lfs_deinit();
-    memset(media, 0xff, sizeof(media));
-    open_ok();
-    storage_partition_diag_t diag;
-    storage_partitions_get_diag(&diag);
-    assert(diag.ready && !diag.split && diag.user_blocks == 32);
-    for (unsigned i = 0; i < 16u; i++) {
-        fill(i, sizes[i]);
-        assert(router.write(&router, (uint16_t)(0x3210u + i), data, sizes[i]) == STORAGE_RECORD_OK);
-    }
-    open_ok();
-    storage_partitions_get_diag(&diag);
-    assert(!diag.split);
-    assert(router.write(&router, 0xffffu, (const uint8_t *)"SIS\1", 4u) == STORAGE_RECORD_OK);
-    open_ok();
-    verify_all();
-}
-
 int main(void) {
-    test_migration_cuts();
-    test_first_format_cuts();
-    test_authority();
+    test_fresh_formats();
+    test_no_legacy_import();
     test_full_and_isolation();
     test_split_update_cuts();
-    test_fresh_staging();
     storage_lfs_deinit();
     puts("PASS: split storage partitions");
     return 0;

@@ -87,8 +87,8 @@ progresses from a functional soft-off state into POWMAN P1.7 after all fallible
 shutdown work and wake-source checks complete.
 
 Settings and phone-local records use CRC-protected atomic records on separate
-64 KiB system and 256 KiB user littlefs partitions. The old journal's space is
-reclaimed after migration. Phonebook entries and SMS bodies remain modem-backed and are read
+64 KiB system and 384 KiB user littlefs partitions. Previous layouts require an
+explicit erase; no journal import is performed. Phonebook entries and SMS bodies remain modem-backed and are read
 lazily. See [Storage engine](docs/storage_engine.md) for the flash layout.
 
 ## License

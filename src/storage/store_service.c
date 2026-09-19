@@ -6,20 +6,13 @@
 
 #include "services/log.h"
 #include "services/timebase.h"
-#include "storage/nvm_hal.h"
-#include "storage/storage_journal.h"
 
-/* Legacy unit IDs/order remain fixed for one-way import. The new backend is
- * an opaque record store; domain codecs do not depend on filesystem layout. */
-_Static_assert(STORE_UNIT_COUNT == 16, "review the legacy import layout");
+/* Domain codecs use stable record IDs, independently of filesystem layout. */
 _Static_assert(STORE_UNIT_COUNT <= 16,
                "store diagnostics use 16-bit dirty/degraded masks");
-#define STORE_MIGRATION_ID 0xffffu
-static const uint8_t MIGRATION_DONE[] = {'S', 'I', 'S', 1};
 
 static store_commit_result_t commit_unit(store_unit_t unit);
 static bool load_unit(store_unit_t unit);
-static bool import_legacy(void);
 static uint16_t unit_id_for_index(store_unit_t unit);
 
 static const store_unit_binding_t STORE_UNIT_BINDINGS[STORE_UNIT_COUNT] = {
@@ -122,28 +115,10 @@ store_status_t store_service_init(void) {
         return STORE_STATUS_STORAGE_ERROR;
     }
 
-    size_t marker_len = 0;
-    storage_record_result_t marker = s_backend.read(&s_backend, STORE_MIGRATION_ID,
-                                                     s_payload, sizeof(s_payload), &marker_len);
-    if (marker == STORAGE_RECORD_NOT_FOUND) {
-        if (!import_legacy()) {
-            LOGE("store", "legacy import incomplete; retry on reboot");
+    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+        if (!load_unit(unit)) {
+            LOGE("store", "record %u unavailable", (unsigned)unit);
             return STORE_STATUS_STORAGE_ERROR;
-        }
-        if (storage_backend_open(&s_backend) != STORAGE_RECORD_OK) {
-            LOGE("store", "record partition migration incomplete; retry on reboot");
-            return STORE_STATUS_STORAGE_ERROR;
-        }
-    } else if (marker != STORAGE_RECORD_OK || marker_len != sizeof(MIGRATION_DONE) ||
-               memcmp(s_payload, MIGRATION_DONE, sizeof(MIGRATION_DONE)) != 0) {
-        LOGE("store", "invalid migration authority; refusing stale legacy fallback");
-        return STORE_STATUS_STORAGE_ERROR;
-    } else {
-        for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
-            if (!load_unit(unit)) {
-                LOGE("store", "record %u unreadable", (unsigned)unit);
-                return STORE_STATUS_STORAGE_ERROR;
-            }
         }
     }
     store_warranty_post_load();
@@ -425,47 +400,14 @@ static bool load_unit(store_unit_t unit) {
     if (binding->ops->fallback_missing_or_corrupt != 0) {
         binding->ops->fallback_missing_or_corrupt(binding->instance);
     }
-    return true;
-}
-
-static bool import_legacy(void) {
-    nvm_hal_t legacy;
-    if (nvm_flash_hal_init(&legacy) != NVM_STATUS_OK) {
-        return false;
-    }
-    /* The old media stays read-only. A reset before the final marker repeats
-     * this whole import; after the marker no old record can be resurrected. */
-    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
-        storage_journal_t journal;
-        const store_unit_binding_t *binding = store_engine_unit_binding(unit);
-        if (!storage_journal_init(&journal, &legacy, unit_id_for_index(unit),
-                                  (uint32_t)unit * 2u * STORAGE_JOURNAL_SLOT_SIZE,
-                                  STORAGE_JOURNAL_SLOT_SIZE)) {
-            return false;
-        }
-        size_t len = 0;
-        bool loaded = storage_journal_read_latest(&journal, s_payload, sizeof(s_payload), &len, NULL) &&
-                      binding->ops->apply(binding->instance, s_payload, len);
-        if (!loaded && binding->ops->fallback_missing_or_corrupt != NULL) {
-            binding->ops->fallback_missing_or_corrupt(binding->instance);
-        }
-    }
-    store_warranty_post_load();
-    store_calls_migrate_life_timer(store_warranty_legacy_life_timer());
-    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
-        const store_unit_binding_t *binding = store_engine_unit_binding(unit);
-        store_commit_result_t result = store_engine_commit_binding(
+    if (result == STORAGE_RECORD_NOT_FOUND) {
+        /* Each default is independently atomic. An interrupted first boot
+         * resumes only missing files; it never consults old journal bytes. */
+        store_commit_result_t committed = store_engine_commit_binding(
             binding, &s_backend, unit_id_for_index(unit), s_payload, sizeof(s_payload));
-        if (result.status != STORE_STATUS_OK) {
-            return false;
-        }
+        if (committed.status != STORE_STATUS_OK) return false;
+        s_dirty_units[unit] = false;
     }
-    if (s_backend.write(&s_backend, STORE_MIGRATION_ID, MIGRATION_DONE,
-                         sizeof(MIGRATION_DONE)) != STORAGE_RECORD_OK) {
-        return false;
-    }
-    memset(s_dirty_units, 0, sizeof(s_dirty_units));
-    LOGI("store", "legacy import complete; old journal retained read-only");
     return true;
 }
 

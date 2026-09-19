@@ -472,8 +472,8 @@ successful discharge capacity alone cannot prove the pack was not overcharged.
 ## Persistence
 
 The dedicated `STORE_UNIT_BATTERY_CHARGE_SUPERVISOR` retains unit ID 15 and is
-an independently replaced littlefs record. The old journal is read only for
-the one-time import described in [Storage engine](storage_engine.md).
+an independently replaced littlefs record. No legacy journal is read; see
+[Storage engine](storage_engine.md) for fresh-volume initialization.
 The payload is versioned and explicitly encoded; no C struct is an on-flash ABI.
 
 The supervisor persists only transitions and configuration:

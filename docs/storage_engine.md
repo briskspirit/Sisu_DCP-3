@@ -10,8 +10,8 @@ Rev B2 reserves the last 448 KiB of internal flash for two littlefs volumes:
 | User | `0x101a0000..0x101fffff` | 384 KiB | Call lists, T9, pictures, tones, divert history; future contacts/SMS |
 
 The build guard protects both regions. All sixteen existing persistent units
-use littlefs. The old 128 KiB journal overlaps the upper third of the user
-volume and is reclaimed only after migration establishes the new authority.
+use littlefs. The old journal's flash allocation has been reclaimed. Its code
+is retained for a possible FRAM backend, but is not linked into normal firmware.
 Phonebook contacts and ordinary SMS bodies remain modem-backed in this stage.
 
 littlefs v2.11.3 is vendored with its BSD-3-Clause license and a documented
@@ -47,10 +47,10 @@ normal audio deferral to exercise the flash/DMA handshake.
 
 Host tests interrupt each program/erase boundary before, halfway through, and
 after the media change. They cover inline records, empty records, maximum-sized
-records, grow/shrink replacements, cuts during recovery, and all sixteen legacy
-units during import. Other cases cover full media, repeated remounts, allocation
+records, grow/shrink replacements, cuts during recovery, and initialization
+of all sixteen default records. Other cases cover full media, repeated remounts, allocation
 churn, transient busy/error recovery, corruption handling, HAL bounds and
-critical-section ordering. Split-volume tests also interrupt migration/growth,
+critical-section ordering. Split-volume tests interrupt initial formatting,
 verify that updates leave the other volume byte-identical, and fill both volumes
 to test failed replacements, remounts, and recovery after deleting filler records.
 Growth tests force a root relocation beyond the old extent, repeatedly remount
@@ -81,7 +81,7 @@ the durable object-ID allocator, root metadata and any unclassified filesystem
 overhead. Its constituent records also have separate file-count/byte diagnostics;
 they do not each have a separate physical quota.
 
-After the system/user migration finishes, object initialization creates the
+At startup, object initialization creates the
 directories and enables admission checks for ordinary user-record writes too.
 Usage is reconstructed from live filesystem blocks, deduplicated, and cached
 until a filesystem mutation. There is no persisted counter/index to become
@@ -126,55 +126,23 @@ allocation. A larger file requires out-of-line data blocks as well as metadata.
 The storage envelope is 20 bytes, leaving 492 bytes of inline object payload.
 The current object API accepts up to 4060 payload bytes per atomic file.
 
-## Migration
+## Fresh Initialization
 
-An upgrade from the A/B journal first loads each legacy unit using its existing codec,
-applies the existing defaults/schema migrations, and writes all sixteen units
-to littlefs. Record `ffff` is a migration-complete marker, published last. A
-reset before that marker repeats the import from the unchanged source. A valid
-marker makes littlefs authoritative permanently: missing or damaged new data
-does not resurrect stale charge latches, SOC anchors, or user settings from
-the old journal. An unreadable/invalid marker fails initialization.
+This revision deliberately does not import or relocate previous flash contents.
+Before deploying from an older layout, stop the DUT in BOOTSEL and explicitly
+erase `0x10190000..0x101fffff`, then program firmware that passes the 1600 KiB
+build guard. This discards old settings and records. Do not boot a partially
+programmed image or boot older firmware against the new layout.
 
-The partition split then copies the nine system units and the import marker
-into the new system filesystem, verifies each payload, and publishes `SYS2`
-in record `fff0`. Only then may the existing user filesystem grow from 128 to
-384 KiB over the old journal. It removes the stage-1 bench records, publishes
-`USR2` in its own `fff0`, and deletes the now-redundant system copies. Interrupted
-migration resumes from these markers without recopying stale system state.
-A grown user volume with missing system authority, or a missing/corrupt import
-marker after authority was established, fails closed instead of importing from
-the reclaimed journal. These are ordered per-file commits, not a cross-volume
-atomic transaction.
+The firmware formats wholly erased volumes, creates the user collections and
+durable ID allocator, and writes defaults for missing semantic records. A reset
+during default creation resumes the missing records without consulting old
+journal bytes. Existing corrupt volumes are not erased automatically. Smaller
+historical filesystem geometries are rejected rather than grown or imported.
+There are no import markers or fallback reads from the old journal.
 
-### Moving from the 256 KiB user layout
-
-This revision moves the volume bases; it is **not** an in-place size-only
-firmware upgrade. Do not boot the new firmware over an unconverted old layout.
-There is no automatic overlapping relocation in the handset firmware.
-
-Back up and verify the old flash while the DUT is stopped in BOOTSEL. Assemble
-the replacement storage image off-device: copy the old 64 KiB system volume
-from `0x101b0000` to `0x10190000`, copy the complete old 256 KiB user volume from
-`0x101c0000` to `0x101a0000`, and initialize its added 128 KiB extent to erased
-bytes. Addresses overlap, so retain a complete verified off-device source;
-do not copy forward directly on the live device. Program and read back the
-complete converted layout and a firmware image that passes the new flash
-budget guard before allowing a boot. Keep the backup until record readback
-and growth to 96 blocks have been verified. Interrupted offline programming
-must be retried in BOOTSEL, not resumed by booting a partly relocated image.
-
-An older stage-1 filesystem likewise needs relocation from `0x101c0000` to
-`0x101a0000` before the existing import/split protocol can run. Preserve its
-legacy journal at `0x101e0000` until system authority commits. An unused range
-may contain old firmware bytes; only explicitly provision new, unused extents
-after taking a backup. A journal-only device needs the new system range and
-initial user extent `0x101a0000..0x101c0000` erased, without erasing the journal.
-Never erase a live filesystem merely because mount fails.
-
-Do not boot older firmware after conversion. Its storage addresses no longer
-describe the active volumes. The historical power-cut bench retains its old
-`0x101c0000` address and must not be used after either partition migration.
+The historical stage-1 power-cut bench uses obsolete addresses and must not be
+flashed onto this layout. Its retained results describe that earlier test only.
 
 The C firmware exposes a typed local NVM service backed by littlefs.
 Phonebook and ordinary SMS contents remain modem-backed, but preferences, profile state,
@@ -195,10 +163,10 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
 - `storage_backend`: record read/write contract and board composition point.
   It contains no domain schemas. A future FRAM implementation can use this
   contract without exposing FRAM or filesystem calls to applications/codecs.
-- `storage_partitions`: record affinity, migration authority, and independent
+- `storage_partitions`: record affinity, fresh initialization, and independent
   system/user filesystem instances. Applications do not choose physical media.
-- `storage_journal`: legacy reader used only during initial import. Keep this
-  code until the RevC storage review; its flash allocation is no longer reserved.
+- `storage_journal`: disconnected A/B implementation retained for the Rev C
+  FRAM review, with standalone tests. It is not linked into normal firmware.
 - `store_service.c`: record orchestration, immutable unit registry, commit
   scheduling, failure isolation, and diagnostics. It owns the single shared
   payload buffer but no domain state.

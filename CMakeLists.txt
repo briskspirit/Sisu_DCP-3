@@ -232,7 +232,6 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/timebase.c
     src/services/usb_service.c
     src/storage/nvm_flash_hal.c
-    src/storage/storage_journal.c
     src/storage/storage_lfs.c
     src/storage/storage_backend.c
     src/storage/storage_partitions.c

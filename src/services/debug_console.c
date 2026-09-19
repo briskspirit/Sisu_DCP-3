@@ -229,8 +229,8 @@ void debug_console_tick(app_t *app) {
 static void command_storeinfo(void) {
     storage_partition_diag_t info;
     storage_partitions_get_diag(&info);
-    printf("[store] ready=%u split=%u system=%ld/%ld user=%ld/%ld blocks (4096 bytes each)\n",
-           info.ready, info.split, (long)info.system_used, (long)info.system_blocks,
+    printf("[store] ready=%u system=%ld/%ld user=%ld/%ld blocks (4096 bytes each)\n",
+           info.ready, (long)info.system_used, (long)info.system_blocks,
            (long)info.user_used, (long)info.user_blocks);
     storage_user_usage_t usage;
     storage_record_result_t rc = storage_user_get_usage(&usage);

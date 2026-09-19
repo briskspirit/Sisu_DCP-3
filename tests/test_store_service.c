@@ -1,7 +1,7 @@
 /* Host unit test for the persistent store in src/storage/store_*.c.
  *
- * The flash/journal backing is stubbed in RAM via a fake nvm_hal_t (see
- * nvm_flash_hal_init below) so the journal layer runs unmodified against a
+ * The littlefs backing is stubbed in RAM via a fake nvm_hal_t (see
+ * storage_backend_open below), running the real adapter against a
  * plain byte array. rtc_alarm_hal_get_datetime and the log_* sink are also
  * stubbed for the host. NO test framework: a static failure counter, plain
  * assert helpers, and a main() that returns non-zero on any failure.
@@ -21,7 +21,7 @@
 #include "services/lcd_calibration.h"
 #include "storage/nvm_hal.h"
 #include "storage/store_service.h"
-#include "storage/storage_journal.h" /* STORAGE_JOURNAL_SLOT_SIZE for the poison window */
+#define TEST_LOGICAL_SLOT_SIZE 4096u
 #include "storage/storage_lfs.h"
 #include "storage/store_service_internal.h"
 
@@ -68,7 +68,7 @@ void rtc_alarm_hal_get_datetime(rtc_datetime_t *datetime) {
 
 /* --------------------------------------------------------------------------
  * RAM-backed NVM HAL. The journal reserves STORE_UNIT_COUNT * 2 slots; with
- * erase_required = true the slot size is STORAGE_JOURNAL_SLOT_SIZE (4096).
+ * erase_required = true the slot size is TEST_LOGICAL_SLOT_SIZE (4096).
  * We size the backing array generously.
  * ------------------------------------------------------------------------ */
 
@@ -231,18 +231,6 @@ static void assert_eq_u64(uint64_t expected, uint64_t actual, const char *messag
                 (unsigned long long)expected, (unsigned long long)actual);
         s_failures++;
     }
-}
-
-static bool open_unit_journal(store_unit_t unit,
-                              nvm_hal_t *hal,
-                              storage_journal_t *journal) {
-    if (unit >= STORE_UNIT_COUNT || hal == 0 || journal == 0 ||
-        nvm_flash_hal_init(hal) != NVM_STATUS_OK) {
-        return false;
-    }
-    uint32_t base = (uint32_t)unit * 2u * STORAGE_JOURNAL_SLOT_SIZE;
-    return storage_journal_init(journal, hal, (uint16_t)(0x3210u + unit), base,
-                                STORAGE_JOURNAL_SLOT_SIZE);
 }
 
 static bool write_unit_fixture(store_unit_t unit,
@@ -2210,7 +2198,7 @@ static void populate_wire_fixture(void) {
 }
 
 static void test_persistent_wire_contract(void) {
-    static uint8_t payload[STORAGE_JOURNAL_MAX_PAYLOAD];
+    static uint8_t payload[STORAGE_RECORD_MAX_PAYLOAD];
     fresh_store();
     populate_wire_fixture();
     flush_commits();
@@ -2242,41 +2230,25 @@ static void test_persistent_wire_contract(void) {
     }
 }
 
-static void verify_migrated_wire(void) {
-    uint8_t payload[STORAGE_RECORD_MAX_PAYLOAD];
-    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
-        size_t len = 0;
-        assert(read_unit_payload(unit, payload, sizeof(payload), &len));
-        assert(len == WIRE_EXPECTED[unit].length);
-        assert(fnv1a64(payload, len) == WIRE_EXPECTED[unit].fnv64);
-    }
-}
-
-static void test_legacy_import_power_cuts(void) {
+static void test_default_initialization_power_cuts(void) {
     static uint8_t snapshot[FAKE_NVM_CAPACITY];
+    static uint8_t expected[STORE_UNIT_COUNT][STORAGE_RECORD_MAX_PAYLOAD];
+    static size_t lengths[STORE_UNIT_COUNT];
     uint8_t payload[STORAGE_RECORD_MAX_PAYLOAD];
-    fresh_store();
-    populate_wire_fixture();
-    flush_commits();
-    /* Generate a deployed A/B image from independently pinned wire fixtures. */
-    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
-        size_t len = 0;
-        nvm_hal_t hal;
-        storage_journal_t journal;
-        assert(read_unit_payload(unit, payload, sizeof(payload), &len));
-        assert(open_unit_journal(unit, &hal, &journal));
-        assert(storage_journal_write(&journal, payload, len));
-    }
     storage_lfs_deinit();
-    memset(s_fake_nvm + FAKE_NVM_CAPACITY / 2u, 0xff, FAKE_NVM_CAPACITY / 2u);
+    memset(s_fake_nvm, 0xff, sizeof(s_fake_nvm));
+    /* Disconnected old journal bytes must not be read or modified. */
+    memset(s_fake_nvm, 0xa5, FAKE_NVM_CAPACITY / 2u);
     storage_backend_t backend;
     assert(storage_backend_open(&backend) == STORAGE_RECORD_OK);
     memcpy(snapshot, s_fake_nvm, sizeof(snapshot));
     s_media_ops = 0;
     assert(store_service_init() == STORE_STATUS_OK);
     unsigned operation_count = s_media_ops;
-    verify_migrated_wire();
     assert(operation_count > 0);
+    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+        assert(read_unit_payload(unit, expected[unit], sizeof(expected[unit]), &lengths[unit]));
+    }
     for (unsigned point = 1; point <= operation_count; point++) {
         for (unsigned mode = 0; mode < 3; mode++) {
             storage_lfs_deinit();
@@ -2285,30 +2257,20 @@ static void test_legacy_import_power_cuts(void) {
             s_cut_at = point;
             s_cut_mode = mode;
             if (setjmp(s_power_cut) == 0) {
-                store_service_init();
-                assert(!"migration cut must execute");
+                (void)store_service_init();
+                assert(!"default initialization cut must execute");
             }
             s_cut_at = 0;
+            assert(store_service_init() == STORE_STATUS_OK);
+            for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+                size_t len;
+                assert(read_unit_payload(unit, payload, sizeof(payload), &len));
+                assert(len == lengths[unit] && memcmp(payload, expected[unit], len) == 0);
+            }
             assert(memcmp(s_fake_nvm, snapshot, FAKE_NVM_CAPACITY / 2u) == 0);
-            assert(store_service_init() == STORE_STATUS_OK);
-            verify_migrated_wire();
-            assert(store_service_init() == STORE_STATUS_OK);
-            verify_migrated_wire();
         }
     }
-    /* Once authority moved, old media cannot undo new user settings. */
-    assert(store_setting_set_u8(STORE_SETTING_SMS_VALIDITY, 1u) == STORE_STATUS_OK);
-    assert(store_service_flush_all());
-    assert(store_service_init() == STORE_STATUS_OK);
-    uint8_t validity;
-    assert(store_setting_get_u8(STORE_SETTING_SMS_VALIDITY, &validity) == STORE_STATUS_OK);
-    assert(validity == 1u);
-    assert(memcmp(s_fake_nvm, snapshot, FAKE_NVM_CAPACITY / 2u) == 0);
-    const uint8_t bad_marker[] = {'B', 'A', 'D'};
-    assert(s_real_backend.write(&s_real_backend, 0xffffu, bad_marker, sizeof(bad_marker)) == STORAGE_RECORD_OK);
-    assert(store_service_init() == STORE_STATUS_STORAGE_ERROR);
-    assert(!store_service_ready());
-    printf("legacy import: %u operation boundaries x 3 torn-write modes; all 16 wire fixtures preserved\n",
+    printf("default initialization: %u operation boundaries x 3 torn-write modes passed\\n",
            operation_count);
 }
 
@@ -2396,7 +2358,7 @@ static void test_no_backend(void) {
  * 6's commit attempts are capped (mirrors STORE_COMMIT_FAIL_LIMIT = 8). */
 static void test_commit_failure_cap_and_no_starvation(void) {
     fresh_store();
-    uint32_t region = 2u * (uint32_t)STORAGE_JOURNAL_SLOT_SIZE; /* per-unit journal size */
+    uint32_t region = 2u * (uint32_t)TEST_LOGICAL_SLOT_SIZE; /* per-unit journal size */
     s_poison_lo = 6u * region;   /* unit 6 = STORE_UNIT_CALLS_MISSED */
     s_poison_hi = 7u * region;
     s_poison_erases = 0u;
@@ -2450,7 +2412,7 @@ static void test_commit_cap_survives_remutation(void) {
     const uint32_t PARK_REARM_MS = 300000u;
 
     fresh_store();
-    uint32_t region = 2u * (uint32_t)STORAGE_JOURNAL_SLOT_SIZE;
+    uint32_t region = 2u * (uint32_t)TEST_LOGICAL_SLOT_SIZE;
     s_poison_lo = 6u * region;   /* unit 6 = STORE_UNIT_CALLS_MISSED */
     s_poison_hi = 7u * region;
     s_poison_erases = 0u;
@@ -2500,7 +2462,7 @@ static void test_commit_cap_survives_remutation(void) {
  * consecutive failures, so the cap still lands at exactly FAIL_LIMIT. */
 static void test_commit_cap_survives_interleaved_mutation(void) {
     fresh_store();
-    uint32_t region = 2u * (uint32_t)STORAGE_JOURNAL_SLOT_SIZE;
+    uint32_t region = 2u * (uint32_t)TEST_LOGICAL_SLOT_SIZE;
     s_poison_lo = 6u * region;   /* unit 6 = STORE_UNIT_CALLS_MISSED */
     s_poison_hi = 7u * region;
     s_poison_erases = 0u;
@@ -2530,7 +2492,7 @@ static void test_commit_cap_survives_interleaved_mutation(void) {
  * unit's newest delta at power-off. */
 static void test_park_busy_not_counted_as_degraded(void) {
     fresh_store();
-    uint32_t region = 2u * (uint32_t)STORAGE_JOURNAL_SLOT_SIZE;
+    uint32_t region = 2u * (uint32_t)TEST_LOGICAL_SLOT_SIZE;
     s_poison_lo = 6u * region;   /* unit 6 */
     s_poison_hi = 7u * region;
     s_poison_erases = 0u;
@@ -2580,16 +2542,11 @@ static void test_serializer_failure_is_not_stale_busy(void) {
     };
 
     fresh_store();
-    nvm_hal_t hal;
-    storage_journal_t journal;
-    assert_true(open_unit_journal(STORE_UNIT_SERVICE_WARRANTY, &hal, &journal),
-                "open serializer-failure journal");
-
     s_fake_op_busy = true;
     uint8_t marker = 0x5au;
-    assert_true(storage_journal_write_detailed(&journal, &marker, 1u) ==
-                    STORAGE_JOURNAL_WRITE_BUSY,
-                "preceding journal attempt records backend busy");
+    assert_true(s_real_backend.write(&s_real_backend, 0x321du, &marker, 1u) ==
+                    STORAGE_RECORD_BUSY,
+                "preceding littlefs attempt records backend busy");
     uint32_t busy_ops_before = s_fake_busy_ops;
 
     uint8_t payload[16];
@@ -2777,7 +2734,7 @@ static void test_picture_legacy_migration(void) {
 }
 
 int main(void) {
-    test_legacy_import_power_cuts();
+    test_default_initialization_power_cuts();
     log_set_level(0);
     test_unit_handler_registry();
     test_exact_dirty_unit_mapping();

@@ -366,9 +366,9 @@ refused.
 ## Persistence
 
 `STORE_UNIT_BATTERY_LEARNING` remains unit 14 and the charge supervisor unit 15.
-Both are opaque records on littlefs, with unchanged payload schemas. The old
-two-slot units are read once during migration and then left untouched. See
-[Storage engine](storage_engine.md) for the layout and migration authority.
+Both are opaque records on littlefs. The disconnected A/B implementation is
+not consulted at startup. See [Storage engine](storage_engine.md) for the layout
+and fresh-volume initialization.
 
 The current `BTL2` payload is exactly 96 bytes, little-endian, and contains
 magic, version, profile ID, flags, capacity history/counters, three resistance
