@@ -64,10 +64,13 @@ void flash_range_program(uint32_t off, const uint8_t *src, size_t len) {
 }
 
 int main(void) {
-    nvm_hal_t legacy, records;
+    nvm_hal_t legacy, records, system, user;
     assert(nvm_flash_hal_init(&legacy) == NVM_STATUS_OK);
     assert(nvm_record_flash_hal_init(&records) == NVM_STATUS_OK);
+    assert(nvm_system_flash_hal_init(&system) == NVM_STATUS_OK);
+    assert(nvm_user_flash_hal_init(&user) == NVM_STATUS_OK);
     assert(legacy.capacity == 128u * 1024u && records.capacity == legacy.capacity);
+    assert(system.capacity == 64u * 1024u && user.capacity == 256u * 1024u);
     memset(test_xip_flash, 0x5a, sizeof(test_xip_flash));
     assert(records.erase(&records, 0, 8192) == NVM_STATUS_OK);
     assert(records.write(&records, 0, test_xip_flash, 512) == NVM_STATUS_OK);
@@ -85,6 +88,27 @@ int main(void) {
     assert(records.erase(&records, 0, 4096) == NVM_STATUS_BUSY);
     assert(records.write(&records, 0, out, 256) == NVM_STATUS_BUSY);
     assert(erases == 2 && programs == 2 && begins == ends);
+    refuse_park = false;
+    const size_t system_start = sizeof(test_xip_flash) - STORAGE_RESERVED_BYTES;
+    const size_t user_start = sizeof(test_xip_flash) - STORAGE_USER_BYTES;
+    assert(system.erase(&system, 0, 4096) == NVM_STATUS_OK);
+    assert(test_xip_flash[system_start - 1u] == 0x5a);
+    assert(test_xip_flash[system_start] == 0xff);
+    assert(system.erase(&system, system.capacity - 4096u, 4096) == NVM_STATUS_OK);
+    assert(test_xip_flash[user_start - 1u] == 0xff);
+    assert(test_xip_flash[user_start] == 0x5a);
+    memset(out, 0x31, sizeof(out));
+    assert(system.write(&system, system.capacity - 256u, out, 256) == NVM_STATUS_OK);
+    assert(user.erase(&user, 0, 4096) == NVM_STATUS_OK);
+    assert(test_xip_flash[user_start - 1u] == 0x31);
+    assert(user.erase(&user, user.capacity - 4096u, 4096) == NVM_STATUS_OK);
+    assert(user.write(&user, user.capacity - 256u, out, 256) == NVM_STATUS_OK);
+    assert(test_xip_flash[sizeof(test_xip_flash) - 1u] == 0x31);
+    assert(system.erase(&system, system.capacity, 4096) == NVM_STATUS_OUT_OF_RANGE);
+    assert(system.read(&system, system.capacity - 1u, out, 2) == NVM_STATUS_OUT_OF_RANGE);
+    assert(user.write(&user, user.capacity, out, 256) == NVM_STATUS_OUT_OF_RANGE);
+    assert(user.read(&user, UINT32_MAX, out, 2) == NVM_STATUS_OUT_OF_RANGE);
+    assert(begins == ends && !parked && !irq_off && !watchdog);
     puts("nvm flash bounds, RAM staging, park/IRQ/watchdog ordering passed");
     return 0;
 }

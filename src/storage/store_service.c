@@ -130,6 +130,10 @@ store_status_t store_service_init(void) {
             LOGE("store", "legacy import incomplete; retry on reboot");
             return STORE_STATUS_STORAGE_ERROR;
         }
+        if (storage_backend_open(&s_backend) != STORAGE_RECORD_OK) {
+            LOGE("store", "record partition migration incomplete; retry on reboot");
+            return STORE_STATUS_STORAGE_ERROR;
+        }
     } else if (marker != STORAGE_RECORD_OK || marker_len != sizeof(MIGRATION_DONE) ||
                memcmp(s_payload, MIGRATION_DONE, sizeof(MIGRATION_DONE)) != 0) {
         LOGE("store", "invalid migration authority; refusing stale legacy fallback");

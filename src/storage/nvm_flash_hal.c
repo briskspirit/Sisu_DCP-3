@@ -92,7 +92,7 @@ static nvm_status_t flash_write(nvm_hal_t *hal, uint32_t offset, const void *src
 static void flash_op_execute(void *param);
 static bool valid_range(const nvm_hal_t *hal, uint32_t offset, size_t len);
 
-static flash_hal_ctx_t s_flash_ctx[2];
+static flash_hal_ctx_t s_flash_ctx[4];
 
 static nvm_status_t init_region(nvm_hal_t *hal, unsigned region,
                                  uint32_t offset, uint32_t capacity) {
@@ -121,8 +121,19 @@ nvm_status_t nvm_flash_hal_init(nvm_hal_t *hal) {
 }
 
 nvm_status_t nvm_record_flash_hal_init(nvm_hal_t *hal) {
-    return init_region(hal, 1u, PICO_FLASH_SIZE_BYTES - STORAGE_RESERVED_BYTES,
+    /* Historical stage-1 view, retained for the pre-split power-cut bench. */
+    return init_region(hal, 1u, PICO_FLASH_SIZE_BYTES - STORAGE_USER_BYTES,
                        STORAGE_RECORD_BYTES);
+}
+
+nvm_status_t nvm_system_flash_hal_init(nvm_hal_t *hal) {
+    return init_region(hal, 2u, PICO_FLASH_SIZE_BYTES - STORAGE_RESERVED_BYTES,
+                       STORAGE_SYSTEM_BYTES);
+}
+
+nvm_status_t nvm_user_flash_hal_init(nvm_hal_t *hal) {
+    return init_region(hal, 3u, PICO_FLASH_SIZE_BYTES - STORAGE_USER_BYTES,
+                       STORAGE_USER_BYTES);
 }
 
 static nvm_status_t flash_read(nvm_hal_t *hal, uint32_t offset, void *dst, size_t len) {

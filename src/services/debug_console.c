@@ -36,6 +36,7 @@
 #include "services/board_diag_service.h"
 #include "storage/store_service.h"
 #include "storage/storage_lfs.h"
+#include "storage/storage_partitions.h"
 #include "services/timebase.h"
 #include "services/usb_service.h"
 #include "pico/stdio.h"
@@ -122,8 +123,9 @@ static void print_help(void);
 static char *skip_spaces(char *text);
 static char *next_token(char **cursor);
 static void command_status(void);
-static void command_hw(const app_t *app);
-static void command_wake(void);
+/* Snapshot/payload buffers must not inflate the general command stack. */
+static void command_hw(const app_t *app) __attribute__((noinline));
+static void command_wake(void) __attribute__((noinline));
 static void command_clocks(void);
 static void command_pads(void);
 static void command_lcd(char *args);
@@ -131,20 +133,21 @@ static void command_ltc_window(char *args);
 static void command_battery_learning(char *args);
 static void command_charge(char *args);
 static void command_modem_rx(char *args) __attribute__((noinline));
-static void command_dormant(char *args);
+static void command_dormant(char *args) __attribute__((noinline));
 static void command_keycal(char *args);
 static void command_buzzcal(char *args);
 static void poll_ltc_window(uint32_t now_ms);
-static void poll_charge_trace(void);
+static void poll_charge_trace(void) __attribute__((noinline));
 static void poll_keycal(uint32_t now_ms);
-static void hw_change_log(const app_t *app);
+static void hw_change_log(const app_t *app) __attribute__((noinline));
 static void command_ui(app_t *app, char *args);
 static void command_text(char *args);
 static void command_pdu7(char *args);
 static void command_binary(char *args);
 static void command_binary_f5(char *args);
 static void command_port(char *args);
-static void command_picture(char *args);
+/* Do not carry the picture payload buffer through unrelated command paths. */
+static void command_picture(char *args) __attribute__((noinline));
 static bool build_debug_picture_payload(uint8_t *payload, size_t cap, uint16_t *out_len, uint8_t *out_chunks);
 static void fill_fallback_picture(store_picture_message_t *picture);
 
@@ -234,20 +237,24 @@ static void handle_line(app_t *app, char *line) {
         command_status();
     } else if (strcmp(cmd, "hw") == 0) {
         command_hw(app);
+    } else if (strcmp(cmd, "storeinfo") == 0) {
+        storage_partition_diag_t info;
+        storage_partitions_get_diag(&info);
+        printf("[store] ready=%u split=%u system=%ld/%ld user=%ld/%ld blocks (4096 bytes each)\n",
+               info.ready, info.split, (long)info.system_used, (long)info.system_blocks,
+               (long)info.user_used, (long)info.user_blocks);
     } else if (strcmp(cmd, "storetest") == 0) {
         char *confirm = next_token(&cursor);
         if (confirm == NULL || strcmp(confirm, "confirm") != 0 || next_token(&cursor) != NULL) {
             printf("[storetest] usage: storetest confirm (writes only scratch record fffe)\n");
             return;
         }
-        static nvm_hal_t test_hal;
         static storage_backend_t test_backend;
         static uint8_t test_data[STORAGE_RECORD_MAX_PAYLOAD];
         static uint8_t test_read[STORAGE_RECORD_MAX_PAYLOAD];
         static core1_services_diag_t before, after;
         core1_services_get_diag(&before);
-        bool ok = nvm_record_flash_hal_init(&test_hal) == NVM_STATUS_OK &&
-                  storage_lfs_init(&test_backend, &test_hal) == STORAGE_RECORD_OK;
+        bool ok = storage_backend_open(&test_backend) == STORAGE_RECORD_OK;
         unsigned completed = 0;
         uint32_t started = time_ms();
         for (unsigned pass = 0; ok && pass < 8u; pass++) {
@@ -256,7 +263,7 @@ static void handle_line(app_t *app, char *line) {
             }
             size_t len = 0;
             ok = test_backend.write(&test_backend, 0xfffeu, test_data, sizeof(test_data)) == STORAGE_RECORD_OK &&
-                 storage_lfs_init(&test_backend, &test_hal) == STORAGE_RECORD_OK &&
+                 storage_backend_open(&test_backend) == STORAGE_RECORD_OK &&
                  test_backend.read(&test_backend, 0xfffeu, test_read, sizeof(test_read), &len) == STORAGE_RECORD_OK &&
                  len == sizeof(test_data) && memcmp(test_data, test_read, len) == 0;
             completed += ok;
@@ -666,6 +673,7 @@ static void print_help(void) {
     printf("[debug]   hw                        ; battery/charger/headset snapshot\n");
     printf("[debug]   wake                      ; last-boot wake evidence + scratch probe\n");
     printf("[debug]   storetest confirm         ; littlefs scratch-record replacement/remount test\n");
+    printf("[debug]   storeinfo                 ; system/user filesystem occupancy\n");
     printf("[debug]   wdhang <main|flash> confirm ; intentional watchdog reset test\n");
     printf("[debug]   clocks                    ; clock freqs + wake/sleep/enabled gate masks\n");
     printf("[debug]   ltcalert                  ; force one LTC voltage threshold alert\n");

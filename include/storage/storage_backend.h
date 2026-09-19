@@ -13,6 +13,7 @@ typedef enum {
     STORAGE_RECORD_NOT_FOUND,
     STORAGE_RECORD_ERROR,
     STORAGE_RECORD_BUSY,
+    STORAGE_RECORD_FULL,
 } storage_record_result_t;
 
 typedef struct storage_backend storage_backend_t;

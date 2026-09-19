@@ -23,7 +23,7 @@ typedef struct {
     bool needs_remount;
 } record_fs_t;
 
-static record_fs_t s_fs;
+static record_fs_t s_volumes[STORAGE_LFS_VOLUME_COUNT];
 
 static int io_result(record_fs_t *fs, nvm_status_t result) {
     if (result == NVM_STATUS_BUSY) {
@@ -34,7 +34,8 @@ static int io_result(record_fs_t *fs, nvm_status_t result) {
 
 static bool block_range(const struct lfs_config *cfg, lfs_block_t block,
                         lfs_off_t off, lfs_size_t size) {
-    return block < cfg->block_count && off <= cfg->block_size &&
+    const record_fs_t *fs = cfg->context;
+    return block < fs->hal->capacity / cfg->block_size && off <= cfg->block_size &&
            size <= cfg->block_size - off;
 }
 
@@ -60,7 +61,7 @@ static int bd_prog(const struct lfs_config *cfg, lfs_block_t block,
 
 static int bd_erase(const struct lfs_config *cfg, lfs_block_t block) {
     record_fs_t *fs = cfg->context;
-    if (block >= cfg->block_count) {
+    if (!block_range(cfg, block, 0u, cfg->block_size)) {
         return LFS_ERR_IO;
     }
     return io_result(fs, fs->hal->erase(fs->hal, block * cfg->block_size,
@@ -94,6 +95,9 @@ static storage_record_result_t result_for(record_fs_t *fs, int result) {
     }
     /* An I/O failure may leave allocator/cache state ahead of durable media. */
     fs->needs_remount = true;
+    if (result == LFS_ERR_NOSPC && !fs->io_busy) {
+        return STORAGE_RECORD_FULL;
+    }
     return fs->io_busy ? STORAGE_RECORD_BUSY : STORAGE_RECORD_ERROR;
 }
 
@@ -103,6 +107,10 @@ static int mount_consistent(record_fs_t *fs) {
         return rc;
     }
     fs->mounted = true;
+    if (fs->fs.block_count > fs->hal->capacity / fs->cfg.block_size ||
+        fs->fs.block_count < 4u) {
+        return LFS_ERR_CORRUPT;
+    }
     /* Finish interrupted moves before any read can be interpreted as a missing
      * record. Mount alone defers this recovery until the first writable open. */
     return lfs_fs_mkconsistent(&fs->fs);
@@ -216,26 +224,41 @@ static storage_record_result_t record_write(storage_backend_t *backend, uint16_t
 }
 
 void storage_lfs_deinit(void) {
-    if (s_fs.mounted) {
-        lfs_unmount(&s_fs.fs);
+    for (unsigned i = 0; i < STORAGE_LFS_VOLUME_COUNT; i++) {
+        if (s_volumes[i].mounted) {
+            lfs_unmount(&s_volumes[i].fs);
+        }
     }
-    memset(&s_fs, 0, sizeof(s_fs));
+    memset(s_volumes, 0, sizeof(s_volumes));
 }
 
 storage_record_result_t storage_lfs_init(storage_backend_t *backend, nvm_hal_t *hal) {
+    return storage_lfs_init_volume(backend, hal, STORAGE_LFS_USER,
+                                   hal != NULL ? hal->capacity : 0u);
+}
+
+storage_record_result_t storage_lfs_init_volume(storage_backend_t *backend,
+    nvm_hal_t *hal, storage_lfs_volume_t volume, uint32_t initial_bytes) {
     if (backend == NULL || hal == NULL || hal->read == NULL || hal->write == NULL ||
         hal->erase == NULL || !hal->erase_required || hal->erase_block != 4096u ||
         hal->write_block != CACHE_SIZE || hal->capacity < 4u * hal->erase_block ||
-        hal->capacity % hal->erase_block != 0u) {
+        hal->capacity % hal->erase_block != 0u || (unsigned)volume >= STORAGE_LFS_VOLUME_COUNT ||
+        initial_bytes < 4u * hal->erase_block || initial_bytes > hal->capacity ||
+        initial_bytes % hal->erase_block != 0u) {
         return STORAGE_RECORD_ERROR;
     }
-    storage_lfs_deinit();
-    record_fs_t *fs = &s_fs;
+    record_fs_t *fs = &s_volumes[volume];
+    if (fs->mounted) {
+        lfs_unmount(&fs->fs);
+    }
+    memset(fs, 0, sizeof(*fs));
     fs->hal = hal;
     fs->cfg = (struct lfs_config){
         .context = fs, .read = bd_read, .prog = bd_prog, .erase = bd_erase, .sync = bd_sync,
         .read_size = 1u, .prog_size = CACHE_SIZE, .block_size = hal->erase_block,
-        .block_count = hal->capacity / hal->erase_block, .block_cycles = 100,
+        /* Mount discovers the durable size, including either side of an
+         * interrupted growth. Physical I/O is always bounded by the HAL. */
+        .block_count = 0u, .block_cycles = 100,
         .cache_size = CACHE_SIZE, .lookahead_size = LOOKAHEAD_SIZE,
         .read_buffer = fs->read_cache, .prog_buffer = fs->prog_cache,
         .lookahead_buffer = fs->lookahead, .name_max = 16u,
@@ -244,8 +267,9 @@ storage_record_result_t storage_lfs_init(storage_backend_t *backend, nvm_hal_t *
     int rc = mount_consistent(fs);
     if (rc == LFS_ERR_CORRUPT && !fs->mounted) {
         /* Never turn mount failure into silent data loss. First-use formatting
-         * requires proof that the ENTIRE dedicated region is erased. */
-        for (uint32_t off = 0; off < hal->capacity; off += CACHE_SIZE) {
+         * requires proof that the entire initial format extent is erased.
+         * The remaining user extent may still contain the legacy journal. */
+        for (uint32_t off = 0; off < initial_bytes; off += CACHE_SIZE) {
             if (io_result(fs, hal->read(hal, off, fs->read_cache, CACHE_SIZE)) != 0) {
                 return result_for(fs, LFS_ERR_IO);
             }
@@ -255,7 +279,9 @@ storage_record_result_t storage_lfs_init(storage_backend_t *backend, nvm_hal_t *
                 }
             }
         }
+        fs->cfg.block_count = initial_bytes / hal->erase_block;
         rc = lfs_format(&fs->fs, &fs->cfg);
+        fs->cfg.block_count = 0u;
         if (rc == 0) {
             rc = mount_consistent(fs);
         }
@@ -269,6 +295,37 @@ storage_record_result_t storage_lfs_init(storage_backend_t *backend, nvm_hal_t *
 }
 
 int32_t storage_lfs_used_blocks(void) {
-    int rc = prepare(&s_fs);
-    return rc == 0 ? lfs_fs_size(&s_fs.fs) : rc;
+    record_fs_t *fs = &s_volumes[STORAGE_LFS_USER];
+    int rc = prepare(fs);
+    return rc == 0 ? lfs_fs_size(&fs->fs) : rc;
+}
+
+storage_record_result_t storage_lfs_grow(storage_backend_t *backend) {
+    record_fs_t *fs = backend->ctx;
+    int rc = prepare(fs);
+    if (rc == 0) {
+        rc = lfs_fs_grow(&fs->fs, fs->hal->capacity / fs->cfg.block_size);
+    }
+    return result_for(fs, rc);
+}
+
+storage_record_result_t storage_lfs_remove(storage_backend_t *backend, uint16_t id) {
+    record_fs_t *fs = backend->ctx;
+    int rc = prepare(fs);
+    if (rc == 0) {
+        char path[6];
+        record_path(id, path);
+        rc = lfs_remove(&fs->fs, path);
+    }
+    return result_for(fs, rc);
+}
+
+int32_t storage_lfs_volume_blocks(storage_backend_t *backend) {
+    record_fs_t *fs = backend->ctx;
+    return prepare(fs) == 0 ? (int32_t)fs->fs.block_count : -1;
+}
+
+int32_t storage_lfs_volume_used(storage_backend_t *backend) {
+    record_fs_t *fs = backend->ctx;
+    return prepare(fs) == 0 ? lfs_fs_size(&fs->fs) : -1;
 }

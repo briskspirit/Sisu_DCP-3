@@ -8,6 +8,14 @@
 #define SISU_RELEASE_BUILD 0
 #endif
 
+#ifndef SISU_STORAGE_POWERCUT_BENCH
+#define SISU_STORAGE_POWERCUT_BENCH 0
+#endif
+
+#if SISU_RELEASE_BUILD && SISU_STORAGE_POWERCUT_BENCH
+#error "Power-cut diagnostics must not be included in release firmware"
+#endif
+
 #if SISU_RELEASE_BUILD != 0 && SISU_RELEASE_BUILD != 1
 #error "SISU_RELEASE_BUILD must be 0 or 1"
 #endif

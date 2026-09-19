@@ -33,7 +33,11 @@ struct nvm_hal {
     nvm_write_fn write;
 };
 
+/* Historical overlapping views: import/qualification only, never a writable
+ * backend alongside the expanded user filesystem. Re-review after RevC. */
 nvm_status_t nvm_flash_hal_init(nvm_hal_t *hal);
 nvm_status_t nvm_record_flash_hal_init(nvm_hal_t *hal);
+nvm_status_t nvm_system_flash_hal_init(nvm_hal_t *hal);
+nvm_status_t nvm_user_flash_hal_init(nvm_hal_t *hal);
 
 #endif

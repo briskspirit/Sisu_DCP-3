@@ -40,6 +40,9 @@
 #include "services/timebase.h"
 #include "services/usb_service.h"
 #include "sisu_build_config.h"
+#if SISU_STORAGE_POWERCUT_BENCH
+#include "diag/storage_powercut_bench.h"
+#endif
 #include "pico/stdlib.h"
 
 #include <string.h>
@@ -169,6 +172,9 @@ int main(void) {
     lcd_init(&s_lcd);
     modem_service_init();
     core1_services_start(modem_service_voice_transport_available());
+#if SISU_STORAGE_POWERCUT_BENCH
+    storage_powercut_bench_run(&s_lcd, &s_fb);
+#endif
     store_service_init();
     if (!backlight_calibration_service_init()) {
         LOGW("boot", "backlight calibration apply failed; using 100%%");

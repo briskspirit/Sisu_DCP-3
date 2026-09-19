@@ -77,6 +77,11 @@ Standalone Rev B2 diagnostics and the antenna tuner are opt-in: configure with
 `-DSISU_BUILD_DIAGNOSTICS=ON` to build them alongside the firmware. There are
 no hardware-revision or modem-vendor build selectors.
 
+The opt-in [storage power-cut bench](docs/storage_powercut_test.md) instead
+replaces the phone runtime for offline battery-removal testing of the historical
+128 KiB layout. Do not use it after the system/user partition split. Its separate
+`SISU_STORAGE_POWERCUT_BENCH` option must remain off in ordinary builds.
+
 ## Host tests
 
 The host suite requires Bash, Python 3, ripgrep, ordinary POSIX text tools, and

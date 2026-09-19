@@ -40,6 +40,11 @@ pico_sdk_init()
 set(SISU_FIRMWARE_TARGET sisu_dcp3_revb2_telit)
 option(RELEASE
     "Build the release firmware without USB CDC or the service console" OFF)
+option(SISU_STORAGE_POWERCUT_BENCH
+    "Replace the phone runtime with the offline storage power-cut bench" OFF)
+if(RELEASE AND SISU_STORAGE_POWERCUT_BENCH)
+    message(FATAL_ERROR "The storage power-cut bench requires the service profile")
+endif()
 if(RELEASE)
     set(SISU_RELEASE_BUILD_VALUE 1)
     set(SISU_DEBUG_CONSOLE_SOURCE "")
@@ -230,6 +235,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/storage/storage_journal.c
     src/storage/storage_lfs.c
     src/storage/storage_backend.c
+    src/storage/storage_partitions.c
     third_party/littlefs/lfs.c
     third_party/littlefs/lfs_util.c
     src/storage/store_calls.c
@@ -355,11 +361,19 @@ pico_enable_stdio_uart(${SISU_FIRMWARE_TARGET} 0)
 pico_add_extra_outputs(${SISU_FIRMWARE_TARGET})
 
 target_include_directories(${SISU_FIRMWARE_TARGET} PRIVATE third_party/littlefs)
+if(SISU_STORAGE_POWERCUT_BENCH)
+    target_sources(${SISU_FIRMWARE_TARGET} PRIVATE
+        src/diag/storage_powercut_test.c src/diag/storage_powercut_bench.c)
+    target_include_directories(${SISU_FIRMWARE_TARGET} PRIVATE src/storage)
+    target_compile_definitions(${SISU_FIRMWARE_TARGET} PRIVATE SISU_STORAGE_POWERCUT_BENCH=1)
+    set_target_properties(${SISU_FIRMWARE_TARGET} PROPERTIES
+        OUTPUT_NAME "${SISU_FIRMWARE_TARGET}_powercut")
+endif()
 # Upstream's assertion-only helper is unused in NDEBUG builds.
 set_source_files_properties(third_party/littlefs/lfs.c PROPERTIES
     COMPILE_OPTIONS "-Wno-unused-function")
 
-# Protect both the new littlefs region and the legacy journal (last 256 KiB).
+# Protect the system and user regions (last 320 KiB).
 add_custom_command(TARGET ${SISU_FIRMWARE_TARGET} POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         -DELF=$<TARGET_FILE:${SISU_FIRMWARE_TARGET}>

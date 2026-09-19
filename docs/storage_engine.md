@@ -2,12 +2,17 @@
 
 ## Flash Layout and Transactions
 
-The 128 KiB immediately below the deployed journal (`0x101c0000` through
-`0x101dffff`) holds the littlefs record store. The legacy journal stays
-at `0x101e0000` through `0x101fffff`. The build guard protects both regions.
-All sixteen persistent units now use littlefs; the legacy region is read-only
-input for a one-time import. Phonebook contacts and ordinary SMS bodies remain
-modem-backed in this stage.
+Rev B2 reserves the last 320 KiB of internal flash for two littlefs volumes:
+
+| Volume | Address range (inclusive) | Size | Current records |
+| --- | --- | --- | --- |
+| System | `0x101b0000..0x101bffff` | 64 KiB | Settings, board identity, battery and charge state |
+| User | `0x101c0000..0x101fffff` | 256 KiB | Call lists, T9, pictures, tones, divert history |
+
+The build guard protects both regions. All sixteen existing persistent units
+use littlefs. The old 128 KiB journal overlaps the upper half of the user
+volume and is reclaimed only after migration establishes the new authority.
+Phonebook contacts and ordinary SMS bodies remain modem-backed in this stage.
 
 littlefs v2.11.3 is vendored unchanged with its BSD-3-Clause license. Its adapter
 uses static buffers, 4 KiB erase blocks, 256-byte program/cache units, and the
@@ -20,11 +25,15 @@ types. Replacements write and close a temporary record before atomic rename.
 Each record has a versioned ID/length/CRC envelope. Every mount completes pending
 littlefs consistency work before exposing reads: an interrupted cross-pair
 rename must not be mistaken for a missing record. The adapter remounts after
-I/O failures before retrying. Only wholly erased media can be autoformatted;
+I/O failures before retrying. Each volume has independent caches and allocator
+state; `STORAGE_RECORD_FULL` is distinct from a transient busy or I/O failure.
+A full user volume cannot consume the system volume's space. Only wholly erased
+initial format extents can be autoformatted;
 a corrupt filesystem is never silently replaced with defaults. An interrupted
 initial format that cannot mount requires explicit recovery, not autoformat.
 
-The service-console command `storetest confirm` writes only reserved scratch
+The service-console command `storeinfo` reports each volume's allocated blocks.
+`storetest confirm` writes only reserved scratch
 record `fffe`, performs eight maximum-sized replacements and remount/readbacks,
 and reports elapsed time, allocated blocks, and flash-park diagnostics.
 It must not be used during ordinary phone use: it intentionally bypasses the
@@ -35,12 +44,15 @@ after the media change. They cover inline records, empty records, maximum-sized
 records, grow/shrink replacements, cuts during recovery, and all sixteen legacy
 units during import. Other cases cover full media, repeated remounts, allocation
 churn, transient busy/error recovery, corruption handling, HAL bounds and
-critical-section ordering. Physical power removal remains a separate bench
-test; host interruption tests do not reproduce electrical brownout behavior.
+critical-section ordering. Split-volume tests also interrupt migration/growth,
+verify that updates leave the other volume byte-identical, and fill both volumes
+to test failed replacements, remounts, and recovery after deleting filler records.
+The [physical power-cut run](storage_powercut_test.md#qualified-run) passed on
+the stage-1 layout; that is not a controlled voltage-ramp brownout qualification.
 
 ## Migration
 
-On the first boot, the engine loads each legacy unit using its existing codec,
+An upgrade from the A/B journal first loads each legacy unit using its existing codec,
 applies the existing defaults/schema migrations, and writes all sixteen units
 to littlefs. Record `ffff` is a migration-complete marker, published last. A
 reset before that marker repeats the import from the unchanged source. A valid
@@ -48,12 +60,26 @@ marker makes littlefs authoritative permanently: missing or damaged new data
 does not resurrect stale charge latches, SOC anchors, or user settings from
 the old journal. An unreadable/invalid marker fails initialization.
 
-An unused flash range may still contain bytes from an older, larger firmware.
-After installing firmware whose build guard protects this region, provision
-the new region explicitly if needed: erase **only** `0x101c0000..0x101e0000`
-(exclusive end) with the device in BOOTSEL, then boot to format/import. Never
-erase the legacy region as part of this step. Do not boot older firmware after
-migration expecting it to see new settings: it only understands the old store.
+The partition split then copies the nine system units and the import marker
+into the new system filesystem, verifies each payload, and publishes `SYS2`
+in record `fff0`. Only then may the existing user filesystem grow from 128 to
+256 KiB over the old journal. It removes the stage-1 bench records, publishes
+`USR2` in its own `fff0`, and deletes the now-redundant system copies. Interrupted
+migration resumes from these markers without recopying stale system state.
+A grown user volume with missing system authority, or a missing/corrupt import
+marker after authority was established, fails closed instead of importing from
+the reclaimed journal. These are ordered per-file commits, not a cross-volume
+atomic transaction.
+
+An unused flash range may contain bytes from an older, larger firmware. Back up
+flash before provisioning. For an upgrade from stage 1, erase **only** the new
+system range `0x101b0000..0x101c0000` (exclusive end), if necessary, in BOOTSEL
+after installing firmware whose build guard protects it. Leave the existing
+user filesystem and journal intact for migration. For a device still using only
+the journal, the initial user extent `0x101c0000..0x101e0000` may also need explicit
+provisioning; never apply that erase to an existing littlefs store. Do not boot
+pre-split firmware after migration: its journal and 128 KiB filesystem views
+overlap the new user volume and are no longer valid storage backends.
 
 The C firmware exposes a typed local NVM service backed by littlefs.
 Phonebook and ordinary SMS contents remain modem-backed, but preferences, profile state,
@@ -69,7 +95,10 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
 - `storage_backend`: record read/write contract and board composition point.
   It contains no domain schemas. A future FRAM implementation can use this
   contract without exposing FRAM or filesystem calls to applications/codecs.
-- `storage_journal`: legacy reader used only during import in production.
+- `storage_partitions`: record affinity, migration authority, and independent
+  system/user filesystem instances. Applications do not choose physical media.
+- `storage_journal`: legacy reader used only during initial import. Keep this
+  code until the RevC storage review; its flash allocation is no longer reserved.
 - `store_service.c`: record orchestration, immutable unit registry, commit
   scheduling, failure isolation, and diagnostics. It owns the single shared
   payload buffer but no domain state.
@@ -115,9 +144,8 @@ The non-resettable Life timer lives in the settings/calls unit beside the four
 ordinary duration counters. This matches v6.00's call-accounting ownership and
 lets a completed call persist all five values in one record update.
 
-The flash budget guard protects the combined 256 KiB reservation: 128 KiB
-littlefs plus 128 KiB legacy import source. Expanding/reclaiming these regions
-is a separate migration, not part of the current change. The unit-count guard
+The flash budget guard protects the combined 320 KiB reservation, leaving
+1728 KiB for firmware. The unit-count guard
 preserves the legacy ID/order contract and 16-bit diagnostics mask. Small
 records share filesystem metadata blocks instead of owning 8 KiB sector pairs.
 
