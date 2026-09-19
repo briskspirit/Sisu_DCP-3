@@ -516,7 +516,52 @@ static void test_busy_and_scan(void) {
     assert(storage_object_scan_next(&next) == STORAGE_RECORD_NOT_FOUND);
     storage_object_scan_end();
 }
+static void test_state(void) {
+    fresh();
+    uint32_t id, state;
+    assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);
+    assert(storage_object_get_state(STORAGE_OBJECT_INBOX, id, &state) == STORAGE_RECORD_NOT_FOUND);
+    assert(storage_object_set_state(STORAGE_OBJECT_INBOX, id, 1u) == STORAGE_RECORD_NOT_FOUND);
+    memset(data, 0x55, sizeof(data));
+    assert(storage_object_write(STORAGE_OBJECT_INBOX, id, data, sizeof(data)) == STORAGE_RECORD_OK);
+    assert(storage_object_get_state(STORAGE_OBJECT_INBOX, id, &state) == STORAGE_RECORD_OK && state == 0u);
+    assert(storage_object_set_state(STORAGE_OBJECT_INBOX, id, 7u) == STORAGE_RECORD_OK);
+    unsigned before = operations;
+    assert(storage_object_set_state(STORAGE_OBJECT_INBOX, id, 7u) == STORAGE_RECORD_OK && operations == before);
+    assert(storage_object_scan_begin(STORAGE_OBJECT_INBOX) == STORAGE_RECORD_OK);
+    assert(storage_object_set_state(STORAGE_OBJECT_INBOX, id, 8u) == STORAGE_RECORD_ERROR);
+    storage_object_scan_end();
+    busy = true;
+    assert(storage_object_set_state(STORAGE_OBJECT_INBOX, id, 8u) == STORAGE_RECORD_BUSY);
+    busy = false;
+    assert(storage_object_write(STORAGE_OBJECT_INBOX, id, data, sizeof(data)) == STORAGE_RECORD_OK);
+    reopen();
+    assert(storage_object_get_state(STORAGE_OBJECT_INBOX, id, &state) == STORAGE_RECORD_OK && state == 7u);
+    memcpy(baseline, media, sizeof(media));
+    operations = 0u;
+    assert(storage_object_set_state(STORAGE_OBJECT_INBOX, id, 0x12345678u) == STORAGE_RECORD_OK);
+    unsigned count = operations;
+    for (unsigned point = 1u; point <= count; point++) {
+        for (tear = 0; tear < 3u; tear++) {
+            storage_lfs_deinit();
+            memcpy(media, baseline, sizeof(media));
+            reopen();
+            operations = 0u; cut_at = point;
+            if (setjmp(cut) == 0) {
+                (void)storage_object_set_state(STORAGE_OBJECT_INBOX, id, 0x12345678u);
+                assert(false);
+            }
+            cut_at = 0u;
+            reopen();
+            assert(storage_object_get_state(STORAGE_OBJECT_INBOX, id, &state) == STORAGE_RECORD_OK);
+            assert(state == 7u || state == 0x12345678u);
+            verify(id, sizeof(data), 0x55);
+        }
+    }
+}
+
 int main(void) {
+    test_state();
     test_basics();
     test_initialization_cuts();
     test_write_cuts(80u, sizeof(data), false);

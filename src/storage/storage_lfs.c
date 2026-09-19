@@ -44,6 +44,7 @@ _Static_assert((unsigned)STORAGE_OBJECT_CONTACT == (unsigned)STORAGE_USER_CONTAC
 #define OBJECT_MAGIC 0x314a424fu
 #define OBJECT_HEADER 20u
 #define OBJECT_COUNTER_ID 0xfff1u
+#define OBJECT_STATE_ATTR 0x53u
 
 #define USER_BLOCKS (STORAGE_USER_BYTES / 4096u)
 #define RECOVERY_BLOCKS 8u
@@ -707,6 +708,48 @@ storage_record_result_t storage_object_read(storage_object_collection_t collecti
     return result_for(fs, rc != 0 ? rc : closed);
 }
 
+static int object_state_read(record_fs_t *fs, const char *path, uint8_t state[4]) {
+    lfs_ssize_t size = lfs_getattr(&fs->fs, path, OBJECT_STATE_ATTR, state, 4u);
+    if (size == LFS_ERR_NOATTR) {
+        memset(state, 0, 4u);
+        return 0;
+    }
+    return size == 4 ? 0 : size < 0 ? (int)size : LFS_ERR_CORRUPT;
+}
+
+storage_record_result_t storage_object_get_state(storage_object_collection_t collection,
+    uint32_t id, uint32_t *state) {
+    char path[32];
+    if (state == NULL || !object_path(collection, id, path)) return STORAGE_RECORD_ERROR;
+    storage_record_result_t result = storage_objects_open();
+    if (result != STORAGE_RECORD_OK) return result;
+    record_fs_t *fs = &s_volumes[STORAGE_LFS_USER];
+    uint8_t bytes[4];
+    int rc = object_state_read(fs, path, bytes);
+    if (rc == 0) *state = read_u32(bytes);
+    return result_for(fs, rc);
+}
+
+storage_record_result_t storage_object_set_state(storage_object_collection_t collection,
+    uint32_t id, uint32_t state) {
+    char path[32];
+    if (s_object_scan_open || !object_path(collection, id, path)) return STORAGE_RECORD_ERROR;
+    storage_record_result_t result = storage_objects_open();
+    if (result != STORAGE_RECORD_OK) return result;
+    record_fs_t *fs = &s_volumes[STORAGE_LFS_USER];
+    uint8_t bytes[4];
+    int rc = object_state_read(fs, path, bytes);
+    if (rc != 0) return result_for(fs, rc);
+    if (read_u32(bytes) == state) return STORAGE_RECORD_OK;
+    write_u32(bytes, state);
+    rc = budget_begin(fs, (storage_user_pool_t)collection, true);
+    if (rc == 0) {
+        rc = lfs_setattr(&fs->fs, path, OBJECT_STATE_ATTR, bytes, sizeof(bytes));
+        budget_end();
+    }
+    return result_for(fs, rc);
+}
+
 storage_record_result_t storage_object_write(storage_object_collection_t collection,
     uint32_t id, const uint8_t *src, size_t len) {
     char path[32];
@@ -716,7 +759,11 @@ storage_record_result_t storage_object_write(storage_object_collection_t collect
     if (result != STORAGE_RECORD_OK) return result;
     if (id >= s_next_object) return STORAGE_RECORD_ERROR;
     record_fs_t *fs = &s_volumes[STORAGE_LFS_USER];
-    int rc = budget_begin(fs, (storage_user_pool_t)collection, false);
+    uint8_t state[4] = {0};
+    int rc = object_state_read(fs, path, state);
+    if (rc == LFS_ERR_NOENT) rc = 0;
+    if (rc != 0) return result_for(fs, rc);
+    rc = budget_begin(fs, (storage_user_pool_t)collection, false);
     if (rc != 0) return result_for(fs, rc);
     char temporary[32];
     object_temporary(collection, temporary);
@@ -728,7 +775,8 @@ storage_record_result_t storage_object_write(storage_object_collection_t collect
     write_u32(header + 12u, (uint32_t)len);
     write_u32(header + 16u, record_crc(src, len));
     lfs_file_t file;
-    struct lfs_file_config cfg = {.buffer = fs->file_cache};
+    struct lfs_attr attr = {.type = OBJECT_STATE_ATTR, .buffer = state, .size = sizeof(state)};
+    struct lfs_file_config cfg = {.buffer = fs->file_cache, .attrs = &attr, .attr_count = 1u};
     rc = lfs_file_opencfg(&fs->fs, &file, temporary,
                              LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC, &cfg);
     if (rc != 0) {

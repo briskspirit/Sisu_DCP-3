@@ -29,6 +29,13 @@ storage_record_result_t storage_object_write(storage_object_collection_t collect
     uint32_t id, const uint8_t *src, size_t len);
 storage_record_result_t storage_object_remove(storage_object_collection_t collection,
     uint32_t id);
+/* Small per-file state, atomically committed in directory metadata. New files
+ * start at zero; body replacements preserve it. Fixed-size state updates may
+ * use the bounded recovery allowance without rewriting the message body. */
+storage_record_result_t storage_object_get_state(storage_object_collection_t collection,
+    uint32_t id, uint32_t *state);
+storage_record_result_t storage_object_set_state(storage_object_collection_t collection,
+    uint32_t id, uint32_t state);
 /* A single startup scan owns the iterator. Close it before mutating objects.
  * NOT_FOUND means end of collection; all other failures are real errors. */
 storage_record_result_t storage_object_scan_begin(storage_object_collection_t collection);

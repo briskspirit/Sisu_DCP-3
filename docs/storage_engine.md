@@ -99,7 +99,7 @@ update shared metadata during relocation. Thus a write may report FULL before
 every byte of its nominal budget is occupied. No fixed message/contact count
 is promised, and replacement at a completely filled quota is not guaranteed.
 
-Deletion and abandoned-temporary cleanup may borrow up to 16 KiB of the recovery
+Deletion, fixed-size object-state updates, and abandoned-temporary cleanup may borrow up to 16 KiB of the recovery
 reserve per operation, while preserving other pools' unused reservations. This
 allows metadata relocation while reclaiming space; ordinary growth still cannot
 use that reserve. littlefs consistency recovery completes before accounting is
@@ -118,8 +118,19 @@ readback and reuse after deletion, reconstructed usage after remount, the
 The chosen policy is **one file per logical SMS**, including multipart SMS.
 There will not be a separate file for each segment or a shared message database.
 Incomplete reception belongs in one per-message staging file, atomically replaced
-as parts arrive. The message codec and assembly remain the next stage;
-ordinary SMS contents are still modem-backed today.
+as parts arrive. The local message service and encoded-segment codec now have
+host coverage; routing modem reception and the mailbox UI through them is the
+next integration step. Ordinary SMS contents are still modem-backed until then.
+
+Message bodies retain the encoded DELIVER segments in one versioned file.
+Read/unread state uses a fixed four-byte littlefs attribute, atomically updated
+without rewriting the body and preserved across body replacements. A completed
+staging file is published under the same durable ID in the inbox before staging
+is removed. Recovery verifies identical bodies when both copies survive a cut.
+The RAM index is rebuilt from files; it is not another persisted transaction.
+Host tests cover out-of-order eight-part reception, exact retransmissions,
+conflicting segments, reboot persistence, torn stage/publish/cleanup writes,
+and read/delete operations with the inbox quota full.
 
 The user filesystem retains its 512-byte inline cutoff and 4 KiB erase blocks.
 Small files share directory metadata blocks; 512 bytes is not a minimum file
