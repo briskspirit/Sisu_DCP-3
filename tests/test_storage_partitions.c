@@ -91,14 +91,14 @@ static void verify_all(void) {
     verify_record(&router, 0xffffu, (const uint8_t *)"SIS\1", 4u);
     storage_partition_diag_t diag;
     storage_partitions_get_diag(&diag);
-    assert(diag.ready && diag.split && diag.system_blocks == 16 && diag.user_blocks == 64);
+    assert(diag.ready && diag.split && diag.system_blocks == 16 && diag.user_blocks == 96);
 }
 
 static void seed(bool format_system) {
     storage_lfs_deinit();
     memset(media, 0xff, sizeof(media));
     /* Growing must not interpret the old journal's non-erased bytes as files. */
-    memset(media + STORAGE_SYSTEM_BYTES + STORAGE_RECORD_BYTES, 0xa5, STORAGE_LEGACY_BYTES);
+    memset(media + sizeof(media) - STORAGE_LEGACY_BYTES, 0xa5, STORAGE_LEGACY_BYTES);
     stage1_hal = user_hal;
     stage1_hal.capacity = STORAGE_RECORD_BYTES;
     assert(storage_lfs_init(&raw, &stage1_hal) == STORAGE_RECORD_OK);

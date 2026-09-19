@@ -37,6 +37,7 @@
 #include "storage/store_service.h"
 #include "storage/storage_lfs.h"
 #include "storage/storage_partitions.h"
+#include "storage/storage_user_space.h"
 #include "services/timebase.h"
 #include "services/usb_service.h"
 #include "pico/stdio.h"
@@ -225,6 +226,36 @@ void debug_console_tick(app_t *app) {
     hw_change_log(app);
 }
 
+static void command_storeinfo(void) {
+    storage_partition_diag_t info;
+    storage_partitions_get_diag(&info);
+    printf("[store] ready=%u split=%u system=%ld/%ld user=%ld/%ld blocks (4096 bytes each)\n",
+           info.ready, info.split, (long)info.system_used, (long)info.system_blocks,
+           (long)info.user_used, (long)info.user_blocks);
+    storage_user_usage_t usage;
+    storage_record_result_t rc = storage_user_get_usage(&usage);
+    if (rc != STORAGE_RECORD_OK) {
+        printf("[store] user accounting unavailable (%u)\n", (unsigned)rc);
+        return;
+    }
+    static const char *const pools[] = {"contacts", "inbox", "outbox", "pending", "shared"};
+    for (unsigned i = 0; i < STORAGE_USER_POOL_COUNT; i++) {
+        const storage_user_pool_usage_t *p = &usage.pools[i];
+        printf("[store] %s files=%lu file-bytes=%lu allocated=%lu limit=%lu\n", pools[i],
+               (unsigned long)p->contents.files, (unsigned long)p->contents.file_bytes,
+               (unsigned long)p->allocated_bytes, (unsigned long)p->limit_bytes);
+    }
+    static const char *const legacy[] = {"calls", "pictures", "tones", "dictionary", "divert"};
+    for (unsigned i = 0; i < STORAGE_USER_LEGACY_CATEGORY_COUNT; i++) {
+        printf("[store] shared/%s files=%lu file-bytes=%lu\n", legacy[i],
+               (unsigned long)usage.legacy[i].files,
+               (unsigned long)usage.legacy[i].file_bytes);
+    }
+    printf("[store] physical-free=%lu recovery-reserve=%lu (not category headroom)\n",
+           (unsigned long)(usage.capacity_bytes - usage.allocated_bytes),
+           (unsigned long)usage.recovery_reserve_bytes);
+}
+
 static void handle_line(app_t *app, char *line) {
     char *cursor = skip_spaces(line);
     char *cmd = next_token(&cursor);
@@ -238,11 +269,7 @@ static void handle_line(app_t *app, char *line) {
     } else if (strcmp(cmd, "hw") == 0) {
         command_hw(app);
     } else if (strcmp(cmd, "storeinfo") == 0) {
-        storage_partition_diag_t info;
-        storage_partitions_get_diag(&info);
-        printf("[store] ready=%u split=%u system=%ld/%ld user=%ld/%ld blocks (4096 bytes each)\n",
-               info.ready, info.split, (long)info.system_used, (long)info.system_blocks,
-               (long)info.user_used, (long)info.user_blocks);
+        command_storeinfo();
     } else if (strcmp(cmd, "storetest") == 0) {
         char *confirm = next_token(&cursor);
         if (confirm == NULL || strcmp(confirm, "confirm") != 0 || next_token(&cursor) != NULL) {

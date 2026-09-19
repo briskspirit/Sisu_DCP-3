@@ -181,6 +181,11 @@ struct lfs_config {
     // are propagated to the user.
     int (*sync)(const struct lfs_config *c);
 
+    // Sisu extension: optional admission check before allocating a free block.
+    // Must not reenter littlefs. Return 0 or a negative error (e.g. NOSPC).
+    // Unlike erase(), this sees both blocks of a new metadata pair.
+    int (*alloc_guard)(const struct lfs_config *c, lfs_block_t block);
+
 #ifdef LFS_THREADSAFE
     // Lock the underlying block device. Negative error codes
     // are propagated to the user.
@@ -732,6 +737,12 @@ lfs_ssize_t lfs_fs_size(lfs_t *lfs);
 //
 // Returns a negative error code on failure.
 int lfs_fs_traverse(lfs_t *lfs, int (*cb)(void*, lfs_block_t), void *data);
+
+// Sisu extension: visit this directory's metadata pairs and immediate files'
+// data blocks, including empty split pairs. Does not recurse into subdirectories
+// or visit uncommitted open files. Call only with all writable files closed.
+int lfs_dir_blocks(lfs_t *lfs, const char *path,
+        int (*cb)(void*, lfs_block_t), void *data);
 
 #ifndef LFS_READONLY
 // Attempt to make the filesystem consistent and ready for writing

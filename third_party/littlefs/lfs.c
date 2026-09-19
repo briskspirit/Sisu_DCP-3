@@ -670,8 +670,16 @@ static int lfs_alloc(lfs_t *lfs, lfs_block_t *block) {
             if (!(lfs->lookahead.buffer[lfs->lookahead.next / 8]
                     & (1U << (lfs->lookahead.next % 8)))) {
                 // found a free block
-                *block = (lfs->lookahead.start + lfs->lookahead.next)
+                lfs_block_t candidate = (lfs->lookahead.start + lfs->lookahead.next)
                         % lfs->block_count;
+
+                if (lfs->cfg->alloc_guard) {
+                    int err = lfs->cfg->alloc_guard(lfs->cfg, candidate);
+                    if (err) {
+                        return err;
+                    }
+                }
+                *block = candidate;
 
                 // eagerly find next free block to maximize how many blocks
                 // lfs_alloc_ckpoint makes available for scanning
@@ -4493,6 +4501,12 @@ static int lfs_mount_(lfs_t *lfs, const struct lfs_config *cfg) {
         return err;
     }
 
+    // Sisu: an older superblock in the tail chain may predate fs_grow.
+    // Keep the configured read bound until the authoritative superblock is
+    // found. With block_count=0, the block-device callback bounds discovery.
+    lfs_size_t block_count = 0;
+    lfs_block_t max_block = 1;
+
     // scan directory blocks for superblock and any global updates
     lfs_mdir_t dir = {.tail = {0, 1}};
     struct lfs_tortoise_t tortoise = {
@@ -4507,6 +4521,7 @@ static int lfs_mount_(lfs_t *lfs, const struct lfs_config *cfg) {
         }
 
         // fetch next block in tail list
+        max_block = lfs_max(max_block, lfs_max(dir.tail[0], dir.tail[1]));
         lfs_stag_t tag = lfs_dir_fetchmatch(lfs, &dir, dir.tail,
                 LFS_MKTAG(0x7ff, 0x3ff, 0),
                 LFS_MKTAG(LFS_TYPE_SUPERBLOCK, 0, 8),
@@ -4604,16 +4619,7 @@ static int lfs_mount_(lfs_t *lfs, const struct lfs_config *cfg) {
                 lfs->inline_max = lfs_min(lfs->inline_max, lfs->attr_max);
             }
 
-            // this is where we get the block_count from disk if block_count=0
-            if (lfs->cfg->block_count
-                    && superblock.block_count != lfs->cfg->block_count) {
-                LFS_ERROR("Invalid block count (%"PRIu32" != %"PRIu32")",
-                        superblock.block_count, lfs->cfg->block_count);
-                err = LFS_ERR_INVAL;
-                goto cleanup;
-            }
-
-            lfs->block_count = superblock.block_count;
+            block_count = superblock.block_count;
 
             if (superblock.block_size != lfs->cfg->block_size) {
                 LFS_ERROR("Invalid block size (%"PRIu32" != %"PRIu32")",
@@ -4629,6 +4635,20 @@ static int lfs_mount_(lfs_t *lfs, const struct lfs_config *cfg) {
             goto cleanup;
         }
     }
+
+    // Check the final size before allocator setup or any writable recovery.
+    // Every metadata pair visited during discovery must fit that durable size.
+    if (block_count < 2 || max_block >= block_count) {
+        err = LFS_ERR_CORRUPT;
+        goto cleanup;
+    }
+    if (cfg->block_count && block_count != cfg->block_count) {
+        LFS_ERROR("Invalid block count (%"PRIu32" != %"PRIu32")",
+                block_count, cfg->block_count);
+        err = LFS_ERR_INVAL;
+        goto cleanup;
+    }
+    lfs->block_count = block_count;
 
     // update littlefs with gstate
     if (!lfs_gstate_iszero(&lfs->gstate)) {
@@ -6462,6 +6482,82 @@ lfs_ssize_t lfs_fs_size(lfs_t *lfs) {
     return res;
 }
 
+static int lfs_dir_blocks_(lfs_t *lfs, const char *path,
+        int (*cb)(void *, lfs_block_t), void *data) {
+    lfs_mdir_t dir;
+    lfs_stag_t tag = lfs_dir_find(lfs, &dir, &path, NULL);
+    if (tag < 0) {
+        return tag;
+    }
+    if (lfs_tag_type3(tag) != LFS_TYPE_DIR) {
+        return LFS_ERR_NOTDIR;
+    }
+    lfs_block_t pair[2];
+    if (lfs_tag_id(tag) == 0x3ff) {
+        pair[0] = lfs->root[0];
+        pair[1] = lfs->root[1];
+    } else {
+        tag = lfs_dir_get(lfs, &dir, LFS_MKTAG(0x700, 0x3ff, 0),
+                LFS_MKTAG(LFS_TYPE_STRUCT, lfs_tag_id(tag), 8), pair);
+        if (tag < 0) {
+            return tag;
+        }
+        lfs_pair_fromle32(pair);
+    }
+    int err = lfs_dir_fetch(lfs, &dir, pair);
+    if (err) {
+        return err;
+    }
+
+    // A valid split chain cannot contain more pairs than the whole device.
+    for (lfs_size_t pairs = 0; pairs < lfs->block_count/2; pairs++) {
+        for (int i = 0; i < 2; i++) {
+            err = cb(data, dir.pair[i]);
+            if (err) {
+                return err;
+            }
+        }
+        for (uint16_t id = 0; id < dir.count; id++) {
+            struct lfs_ctz ctz;
+            lfs_stag_t tag = lfs_dir_get(lfs, &dir, LFS_MKTAG(0x700, 0x3ff, 0),
+                    LFS_MKTAG(LFS_TYPE_STRUCT, id, sizeof(ctz)), &ctz);
+            if (tag == LFS_ERR_NOENT) {
+                continue;
+            }
+            if (tag < 0) {
+                return tag;
+            }
+            lfs_ctz_fromle32(&ctz);
+            if (lfs_tag_type3(tag) == LFS_TYPE_CTZSTRUCT) {
+                err = lfs_ctz_traverse(lfs, NULL, &lfs->rcache,
+                        ctz.head, ctz.size, cb, data);
+                if (err) {
+                    return err;
+                }
+            }
+        }
+        if (!dir.split) {
+            return 0;
+        }
+        err = lfs_dir_fetch(lfs, &dir, dir.tail);
+        if (err) {
+            return err;
+        }
+    }
+    return LFS_ERR_CORRUPT;
+}
+
+int lfs_dir_blocks(lfs_t *lfs, const char *path,
+        int (*cb)(void *, lfs_block_t), void *data) {
+    int err = LFS_LOCK(lfs->cfg);
+    if (err) {
+        return err;
+    }
+    err = lfs_dir_blocks_(lfs, path, cb, data);
+    LFS_UNLOCK(lfs->cfg);
+    return err;
+}
+
 int lfs_fs_traverse(lfs_t *lfs, int (*cb)(void *, lfs_block_t), void *data) {
     int err = LFS_LOCK(lfs->cfg);
     if (err) {
@@ -6555,4 +6651,3 @@ int lfs_migrate(lfs_t *lfs, const struct lfs_config *cfg) {
     return err;
 }
 #endif
-

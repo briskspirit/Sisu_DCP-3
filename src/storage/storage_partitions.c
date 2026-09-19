@@ -4,6 +4,7 @@
 
 #include "storage/storage_layout.h"
 #include "storage/storage_lfs.h"
+#include "storage/storage_objects.h"
 
 #define AUTHORITY_ID 0xfff0u
 #define IMPORT_ID 0xffffu
@@ -200,6 +201,9 @@ storage_record_result_t storage_partitions_open(storage_backend_t *backend,
     }
     if (rc == STORAGE_RECORD_OK) {
         rc = migrate();
+    }
+    if (rc == STORAGE_RECORD_OK && p->split) {
+        rc = storage_objects_open();
     }
     if (rc == STORAGE_RECORD_OK) {
         p->ready = true;

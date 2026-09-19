@@ -122,7 +122,7 @@ nvm_status_t nvm_flash_hal_init(nvm_hal_t *hal) {
 
 nvm_status_t nvm_record_flash_hal_init(nvm_hal_t *hal) {
     /* Historical stage-1 view, retained for the pre-split power-cut bench. */
-    return init_region(hal, 1u, PICO_FLASH_SIZE_BYTES - STORAGE_USER_BYTES,
+    return init_region(hal, 1u, PICO_FLASH_SIZE_BYTES - STORAGE_LEGACY_BYTES - STORAGE_RECORD_BYTES,
                        STORAGE_RECORD_BYTES);
 }
 

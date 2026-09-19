@@ -373,7 +373,7 @@ endif()
 set_source_files_properties(third_party/littlefs/lfs.c PROPERTIES
     COMPILE_OPTIONS "-Wno-unused-function")
 
-# Protect the system and user regions (last 320 KiB).
+# Protect the system and user regions (last 448 KiB).
 add_custom_command(TARGET ${SISU_FIRMWARE_TARGET} POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         -DELF=$<TARGET_FILE:${SISU_FIRMWARE_TARGET}>

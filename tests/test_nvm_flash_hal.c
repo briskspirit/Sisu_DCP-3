@@ -70,9 +70,11 @@ int main(void) {
     assert(nvm_system_flash_hal_init(&system) == NVM_STATUS_OK);
     assert(nvm_user_flash_hal_init(&user) == NVM_STATUS_OK);
     assert(legacy.capacity == 128u * 1024u && records.capacity == legacy.capacity);
-    assert(system.capacity == 64u * 1024u && user.capacity == 256u * 1024u);
+    assert(system.capacity == 64u * 1024u && user.capacity == 384u * 1024u);
     memset(test_xip_flash, 0x5a, sizeof(test_xip_flash));
     assert(records.erase(&records, 0, 8192) == NVM_STATUS_OK);
+    assert(test_xip_flash[0x1bffffu] == 0x5a);
+    assert(test_xip_flash[0x1c0000u] == 0xff); /* historical bench address */
     assert(records.write(&records, 0, test_xip_flash, 512) == NVM_STATUS_OK);
     uint8_t out[512];
     assert(records.read(&records, 0, out, sizeof(out)) == NVM_STATUS_OK);
@@ -91,6 +93,7 @@ int main(void) {
     refuse_park = false;
     const size_t system_start = sizeof(test_xip_flash) - STORAGE_RESERVED_BYTES;
     const size_t user_start = sizeof(test_xip_flash) - STORAGE_USER_BYTES;
+    assert(system_start == 0x190000u && user_start == 0x1a0000u);
     assert(system.erase(&system, 0, 4096) == NVM_STATUS_OK);
     assert(test_xip_flash[system_start - 1u] == 0x5a);
     assert(test_xip_flash[system_start] == 0xff);

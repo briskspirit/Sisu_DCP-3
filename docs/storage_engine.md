@@ -2,20 +2,22 @@
 
 ## Flash Layout and Transactions
 
-Rev B2 reserves the last 320 KiB of internal flash for two littlefs volumes:
+Rev B2 reserves the last 448 KiB of internal flash for two littlefs volumes:
 
 | Volume | Address range (inclusive) | Size | Current records |
 | --- | --- | --- | --- |
-| System | `0x101b0000..0x101bffff` | 64 KiB | Settings, board identity, battery and charge state |
-| User | `0x101c0000..0x101fffff` | 256 KiB | Call lists, T9, pictures, tones, divert history |
+| System | `0x10190000..0x1019ffff` | 64 KiB | Settings, board identity, battery and charge state |
+| User | `0x101a0000..0x101fffff` | 384 KiB | Call lists, T9, pictures, tones, divert history; future contacts/SMS |
 
 The build guard protects both regions. All sixteen existing persistent units
-use littlefs. The old 128 KiB journal overlaps the upper half of the user
+use littlefs. The old 128 KiB journal overlaps the upper third of the user
 volume and is reclaimed only after migration establishes the new authority.
 Phonebook contacts and ordinary SMS bodies remain modem-backed in this stage.
 
-littlefs v2.11.3 is vendored unchanged with its BSD-3-Clause license. Its adapter
-uses static buffers, 4 KiB erase blocks, 256-byte program/cache units, and the
+littlefs v2.11.3 is vendored with its BSD-3-Clause license and a documented
+[local changes](../third_party/littlefs/README.sisu.md). Its adapter
+uses static buffers, 4 KiB erase blocks, 256-byte physical program units,
+256-byte system caches and 512-byte user caches, and the
 same HAL core1/DMA park, IRQ masking, and watchdog leases as journal commits.
 Programming stages each page in RAM; no caller's XIP buffer is read with XIP
 disabled. Core0 is the sole filesystem owner; no filesystem calls run in IRQs.
@@ -32,7 +34,11 @@ initial format extents can be autoformatted;
 a corrupt filesystem is never silently replaced with defaults. An interrupted
 initial format that cannot mount requires explicit recovery, not autoformat.
 
-The service-console command `storeinfo` reports each volume's allocated blocks.
+The service-console command `storeinfo` reports each volume's allocated blocks,
+user-category budgets and usage, and file-byte totals for the existing user
+record groups. File bytes include envelopes; allocated bytes also include
+metadata pairs and temporary files. Physical free space is not the amount an
+individual category can consume.
 `storetest confirm` writes only reserved scratch
 record `fffe`, performs eight maximum-sized replacements and remount/readbacks,
 and reports elapsed time, allocated blocks, and flash-park diagnostics.
@@ -47,8 +53,78 @@ churn, transient busy/error recovery, corruption handling, HAL bounds and
 critical-section ordering. Split-volume tests also interrupt migration/growth,
 verify that updates leave the other volume byte-identical, and fill both volumes
 to test failed replacements, remounts, and recovery after deleting filler records.
+Growth tests force a root relocation beyond the old extent, repeatedly remount
+128-to-256, 128-to-384 and 256-to-384 KiB volumes, and inject torn writes and I/O
+failures during growth. Mount discovery retains physical HAL bounds while
+waiting for the authoritative superblock's size; all visited metadata pairs
+must fit the final durable size before recovery can write anything.
 The [physical power-cut run](storage_powercut_test.md#qualified-run) passed on
-the stage-1 layout; that is not a controlled voltage-ramp brownout qualification.
+the stage-1 layout; that is not a controlled voltage-ramp brownout qualification
+or a hardware qualification of the newer layout and category policy.
+
+## User Space Budgets
+
+The 384 KiB user volume has these starting budgets:
+
+| Pool | Budget |
+| --- | ---: |
+| Contacts | 64 KiB |
+| Inbox | 144 KiB |
+| Outbox | 48 KiB |
+| Incomplete-message staging | 32 KiB |
+| Existing user records and shared filesystem overhead | 64 KiB |
+| Recovery reserve | 32 KiB |
+
+The first four pools own their directory metadata pairs and file data blocks.
+The shared pool contains call lists, pictures, tones, T9 and divert history,
+the durable object-ID allocator, root metadata and any unclassified filesystem
+overhead. Its constituent records also have separate file-count/byte diagnostics;
+they do not each have a separate physical quota.
+
+After the system/user migration finishes, object initialization creates the
+directories and enables admission checks for ordinary user-record writes too.
+Usage is reconstructed from live filesystem blocks, deduplicated, and cached
+until a filesystem mutation. There is no persisted counter/index to become
+inconsistent with the files. The single core0 storage owner performs admission
+and the complete write synchronously; callers do not reserve space separately
+and later race another caller to use it.
+
+An allocation guard admits every new block, including both halves of metadata
+pairs. A normal write cannot borrow another pool's unused budget or the recovery
+reserve. The guard bounds the entire allocation peak, including the temporary
+copy, by the caller's remaining budget and physical headroom. Object writes
+are also conservatively bounded by shared-pool headroom because littlefs may
+update shared metadata during relocation. Thus a write may report FULL before
+every byte of its nominal budget is occupied. No fixed message/contact count
+is promised, and replacement at a completely filled quota is not guaranteed.
+
+Deletion and abandoned-temporary cleanup may borrow up to 16 KiB of the recovery
+reserve per operation, while preserving other pools' unused reservations. This
+allows metadata relocation while reclaiming space; ordinary growth still cannot
+use that reserve. littlefs consistency recovery completes before accounting is
+rebuilt. Interrupted replacements leave either the previous or complete new
+record, never a missing/partial record; an I/O error can be returned after the
+commit reached media. Temporary files are removed on object-store recovery and are
+never returned by collection scans.
+
+Host coverage fills all four collections in sequence, checks every allocation
+against its budget, then saves all seven existing user records. It verifies
+readback and reuse after deletion, reconstructed usage after remount, the
+512-byte inline boundary, and interrupted writes while the inbox is full.
+
+### Message File Policy
+
+The chosen policy is **one file per logical SMS**, including multipart SMS.
+There will not be a separate file for each segment or a shared message database.
+Incomplete reception belongs in one per-message staging file, atomically replaced
+as parts arrive. The message codec, assembly and SMS/contact migration remain
+the next stage; ordinary SMS/contact contents are still modem-backed today.
+
+The user filesystem retains its 512-byte inline cutoff and 4 KiB erase blocks.
+Small files share directory metadata blocks; 512 bytes is not a minimum file
+allocation. A larger file requires out-of-line data blocks as well as metadata.
+The storage envelope is 20 bytes, leaving 492 bytes of inline object payload.
+The current object API accepts up to 4060 payload bytes per atomic file.
 
 ## Migration
 
@@ -63,7 +139,7 @@ the old journal. An unreadable/invalid marker fails initialization.
 The partition split then copies the nine system units and the import marker
 into the new system filesystem, verifies each payload, and publishes `SYS2`
 in record `fff0`. Only then may the existing user filesystem grow from 128 to
-256 KiB over the old journal. It removes the stage-1 bench records, publishes
+384 KiB over the old journal. It removes the stage-1 bench records, publishes
 `USR2` in its own `fff0`, and deletes the now-redundant system copies. Interrupted
 migration resumes from these markers without recopying stale system state.
 A grown user volume with missing system authority, or a missing/corrupt import
@@ -71,15 +147,34 @@ marker after authority was established, fails closed instead of importing from
 the reclaimed journal. These are ordered per-file commits, not a cross-volume
 atomic transaction.
 
-An unused flash range may contain bytes from an older, larger firmware. Back up
-flash before provisioning. For an upgrade from stage 1, erase **only** the new
-system range `0x101b0000..0x101c0000` (exclusive end), if necessary, in BOOTSEL
-after installing firmware whose build guard protects it. Leave the existing
-user filesystem and journal intact for migration. For a device still using only
-the journal, the initial user extent `0x101c0000..0x101e0000` may also need explicit
-provisioning; never apply that erase to an existing littlefs store. Do not boot
-pre-split firmware after migration: its journal and 128 KiB filesystem views
-overlap the new user volume and are no longer valid storage backends.
+### Moving from the 256 KiB user layout
+
+This revision moves the volume bases; it is **not** an in-place size-only
+firmware upgrade. Do not boot the new firmware over an unconverted old layout.
+There is no automatic overlapping relocation in the handset firmware.
+
+Back up and verify the old flash while the DUT is stopped in BOOTSEL. Assemble
+the replacement storage image off-device: copy the old 64 KiB system volume
+from `0x101b0000` to `0x10190000`, copy the complete old 256 KiB user volume from
+`0x101c0000` to `0x101a0000`, and initialize its added 128 KiB extent to erased
+bytes. Addresses overlap, so retain a complete verified off-device source;
+do not copy forward directly on the live device. Program and read back the
+complete converted layout and a firmware image that passes the new flash
+budget guard before allowing a boot. Keep the backup until record readback
+and growth to 96 blocks have been verified. Interrupted offline programming
+must be retried in BOOTSEL, not resumed by booting a partly relocated image.
+
+An older stage-1 filesystem likewise needs relocation from `0x101c0000` to
+`0x101a0000` before the existing import/split protocol can run. Preserve its
+legacy journal at `0x101e0000` until system authority commits. An unused range
+may contain old firmware bytes; only explicitly provision new, unused extents
+after taking a backup. A journal-only device needs the new system range and
+initial user extent `0x101a0000..0x101c0000` erased, without erasing the journal.
+Never erase a live filesystem merely because mount fails.
+
+Do not boot older firmware after conversion. Its storage addresses no longer
+describe the active volumes. The historical power-cut bench retains its old
+`0x101c0000` address and must not be used after either partition migration.
 
 The C firmware exposes a typed local NVM service backed by littlefs.
 Phonebook and ordinary SMS contents remain modem-backed, but preferences, profile state,
@@ -92,6 +187,11 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
 - `nvm_hal`: raw media operations and geometry, with the RP2354 flash safety
   handshake implemented in `nvm_flash_hal.c`.
 - `storage_lfs`: filesystem/block-device adapter and atomic opaque records.
+- `storage_objects`: independent user-record files with durable IDs, CRCs,
+  atomic replacement and directory iteration. It is a storage foundation;
+  ordinary SMS/contact migration and multipart assembly are not implemented.
+- `storage_user_space`: category usage and budgets, enforced inside the adapter;
+  application code never handles littlefs block numbers or allocation callbacks.
 - `storage_backend`: record read/write contract and board composition point.
   It contains no domain schemas. A future FRAM implementation can use this
   contract without exposing FRAM or filesystem calls to applications/codecs.
@@ -144,8 +244,8 @@ The non-resettable Life timer lives in the settings/calls unit beside the four
 ordinary duration counters. This matches v6.00's call-accounting ownership and
 lets a completed call persist all five values in one record update.
 
-The flash budget guard protects the combined 320 KiB reservation, leaving
-1728 KiB for firmware. The unit-count guard
+The flash budget guard protects the combined 448 KiB reservation, leaving
+1600 KiB for firmware. The unit-count guard
 preserves the legacy ID/order contract and 16-bit diagnostics mask. Small
 records share filesystem metadata blocks instead of owning 8 KiB sector pairs.
 
