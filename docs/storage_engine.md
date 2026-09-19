@@ -216,6 +216,16 @@ path; complete pictures await user action, while abandoned partial slots are
 reclaimed on later picture reception.
 
 The eight-entry receive/sent-copy RAM queue retries BUSY, I/O and FULL outcomes.
+FULL defers that entry for one minute; three I/O failures without successful
+work defer the service for one minute, including reload, publication and expiry
+failures. A successful index reload alone does not reset that retry bound.
+Queued data remains in RAM. Quota-deferred entries do not block another category,
+and neither backoff vetoes RAM-retaining standby. Deletes immediately rearm
+queued writes; fresh queued work or a user request can interrupt I/O backoff.
+Fresh work and transient BUSY results still block sleep. Deep power-off, including
+EMPTY shutdown, may proceed with deferred entries after flushing system state;
+it logs the number of RAM-only messages that cannot survive that boundary. This
+deliberately avoids draining an empty battery while retrying unavailable storage.
 A full outbox cannot block an incoming message behind it. Once staged, fragments
 survive reboot. Incomplete SMS expire after seven days of local wall-clock time;
 the 32 KiB staging budget and 64-entry bound still apply. The pending object's

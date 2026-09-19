@@ -527,6 +527,12 @@ require_fixed \
     'core1_services_standby_ready()' src/services/standby_sleep.c \
     "dormant policy must require core1 audio and DMA quiescence"
 require_fixed \
+    'message_service_sleep_ready()' src/services/standby_sleep.c \
+    "standby must allow retained SMS queues deferred by storage failures"
+require_fixed \
+    'message_service_sleep_ready()' src/services/power_sleep.c \
+    "deep power-off must not wait forever for an unwritable SMS queue"
+require_fixed \
     'irq_set_exclusive_handler(DMA_IRQ_1, modem_dma_irq1_handler);' src/audio/modem_i2s_hal.c \
     "modem DMA must not consume or exhaust the global shared-IRQ handler pool"
 reject_pattern \

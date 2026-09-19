@@ -387,7 +387,7 @@ static void power_sleep_enter(void) {
         LOGW("power", "dormant entry aborted: RTC config pending");
         return;
     }
-    if (!phonebook_service_idle() || !message_service_idle() || !store_service_flush_all()) {
+    if (!store_service_flush_all() || !phonebook_service_idle() || !message_service_sleep_ready()) {
         note_abort(POWER_SLEEP_ABORT_FLUSH);
         LOGW("power", "dormant entry aborted: store flush failed");
         return;
@@ -525,6 +525,12 @@ static void power_sleep_enter(void) {
     }
     s_stat2_abort_streak = 0u;
 
+    message_status_t messages;
+    message_service_get_status(&messages);
+    if (messages.queued != 0u) {
+        LOGW("power", "storage unavailable: %u RAM-only messages cannot survive power-off",
+             (unsigned)messages.queued);
+    }
     LOGI("power", "entering dormant off state");
 
     /* ---- Point of no return: recovery from here is only via reboot. ---- */

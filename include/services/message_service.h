@@ -34,6 +34,10 @@ void message_service_init(void);
 /* Pass NULL when the local RTC is untrustworthy. Complete messages never expire. */
 void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time);
 bool message_service_idle(void);
+/* Failed writes stay in RAM, but FULL or repeated I/O errors must not veto
+ * sleep forever. Standby retains the queue; deep power-off loses RAM-only data.
+ * New work and transient BUSY results remain blockers. */
+bool message_service_sleep_ready(void);
 bool message_service_receive(const char *pdu);
 void message_service_note_receive_loss(void);
 /* Queue a copy only after the modem confirms transmission. A storage failure

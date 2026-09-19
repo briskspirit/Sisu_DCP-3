@@ -23,7 +23,7 @@ void store_service_require_service(uint8_t faults) { boot_faults |= faults; }
 
 static uint8_t media[STORAGE_USER_BYTES], baseline[STORAGE_USER_BYTES];
 static unsigned operations, cut_at, tear;
-static bool busy, io_error;
+static bool busy, io_error, write_error;
 static jmp_buf cut;
 static storage_backend_t backend;
 static uint32_t now;
@@ -41,7 +41,7 @@ static nvm_status_t read_media(nvm_hal_t *h, uint32_t off, void *dst, size_t n) 
 }
 static nvm_status_t change(nvm_hal_t *h, uint32_t off, const void *src, size_t n) {
     assert(off <= h->capacity && n <= h->capacity - off);
-    if (busy || io_error) return busy ? NVM_STATUS_BUSY : NVM_STATUS_IO_ERROR;
+    if (busy || io_error || write_error) return busy ? NVM_STATUS_BUSY : NVM_STATUS_IO_ERROR;
     bool interrupted = ++operations == cut_at;
     size_t done = interrupted ? (tear == 0 ? 0 : tear == 1 ? n / 2 : n) : n;
     for (size_t i = 0; i < done; i++) {
@@ -71,7 +71,7 @@ static void reopen(void) {
 static void fresh(void) {
     storage_lfs_deinit(); memset(media, 0xff, sizeof(media));
     boot_faults = 0u; memset(corrupt_detections, 0, sizeof(corrupt_detections));
-    cut_at = 0; busy = io_error = false; now = 0; wall_valid = false; reopen();
+    cut_at = 0; busy = io_error = write_error = false; now = 0; wall_valid = false; reopen();
 }
 static void tick(void) { now += 1001u; message_service_tick(now, wall_valid ? &wall : NULL); }
 static void drain(void) { for (unsigned i = 0; i < 24u; i++) tick(); }
@@ -271,7 +271,10 @@ static void test_busy_and_full(void) {
     make_pdu(pdu[0], 1, 1, 0, 1, "Busy");
     busy = true;
     assert(message_service_receive(pdu[0])); tick();
-    assert(!message_service_idle() && status().queued == 1u && status().inbox == 0u);
+    assert(!message_service_idle() && !message_service_sleep_ready() &&
+           status().queued == 1u && status().inbox == 0u);
+    drain();
+    assert(!message_service_sleep_ready()); /* BUSY is not a terminal failure. */
     busy = false; drain();
     assert(message_service_idle() && status().inbox == 1u);
     for (unsigned i = 0; i < 8; i++) assert(message_service_receive(pdu[0]));
@@ -333,10 +336,18 @@ static void test_sent_copy_and_category_isolation(void) {
     reopen();
     unsigned count = status().outbox;
     assert(message_service_sent("123", "Waiting for outbox room"));
+    assert(!message_service_sleep_ready());
+    tick();
+    assert(message_service_sleep_ready() && !message_service_idle());
     make_pdu(pdu[0], 1, 1, 0, 40, "Inbox must remain available");
     assert(message_service_receive(pdu[0]));
+    assert(!message_service_sleep_ready());
     drain();
     assert(status().inbox == 1u && status().outbox == count && status().queued == 1u);
+    assert(message_service_sleep_ready());
+    unsigned before = operations;
+    for (unsigned i = 0u; i < 10u; i++) tick();
+    assert(operations == before && status().queued == 1u && message_service_sleep_ready());
     /* Reclaim a whole quota block, then the exact held sent copy can commit. */
     for (unsigned n = 0; n < 16u && status().queued; n++) {
         assert(message_service_request_delete(MESSAGE_OUTBOX, first_id(MESSAGE_OUTBOX), &token));
@@ -345,6 +356,58 @@ static void test_sent_copy_and_category_isolation(void) {
     }
     assert(status().queued == 0u && status().inbox == 1u);
     printf("outbox budget held %u compact records; full outbox did not block inbox\n", count);
+}
+
+static void test_failed_queue_sleep(void) {
+    for (unsigned reads_fail = 0u; reads_fail < 2u; reads_fail++) {
+        fresh();
+        now = UINT32_MAX - 4000u;
+        make_pdu(pdu[0], 1, 1, 0, 41, "Retain through standby");
+        assert(message_service_receive(pdu[0]));
+        io_error = reads_fail != 0u;
+        write_error = !io_error;
+        tick();
+        assert(!message_service_sleep_ready());
+        drain();
+        assert(message_service_sleep_ready() && !message_service_idle() && status().queued == 1u);
+        io_error = write_error = false;
+        if (reads_fail) {
+            make_pdu(pdu[1], 1, 1, 0, 42, "Fresh work interrupts reload backoff");
+            assert(message_service_receive(pdu[1]));
+            assert(!message_service_sleep_ready());
+        } else {
+            now += 60000u; /* Maintenance retries retained work, including across wrap. */
+        }
+        drain();
+        assert(message_service_idle() && message_service_sleep_ready() && status().inbox == 1u + reads_fail);
+    }
+    fresh();
+    uint32_t token;
+    assert(message_service_request_save("123", "A user request must complete", &token));
+    assert(!message_service_sleep_ready());
+    write_error = true;
+    tick();
+    assert(message_service_sleep_ready());
+    message_result_t r;
+    assert(message_service_pop_result(token, &r, NULL) && r.outcome == MESSAGE_RESULT_ERROR);
+
+    for (unsigned cleanup = 0u; cleanup < 2u; cleanup++) {
+        fresh();
+        make_pdu(pdu[0], cleanup ? 2u : 1u, 1, 93, 43, "Already staged");
+        assert(message_service_receive(pdu[0])); tick();
+        assert(status().pending == 1u && status().queued == 0u);
+        if (cleanup) {
+            wall = (rtc_datetime_t){2026, 9, 19, 12, 0, 0}; wall_valid = true;
+        }
+        write_error = true;
+        make_pdu(pdu[1], 1, 1, 0, 44, "Queued behind failed maintenance");
+        assert(message_service_receive(pdu[1])); tick();
+        assert(!message_service_sleep_ready());
+        drain();
+        assert(message_service_sleep_ready() && status().queued == 1u && status().storage_error);
+        write_error = false; now += 60000u; drain();
+        assert(message_service_idle() && status().inbox == 2u - cleanup && status().pending == cleanup);
+    }
 }
 
 static void test_io_retry_and_corrupt_record(void) {
@@ -501,7 +564,8 @@ static void test_control_admission(void) {
 
 int main(void) {
     test_codec(); test_mailboxes(); test_multipart(); test_power_cuts(); test_busy_and_full();
-    test_sent_copy_and_category_isolation(); test_io_retry_and_corrupt_record(); test_delete_power_cuts();
+    test_sent_copy_and_category_isolation(); test_failed_queue_sleep();
+    test_io_retry_and_corrupt_record(); test_delete_power_cuts();
     test_expiry(); test_expiry_power_cuts(); test_control_admission();
     storage_lfs_deinit(); puts("PASS: local messages");
 }

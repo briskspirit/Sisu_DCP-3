@@ -8,6 +8,8 @@
 
 #define PENDING_LIMIT 64u
 #define RECEIVE_LIMIT 8u
+#define IO_RETRY_LIMIT 3u
+#define DEFERRED_RETRY_MS 60000u
 #define STATE_READ 1u
 #define INDEX_COMPLETE 2u
 #define INDEX_QUARANTINED 4u
@@ -27,6 +29,8 @@ typedef struct {
         struct { char address[MODEM_SMS_SENDER_MAX + 1u], text[MODEM_SMS_TEXT_MAX + 1u]; } sent;
     };
     uint32_t id;
+    uint32_t retry_at;
+    bool deferred;
     bool outgoing;
 } receive_t;
 
@@ -35,6 +39,8 @@ static uint16_t s_count[2], s_pending_count;
 static request_t s_requests[MESSAGE_OP_COUNT];
 static uint32_t s_token, s_retry_at;
 static bool s_retry_pending;
+static uint8_t s_io_failures;
+static bool s_io_deferred;
 static receive_t s_receive[RECEIVE_LIMIT];
 static uint8_t s_head, s_queued;
 static message_status_t s_status;
@@ -161,13 +167,16 @@ static void failure(storage_record_result_t rc, uint32_t now) {
     if (rc == STORAGE_RECORD_FULL) {
         if (!s_status.full) s_status.full_events++;
         s_status.full = true;
+        s_io_failures = 0u;
     } else if (rc == STORAGE_RECORD_ERROR || rc == STORAGE_RECORD_NOT_FOUND ||
                rc == STORAGE_RECORD_CORRUPT) {
         s_status.storage_error = true;
+        if (s_io_failures < IO_RETRY_LIMIT) s_io_failures++;
+        s_io_deferred = s_io_failures == IO_RETRY_LIMIT;
     }
     /* A failed call may have committed before the I/O error was reported. */
     s_status.ready = false;
-    s_retry_at = now + 1000u;
+    s_retry_at = now + (s_io_deferred ? DEFERRED_RETRY_MS : 1000u);
     s_retry_pending = true;
 }
 
@@ -178,6 +187,8 @@ void message_service_init(void) {
     s_head = s_queued = 0u;
     s_token = s_retry_at = 0u;
     s_retry_pending = false;
+    s_io_failures = 0u;
+    s_io_deferred = false;
     if (reload() != STORAGE_RECORD_OK) {
         s_status.storage_error = true;
         store_service_require_service(STORE_BOOT_FAULT_COLLECTION);
@@ -196,6 +207,7 @@ static bool request(message_op_t kind, message_mailbox_t mailbox, uint32_t id, u
         for (unsigned i = 0; i < MESSAGE_OP_COUNT; i++) used |= s_requests[i].result.request_id == s_token;
     } while (used);
     s_requests[kind] = (request_t){.result={.request_id=s_token, .object_id=id, .kind=kind}, .mailbox=mailbox};
+    s_retry_pending = false; /* User recovery actions need not wait for backoff. */
     *token = s_token;
     return true;
 }
@@ -297,6 +309,10 @@ static storage_record_result_t perform(request_t *r) {
         if (rc != STORAGE_RECORD_OK && rc != STORAGE_RECORD_NOT_FOUND) return rc;
         if (pos >= 0) erase_index(s_index[m], &s_count[m], (unsigned)pos);
         s_status.full = false;
+        for (unsigned i = 0u; i < s_queued; i++) {
+            receive_t *queued = &s_receive[(s_head + i) % RECEIVE_LIMIT];
+            queued->deferred = false;
+        }
     }
     s_status.revision++;
     return STORAGE_RECORD_OK;
@@ -316,6 +332,10 @@ bool message_service_receive(const char *pdu) {
     receive_t *r = &s_receive[(s_head + s_queued) % RECEIVE_LIMIT];
     strcpy(r->pdu, pdu); r->id = 0u; r->outgoing = false; s_queued++;
     s_status.queued = s_queued;
+    if (s_io_deferred) {
+        s_io_deferred = false;
+        s_retry_pending = false;
+    }
     return true;
 }
 
@@ -328,6 +348,10 @@ bool message_service_sent(const char *address, const char *text) {
     strcpy(r->sent.address, address); strcpy(r->sent.text, text);
     r->id = 0u; r->outgoing = true; s_queued++;
     s_status.queued = s_queued;
+    if (s_io_deferred) {
+        s_io_deferred = false;
+        s_retry_pending = false;
+    }
     return true;
 }
 
@@ -455,11 +479,23 @@ static bool cleanup_incomplete(uint32_t wall, storage_record_result_t *rc) {
     return false;
 }
 
+static void rotate_receive(void) {
+    uint8_t tail = (s_head + s_queued) % RECEIVE_LIMIT;
+    if (tail != s_head) {
+        s_receive[tail] = s_receive[s_head];
+        memset(&s_receive[s_head], 0, sizeof(s_receive[s_head]));
+    }
+    s_head = (s_head + 1u) % RECEIVE_LIMIT;
+}
+
 void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
     uint32_t wall = message_datetime_seconds(wall_time);
     s_status.retention_clock_valid = wall != 0u;
     if (s_retry_pending && (int32_t)(now - s_retry_at) < 0) return;
     s_retry_pending = false;
+    s_io_deferred = false;
+    /* A successful reload alone is not write progress: publication or expiry
+     * may still hit the same I/O error on every pass. */
     storage_record_result_t rc = s_status.ready ? STORAGE_RECORD_OK : reload();
     /* User deletes must still run when an inbox/pending quota is full. */
     for (unsigned i = 0; i < MESSAGE_OP_COUNT; i++) {
@@ -471,6 +507,7 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
             rc == STORAGE_RECORD_FULL ? MESSAGE_RESULT_FULL : MESSAGE_RESULT_ERROR;
         r->done = true;
         if (rc != STORAGE_RECORD_OK) failure(rc, now);
+        else s_io_failures = 0u;
         recount();
         return;
     }
@@ -478,6 +515,7 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
     s_status.storage_error = false;
     if (cleanup_incomplete(wall, &rc)) {
         if (rc != STORAGE_RECORD_OK) failure(rc, now);
+        else s_io_failures = 0u;
         recount();
         return;
     }
@@ -488,31 +526,37 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
             find(s_index[MESSAGE_INBOX], s_count[MESSAGE_INBOX], s_pending[i].id) < 0) continue;
         rc = publish(i);
         if (rc != STORAGE_RECORD_OK && rc != STORAGE_RECORD_FULL) { failure(rc, now); return; }
-        if (rc == STORAGE_RECORD_OK) { recount(); return; }
+        if (rc == STORAGE_RECORD_OK) { s_io_failures = 0u; recount(); return; }
         if (!s_status.full) s_status.full_events++;
         s_status.full = true;
         publication_full = true;
         /* A full inbox must not strand a filtered control or a post-cut
          * duplicate behind the message waiting for publication. */
     }
-    if (s_queued != 0u) {
+    for (unsigned checked = 0u; checked < s_queued; checked++) {
+        receive_t *r = &s_receive[s_head];
+        if (r->deferred && (int32_t)(now - r->retry_at) < 0) {
+            rotate_receive();
+            continue;
+        }
+        r->deferred = false;
         rc = receive_one();
         if (rc != STORAGE_RECORD_OK) {
-            /* A full category must not block another category behind it. */
-            if (rc == STORAGE_RECORD_FULL && s_queued > 1u) {
-                uint8_t tail = (s_head + s_queued) % RECEIVE_LIMIT;
-                if (tail != s_head) {
-                    s_receive[tail] = s_receive[s_head];
-                    memset(&s_receive[s_head], 0, sizeof(s_receive[s_head]));
-                }
-                s_head = (s_head + 1u) % RECEIVE_LIMIT;
+            if (rc != STORAGE_RECORD_BUSY) {
+                r->deferred = rc == STORAGE_RECORD_FULL;
+                r->retry_at = now + DEFERRED_RETRY_MS;
             }
+            /* Retain failed arrivals without starving another category or
+             * keeping an empty battery awake for an unwritable RAM queue. */
+            rotate_receive();
             failure(rc, now);
             return;
         }
         memset(&s_receive[s_head], 0, sizeof(s_receive[s_head]));
         s_head = (s_head + 1u) % RECEIVE_LIMIT; s_queued--;
+        break;
     }
+    s_io_failures = 0u;
     recount();
 }
 
@@ -520,6 +564,14 @@ bool message_service_idle(void) {
     if (s_queued != 0u) return false;
     for (unsigned i = 0; i < MESSAGE_OP_COUNT; i++)
         if (s_requests[i].result.request_id != 0u && !s_requests[i].done) return false;
+    return true;
+}
+bool message_service_sleep_ready(void) {
+    for (unsigned i = 0; i < MESSAGE_OP_COUNT; i++)
+        if (s_requests[i].result.request_id != 0u && !s_requests[i].done) return false;
+    if (s_io_deferred) return true;
+    for (unsigned i = 0u; i < s_queued; i++)
+        if (!s_receive[(s_head + i) % RECEIVE_LIMIT].deferred) return false;
     return true;
 }
 void message_service_note_receive_loss(void) { s_status.receive_errors++; }
