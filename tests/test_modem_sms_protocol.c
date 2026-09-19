@@ -6,6 +6,7 @@
 #include "services/modem_sms_protocol_internal.h"
 #include "services/modem_sms_state_internal.h"
 #include "services/sms_submit_codec.h"
+#include "services/sms_picture_codec.h"
 
 #define CAPTURE_MAX 16u
 #define BODY_MAX 512u
@@ -113,8 +114,20 @@ static bool capture_emit(const modem_sms_protocol_action_t *action) {
     return true;
 }
 
+static bool encode_text_fixture(const char *text, modem_sms_text_t *out) {
+    memset(out, 0, sizeof(*out));
+    if (strcmp(text, "{}") == 0) {
+        memcpy(out->body, "007B007D", 8u);
+        out->length = 8u;
+        out->dcs = 8u;
+        return true;
+    }
+    return sms_gsm7_from_utf8(text, out->body, MODEM_SMS_TEXT_MAX, &out->length);
+}
+
 static const modem_sms_protocol_hooks_t s_hooks = {
     .emit = capture_emit,
+    .encode_text = encode_text_fixture,
 };
 
 static void reset_fixture(void) {
@@ -494,7 +507,42 @@ static void test_picture_text_send(void) {
     modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 220u);
     check(!modem_sms_protocol_settings_restore_needed(), "confirmed cleanup clears repair obligation");
 }
+static void test_unicode_text_cleanup(void) {
+    modem_sms_protocol_request_t r = text_request();
+    r.text = "{}";
+    reset_fixture();
+    check(modem_sms_protocol_begin(&r, &s_hooks, 1u), "Unicode begin");
+    check_command(0u, MODEM_SMS_COMMAND_TEXT_SETUP, "AT+CMGF=1;+CSMP=17,167,0,8",
+                  5000u, false, false, "Unicode keeps text receive mode");
+    clear_actions();
+    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_TEXT_SETUP, true, &r, &s_hooks, 2u);
+    clear_actions();
+    check(modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGS_PROMPT, &r, &s_hooks, 3u) &&
+          s_actions[0].body_len == 8u && memcmp(s_actions[0].body, "007B007D", 8u) == 0,
+          "Unicode sends vendor-encoded body, not raw UTF-8");
+    clear_actions();
+    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGS_FINAL, true, &r, &s_hooks, 4u);
+    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0",
+                  5000u, false, false, "Unicode restores outgoing DCS after acceptance");
+    clear_actions();
+    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGF_TEXT, &r, &s_hooks, 5u);
+    check(s_actions[1].outcome == MODEM_SMS_OUTCOME_OK && !s_actions[2].ok &&
+          modem_sms_protocol_settings_restore_needed(), "failed repair cannot replay accepted Unicode");
+
+    reset_fixture();
+    (void)modem_sms_protocol_begin(&r, &s_hooks, 10u);
+    clear_actions();
+    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGS_PROMPT, &r, &s_hooks, 11u);
+    check(s_action_count == 1u && s_actions[0].restore_after_settle,
+          "Unicode prompt timeout defers repair until ESC drains");
+    clear_actions();
+    modem_sms_protocol_resume_after_prompt_abort(&r, &s_hooks, 12u);
+    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0",
+                  5000u, false, false, "Unicode abort repairs DCS");
+}
+
 int main(void) {
+    test_unicode_text_cleanup();
     test_text_transport();
     test_dispatch_evidence();
     test_binary_prompt_timeout_restore();

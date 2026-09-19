@@ -50,5 +50,8 @@ bool sms_picture_payload_decode(const uint8_t *payload,
                                 uint16_t payload_len,
                                 store_picture_message_t *out_message);
 bool sms_pdu_decode(const char *hex, sms_codec_message_t *out_message);
+/* Strict UTF-8 conversions: no substitution or silent truncation. */
+bool sms_gsm7_from_utf8(const char *text, uint8_t *out, size_t cap, size_t *length);
+bool sms_ucs2_from_utf8(const char *text, uint8_t *out, size_t cap, size_t *length);
 
 #endif

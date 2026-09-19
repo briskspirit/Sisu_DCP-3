@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "services/sms_types.h"
+#include "services/modem_sms_text.h"
 
 typedef enum {
     MODEM_SMS_PROTOCOL_NONE = 0,
@@ -19,6 +20,7 @@ typedef enum {
     MODEM_SMS_COMMAND_CMGS_PROMPT,
     MODEM_SMS_COMMAND_CMGS_FINAL,
     MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP,
+    MODEM_SMS_COMMAND_TEXT_SETUP,
 } modem_sms_command_kind_t;
 
 /* The root request owns every pointed-to buffer for the whole operation. The
@@ -89,6 +91,7 @@ typedef struct {
 /* Borrowed command/body pointers are consumed synchronously. */
 typedef struct {
     bool (*emit)(const modem_sms_protocol_action_t *action);
+    bool (*encode_text)(const char *text, modem_sms_text_t *out);
 } modem_sms_protocol_hooks_t;
 
 void modem_sms_protocol_init(void);

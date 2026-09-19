@@ -137,6 +137,7 @@ typedef enum {
     MODEM_AT_SMS_CMGS_PROMPT,
     MODEM_AT_SMS_CMGS_FINAL,
     MODEM_AT_SMS_PICTURE_TEXT_SETUP,
+    MODEM_AT_SMS_TEXT_SETUP,
     MODEM_AT_DIAG_QUERY,        /* one Net Monitor v2 query; always yields on final */
     MODEM_AT_MAINTENANCE,
     MODEM_AT_POWER_OFF,
@@ -2363,6 +2364,7 @@ bool modem_service_request_send_sms(const char *number, const char *text,
     if (request_id_out != NULL) {
         *request_id_out = 0u;
     }
+    if (text == NULL || strlen(text) > MODEM_SMS_TEXT_MAX) return false;
     modem_request_t request;
     memset(&request, 0, sizeof(request));
     request.type = MODEM_REQ_SEND_SMS;
@@ -5092,6 +5094,7 @@ static bool at_kind_is_operation(modem_at_kind_t kind) {
            kind == MODEM_AT_SMS_CMGF_PDU ||
            kind == MODEM_AT_SMS_CMGF_TEXT || kind == MODEM_AT_SMS_CMGS_PROMPT ||
            kind == MODEM_AT_SMS_CMGS_FINAL || kind == MODEM_AT_SMS_PICTURE_TEXT_SETUP ||
+           kind == MODEM_AT_SMS_TEXT_SETUP ||
            kind == MODEM_AT_POWER_OFF || kind == MODEM_AT_DEBUG ||
            kind == MODEM_AT_MAINTENANCE;
 }
@@ -6002,6 +6005,7 @@ static bool sms_protocol_command_from_at(modem_at_kind_t at_kind,
     case MODEM_AT_SMS_CMGS_PROMPT:     *out = MODEM_SMS_COMMAND_CMGS_PROMPT; return true;
     case MODEM_AT_SMS_CMGS_FINAL:      *out = MODEM_SMS_COMMAND_CMGS_FINAL; return true;
     case MODEM_AT_SMS_PICTURE_TEXT_SETUP: *out = MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP; return true;
+    case MODEM_AT_SMS_TEXT_SETUP:      *out = MODEM_SMS_COMMAND_TEXT_SETUP; return true;
     default: return false;
     }
 }
@@ -6014,6 +6018,7 @@ static modem_at_kind_t sms_protocol_command_to_at(
     case MODEM_SMS_COMMAND_CMGS_PROMPT:     return MODEM_AT_SMS_CMGS_PROMPT;
     case MODEM_SMS_COMMAND_CMGS_FINAL:      return MODEM_AT_SMS_CMGS_FINAL;
     case MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP: return MODEM_AT_SMS_PICTURE_TEXT_SETUP;
+    case MODEM_SMS_COMMAND_TEXT_SETUP: return MODEM_AT_SMS_TEXT_SETUP;
     default:                                return MODEM_AT_NONE;
     }
 }
@@ -6191,8 +6196,13 @@ static bool sms_protocol_emit(const modem_sms_protocol_action_t *action) {
     }
 }
 
+static bool sms_encode_text(const char *text, modem_sms_text_t *out) {
+    return g_modem_vendor.encode_sms_text != NULL && g_modem_vendor.encode_sms_text(text, out);
+}
+
 static const modem_sms_protocol_hooks_t s_sms_protocol_hooks = {
     .emit = sms_protocol_emit,
+    .encode_text = sms_encode_text,
 };
 
 static bool sms_start_current_request(uint32_t now_ms) {

@@ -314,16 +314,29 @@ unreadable in every mode.
 
 ## Shared AT Channel
 
-### Outgoing Character Encoding Limitation
+### Outgoing Character Encoding
 
-Ordinary text sending still submits the application's text bytes directly under
-`+CSCS="GSM"`; it does not yet translate UTF-8 into that character set. The
-September 19 loopback reproduced `@` becoming an inverted exclamation mark and
-braces becoming accented letters. The local sent copy preserved the original
-text, while the inbox file correctly preserved what arrived over the network.
-This path is unchanged from before littlefs and needs a separate transmit
-encoding fix. The receive character-count fix does not solve it, and successful
-ASCII or picture loopbacks do not qualify outgoing Unicode/extension characters.
+The Telit adapter converts application UTF-8 into GSM characters before sending.
+The UART uses an explicit byte length, including GSM NUL (`@`). Backspace,
+ESC and Ctrl-Z are prompt controls, so messages requiring those GSM codes, or
+characters outside GSM, use UCS2 through text-mode `+CMGS` with TP-DCS 8.
+Its body is ASCII hex as required by Telit's text prompt; this does not select
+PDU mode, change `+CSCS="GSM"`, or enable `#CSCSEXT`. Startup disables the old
+global HEX representation explicitly. Applications and local sent copies keep
+UTF-8; modem representation does not reach the storage or UI layers.
+
+The composer/API still accepts at most 160 UTF-8 bytes. Safe GSM text uses one
+segment; UCS2 over 70 characters relies on Telit's documented automatic
+concatenation. This fallback can cost more segments for extension characters.
+Malformed UTF-8 and characters outside UCS2 fail without substitution. A failed
+multi-part submission is conservatively uncertain, since earlier parts might
+already have been accepted. Outgoing parameters are restored after completion,
+timeout or cancellation; repair failure never turns an accepted send into a
+retryable failure, and blocks later SMS sends until repaired.
+
+The September 19 Unicode loopback also exposed a receive length discrepancy:
+the ten-field Telit UCS2 `+CMT` without UDH reports characters, not octets. The
+vendor adapter normalizes this form before the strict generic TPDU parser.
 
 ### Command Scheduling
 

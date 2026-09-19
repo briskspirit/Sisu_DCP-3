@@ -5831,6 +5831,45 @@ static void test_picture_text_send_and_local_receive(void) {
           "native WEMT picture part goes to local storage, never through ME/Inbox");
 }
 
+static void test_unicode_send_keeps_direct_delivery(void) {
+    if (!begin_sms_operation_fixture("Unicode text-send fixture boots")) return;
+    s_hold_final_command = "AT+CMGF=1;+CSMP=17,167,0,8";
+    check(modem_service_request_send_sms("5550102", "@{}\xc3\xb2\xe2\x82\xac\xd0\x9f"),
+          "Unicode text request admitted");
+    mh_settle();
+    unsigned received = s_mh_picture_parts;
+    feed_direct("+CMT: \"12025550123\",\"\",\"20260918102440\",129,4101,1,0,15",
+                "0B0504158A158A000302030242494E");
+    check(s_mh_picture_parts == received + 1u && service_probe().command_active,
+          "WEMT picture UDH survives while outgoing Unicode settings are active");
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    mh_settle();
+    modem_sms_send_result_t result;
+    check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_OK &&
+          tx_event_raw("0040007B007D00F220AC041F", 24u, 0u) != SIZE_MAX &&
+          mh_tx_count_exact("AT+CMGF=0") == 0u && mh_tx_count_exact("AT#CSCSEXT=1") == 0u &&
+          mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == 1u,
+          "Unicode body uses text-mode CMGS and restores parameters without changing global encoding");
+
+    mh_clear_tx_capture();
+    check(modem_service_request_send_sms("5550102", "a@b"), "GSM @ request admitted");
+    mh_settle();
+    const uint8_t body[] = {'a', 0, 'b'};
+    check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_OK &&
+          tx_event_raw(body, sizeof(body), 0u) != SIZE_MAX, "GSM NUL is not truncated by the UART adapter");
+
+    s_sms_cmgf_text_error_budget = 10u;
+    check(modem_service_request_send_sms("5550102", "{}"), "Unicode failed-repair request admitted");
+    mh_settle();
+    check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_OK &&
+          service_probe().sms_mode_restore_pending, "accepted Unicode remains sent when DCS repair fails");
+    s_sms_cmgf_text_error_budget = 0u;
+    mh_advance(31000u);
+    mh_settle();
+    check(!service_probe().sms_mode_restore_pending, "Unicode parameters eventually repaired");
+}
+
 static void test_picture_settings_repair_blocks_sms_not_calls(void) {
     if (!begin_sms_operation_fixture("picture repair fixture boots")) return;
     static const uint8_t payload[] = {0x30u, 0x00u, 0x00u};
@@ -6167,6 +6206,10 @@ static void test_direct_delivery_plain_bodies_are_read_raw(void) {
         {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,33",
          (const uint8_t *)MULTI, sizeof(MULTI) - 1u, MULTI,
          "3GPP text body with an embedded CRLF"},
+        {"+CMT: \"+18132936877\",\"\",\"26/09/19,12:04:52-16\",145,4,0,8,\"+19039321413\",145,20",
+         (const uint8_t *)"0053006900730075002000400020007B007D002000F2002020AC0020041F04400438043204350442",
+         80u, "Sisu @ {} \xc3\xb2 \xe2\x82\xac \xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82",
+         "captured Telit UCS2 length counts characters, not octets"},
         {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,6",
          (const uint8_t *)"Hello ", 6u, "Hello ", "3GPP text body with a trailing space"},
         {"+CMT: \"+18132936877\",,\"26/09/16,10:59:04-16\",145,4,0,0,\"+19037029920\",145,3",
@@ -6555,6 +6598,7 @@ int main(void) {
     test_direct_delivery_is_restored_as_a_pdu();
     test_direct_controls_skip_storage();
     test_picture_text_send_and_local_receive();
+    test_unicode_send_keeps_direct_delivery();
     test_picture_settings_repair_blocks_sms_not_calls();
     test_direct_delivery_mid_command_and_qcmti();
     test_slow_call_forwarding_keeps_receiving();

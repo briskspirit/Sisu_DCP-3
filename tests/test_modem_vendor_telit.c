@@ -2211,7 +2211,47 @@ static void test_direct_3gpp2_bounds(void) {
           "PDU-form body past the user-data maximum rejected");
 }
 
+static void test_text_transmit_encoding(void) {
+    modem_sms_text_t t;
+    const uint8_t gsm[] = {'a', 0, 'b', ' ', 2, ' ', 0x11, ' ', 5};
+    check(telit_encode_sms_text("a@b $ _ \xc3\xa9", &t) && t.dcs == 0u &&
+          t.length == sizeof(gsm) && memcmp(t.body, gsm, sizeof(gsm)) == 0,
+          "UTF-8 is mapped to GSM; embedded @ NUL uses an explicit byte length");
+    check(telit_encode_sms_text("@{}\xc3\xb2\xe2\x82\xac\xd0\x9f", &t) && t.dcs == 8u &&
+          t.length == 24u && memcmp(t.body, "0040007B007D00F220AC041F", 24u) == 0 && !t.multipart,
+          "prompt editing controls and non-GSM text use UCS2 without a global charset change");
+    char max[MODEM_SMS_TEXT_MAX + 2u];
+    memset(max, 'A', MODEM_SMS_TEXT_MAX);
+    max[MODEM_SMS_TEXT_MAX] = 0;
+    check(telit_encode_sms_text(max, &t) && t.length == 160u && t.dcs == 0u && !t.multipart,
+          "160 ordinary GSM characters retain one-segment encoding");
+    memset(max, '{', MODEM_SMS_TEXT_MAX);
+    check(telit_encode_sms_text(max, &t) && t.length == 640u && t.dcs == 8u && t.multipart,
+          "maximum supported input fits UCS2 prompt and marks concatenation");
+    max[MODEM_SMS_TEXT_MAX] = 'A'; max[MODEM_SMS_TEXT_MAX + 1u] = 0;
+    check(!telit_encode_sms_text(max, &t), "oversized text is rejected, never truncated");
+    const char *invalid[] = {"\xc0\x80", "\xe0\x80\x80", "\xed\xa0\x80", "\xe2\x82", "\xf0\x9f\x98\x80"};
+    for (size_t i = 0u; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+        check(!telit_encode_sms_text(invalid[i], &t), "malformed UTF-8 and non-UCS2 characters fail explicitly");
+    check(find_init_step("AT#CSCSEXT=0") != NULL && find_init_step("AT#CSCSEXT=1") == NULL,
+          "startup explicitly disables the old global HEX experiment");
+}
+
+static void test_3gpp_ucs2_character_length(void) {
+    sms_deliver_t d;
+    const char *header = "+CMT: \"123\",,\"26/09/19,12:00:00+00\",129,4,0,8,,129,2";
+    check(telit_translate_direct_sms(header, BYTES("0040007B"), &d) == MODEM_SMS_DIRECT_ACCEPTED &&
+          d.udl == 4u && d.ud_len == 4u && d.ud[1] == '@' && d.ud[3] == '{',
+          "UCS2 character count becomes exact octet count");
+    check(telit_translate_direct_sms(header, BYTES("0040"), &d) == MODEM_SMS_DIRECT_REJECTED &&
+          telit_translate_direct_sms(header, BYTES("0040007B0041"), &d) == MODEM_SMS_DIRECT_REJECTED &&
+          telit_translate_direct_sms(header, BYTES("0040007Z"), &d) == MODEM_SMS_DIRECT_REJECTED,
+          "short, oversized and non-hex UCS2 bodies do not consume following lines");
+}
+
 int main(void) {
+    test_text_transmit_encoding();
+    test_3gpp_ucs2_character_length();
     test_production_descriptor();
     test_init_table_direct_sms_delivery();
     test_antenna_tuner_policy();

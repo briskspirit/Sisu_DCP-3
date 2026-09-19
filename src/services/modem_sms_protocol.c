@@ -17,6 +17,7 @@ typedef struct {
     bool pdu_mode_possible, picture_text_mode, text_parameters_dirty;
 } modem_sms_protocol_state_t;
 static modem_sms_protocol_state_t s_protocol;
+static modem_sms_text_t s_text;
 
 static modem_sms_request_kind_t request_kind(const modem_sms_protocol_request_t *r) {
     if (r == NULL) return MODEM_SMS_REQUEST_NONE;
@@ -98,7 +99,7 @@ static void binary_restore_text(const modem_sms_protocol_hooks_t *hooks,
     s_protocol.binary_outcome = outcome;
     modem_sms_state_binary_set_send_ok(outcome == MODEM_SMS_OUTCOME_OK);
     (void)emit_command(hooks, MODEM_SMS_COMMAND_CMGF_TEXT,
-                       s_protocol.picture_text_mode
+                       s_protocol.text_parameters_dirty
                            ? "AT+CMGF=1;+CSMP=17,167,0,0" : "AT+CMGF=1",
                        5000u, now_ms, false, false);
 }
@@ -162,14 +163,24 @@ static void binary_start_segment(
 }
 
 
-void modem_sms_protocol_init(void) { memset(&s_protocol, 0, sizeof(s_protocol)); }
+void modem_sms_protocol_init(void) {
+    memset(&s_protocol, 0, sizeof(s_protocol));
+    memset(&s_text, 0, sizeof(s_text));
+}
 
 bool modem_sms_protocol_begin(const modem_sms_protocol_request_t *request,
                               const modem_sms_protocol_hooks_t *hooks, uint32_t now_ms) {
     if (!request_valid(request) || hooks == NULL || hooks->emit == NULL) return false;
     memset(&s_protocol, 0, sizeof(s_protocol));
+    memset(&s_text, 0, sizeof(s_text));
+    if (request->operation == MODEM_SMS_PROTOCOL_SEND_TEXT &&
+        (hooks->encode_text == NULL || !hooks->encode_text(request->text, &s_text))) return false;
     if (request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY) binary_start(request, hooks, now_ms);
-    else modem_sms_protocol_resume_after_wake(request, hooks, now_ms);
+    else if (s_text.dcs != 0u) {
+        char command[48];
+        snprintf(command, sizeof(command), "AT+CMGF=1;+CSMP=17,167,0,%u", (unsigned)s_text.dcs);
+        (void)emit_command(hooks, MODEM_SMS_COMMAND_TEXT_SETUP, command, 5000u, now_ms, false, false);
+    } else modem_sms_protocol_resume_after_wake(request, hooks, now_ms);
     return true;
 }
 
@@ -188,7 +199,8 @@ void modem_sms_protocol_resume_after_wake(const modem_sms_protocol_request_t *re
 
 void modem_sms_protocol_resume_after_prompt_abort(const modem_sms_protocol_request_t *request,
     const modem_sms_protocol_hooks_t *hooks, uint32_t now_ms) {
-    if (request != NULL && request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY) {
+    if (request != NULL && (request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY ||
+                           s_protocol.text_parameters_dirty)) {
         modem_sms_outcome_t outcome = s_protocol.binary_outcome;
         if (outcome == MODEM_SMS_OUTCOME_NONE) outcome = MODEM_SMS_OUTCOME_TIMEOUT;
         binary_restore_text(hooks, now_ms, outcome);
@@ -201,7 +213,7 @@ bool modem_sms_protocol_on_prompt(modem_sms_command_kind_t kind,
     modem_sms_protocol_action_t action = {
         .type=MODEM_SMS_ACTION_BODY, .data.body={
             .final_kind=MODEM_SMS_COMMAND_CMGS_FINAL,
-            .timeout_ms=request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY
+            .timeout_ms=request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY || s_text.multipart
                 ? MODEM_SMS_BINARY_RESULT_TIMEOUT_MS : 30000u,
             .now_ms=now_ms, .binary=request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY,
         },
@@ -215,8 +227,8 @@ bool modem_sms_protocol_on_prompt(modem_sms_command_kind_t kind,
         action.data.body.segment_total = segment.segment_total;
         action.data.body.tpdu_len = segment.tpdu_len;
     } else {
-        action.data.body.bytes = (const uint8_t *)request->text;
-        action.data.body.length = strlen(request->text);
+        action.data.body.bytes = s_text.body;
+        action.data.body.length = s_text.length;
     }
     bool emitted = emit(hooks, &action);
     if (emitted) s_protocol.payload_submitted = true;
@@ -226,6 +238,7 @@ bool modem_sms_protocol_on_prompt(modem_sms_command_kind_t kind,
 void modem_sms_protocol_command_dispatched(modem_sms_command_kind_t kind) {
     if (kind == MODEM_SMS_COMMAND_CMGF_PDU) s_protocol.pdu_mode_possible = true;
     if (kind == MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP) s_protocol.text_parameters_dirty = true;
+    if (kind == MODEM_SMS_COMMAND_TEXT_SETUP) s_protocol.text_parameters_dirty = true;
 }
 bool modem_sms_protocol_pdu_mode_possible(void) { return s_protocol.pdu_mode_possible; }
 bool modem_sms_protocol_settings_restore_needed(void) {
@@ -258,6 +271,10 @@ void modem_sms_protocol_on_final(modem_sms_command_kind_t kind, bool ok,
         s_protocol.text_parameters_dirty = false;
     }
     switch (kind) {
+    case MODEM_SMS_COMMAND_TEXT_SETUP:
+        if (ok) modem_sms_protocol_resume_after_wake(request, hooks, now_ms);
+        else binary_restore_text(hooks, now_ms, MODEM_SMS_OUTCOME_ERROR);
+        return;
     case MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP:
         if (ok) binary_start_segment(request, hooks, now_ms);
         else binary_restore_text(hooks, now_ms, MODEM_SMS_OUTCOME_ERROR);
@@ -273,7 +290,7 @@ void modem_sms_protocol_on_final(modem_sms_command_kind_t kind, bool ok,
         binary_finish(request, hooks, ok);
         return;
     case MODEM_SMS_COMMAND_CMGS_PROMPT:
-        if (request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY)
+        if (request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY || s_protocol.text_parameters_dirty)
             binary_restore_text(hooks, now_ms, s_protocol.binary_segments_accepted != 0u
                 ? MODEM_SMS_OUTCOME_UNCERTAIN : MODEM_SMS_OUTCOME_ERROR);
         else {
@@ -297,6 +314,12 @@ void modem_sms_protocol_on_final(modem_sms_command_kind_t kind, bool ok,
             }
         } else {
             s_protocol.send_confirmed = ok;
+            if (s_protocol.text_parameters_dirty) {
+                /* A multi-part CMGS may fail after accepting earlier parts. */
+                binary_restore_text(hooks, now_ms, ok ? MODEM_SMS_OUTCOME_OK :
+                    s_text.multipart ? MODEM_SMS_OUTCOME_UNCERTAIN : MODEM_SMS_OUTCOME_ERROR);
+                return;
+            }
             if (ok) emit_status_increment(hooks, MODEM_SMS_ACTION_INCREMENT_SENT);
             emit_send_result(request, hooks, ok ? MODEM_SMS_OUTCOME_OK : MODEM_SMS_OUTCOME_ERROR);
             emit_complete(request, hooks, ok ? MODEM_SMS_OUTCOME_OK : MODEM_SMS_OUTCOME_ERROR, ok);
@@ -308,27 +331,27 @@ void modem_sms_protocol_on_final(modem_sms_command_kind_t kind, bool ok,
 void modem_sms_protocol_on_timeout(modem_sms_command_kind_t kind,
     const modem_sms_protocol_request_t *request, const modem_sms_protocol_hooks_t *hooks, uint32_t now_ms) {
     if (!request_valid(request)) { emit_complete(request, hooks, MODEM_SMS_OUTCOME_ERROR, false); return; }
-    bool binary = request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY;
+    bool restore = request->operation == MODEM_SMS_PROTOCOL_SEND_BINARY || s_protocol.text_parameters_dirty;
     if (kind == MODEM_SMS_COMMAND_CMGS_PROMPT) {
         /* Drain ESC's final before issuing any mode-restoration command. */
         modem_sms_protocol_action_t action = {
             .type=MODEM_SMS_ACTION_ABORT_PROMPT,
-            .data.abort_prompt={.now_ms=now_ms, .restore_after_settle=binary},
+            .data.abort_prompt={.now_ms=now_ms, .restore_after_settle=restore},
         };
         (void)emit(hooks, &action);
-        if (binary) {
+        if (restore) {
             s_protocol.binary_outcome = s_protocol.binary_segments_accepted != 0u
                 ? MODEM_SMS_OUTCOME_UNCERTAIN : MODEM_SMS_OUTCOME_TIMEOUT;
             return;
         }
     }
-    if (binary && kind == MODEM_SMS_COMMAND_CMGF_TEXT) {
+    if (restore && kind == MODEM_SMS_COMMAND_CMGF_TEXT) {
         binary_finish(request, hooks, false);
         return;
     }
     modem_sms_outcome_t outcome = kind == MODEM_SMS_COMMAND_CMGS_FINAL
         ? MODEM_SMS_OUTCOME_UNCERTAIN : MODEM_SMS_OUTCOME_TIMEOUT;
-    if (binary) binary_restore_text(hooks, now_ms, outcome);
+    if (restore) binary_restore_text(hooks, now_ms, outcome);
     else {
         emit_send_result(request, hooks, outcome);
         emit_complete(request, hooks, outcome, false);

@@ -56,6 +56,35 @@ static uint8_t s_ascii[TELIT_GSM7_SEPTETS_MAX];    /* unpacked 7-bit ASCII (PDU 
 static telit_csv_view_t s_fields[TELIT_3GPP2_HEADER_FIELDS_MAX];
 static char s_3gpp_header[MODEM_SMS_DIRECT_LINE_MAX];
 
+bool telit_encode_sms_text(const char *text, modem_sms_text_t *out) {
+    if (text == NULL || out == NULL || strlen(text) > MODEM_SMS_TEXT_MAX) return false;
+    memset(out, 0, sizeof(*out));
+    if (sms_gsm7_from_utf8(text, out->body, TELIT_GSM7_SEPTETS_MAX, &out->length)) {
+        bool safe = true;
+        for (size_t i = 0u; i < out->length; i++) {
+            /* BS edits the prompt, ESC cancels, SUB submits prematurely. */
+            if (out->body[i] == 0x08u || out->body[i] == 0x1au || out->body[i] == 0x1bu)
+                safe = false;
+        }
+        if (safe) return true;
+    }
+    size_t bytes;
+    if (!sms_ucs2_from_utf8(text, out->body, MODEM_SMS_TEXT_MAX * 2u, &bytes)) return false;
+    /* CMGF remains 1 and CSCS remains GSM. Only outgoing TP-DCS changes;
+     * UCS2 text prompts take ASCII hex, without enabling #CSCSEXT. */
+    static const char hex[] = "0123456789ABCDEF";
+    for (size_t i = bytes; i > 0u; i--) {
+        uint8_t value = out->body[i - 1u];
+        out->body[(i - 1u) * 2u] = (uint8_t)hex[value >> 4];
+        out->body[(i - 1u) * 2u + 1u] = (uint8_t)hex[value & 15u];
+    }
+    out->length = bytes * 2u;
+    out->body[out->length] = 0u;
+    out->dcs = 8u;
+    out->multipart = bytes > SMS_DELIVER_UD_MAX;
+    return true;
+}
+
 static modem_sms_direct_translate_result_t translate_3gpp_text(
     const char *header, const uint8_t *payload, size_t payload_len,
     sms_deliver_t *out) {
@@ -68,6 +97,19 @@ static modem_sms_direct_translate_result_t translate_3gpp_text(
     uint32_t group = dcs >> 4u;
     bool gsm7 = group <= 7u ? (dcs & 0x2Cu) == 0u :
         (group == 12u || group == 13u || (group == 15u && (dcs & 12u) == 0u));
+    bool ucs2 = group == 14u || (group <= 7u && (dcs & 0x2Cu) == 8u);
+    if (ucs2 && (fo & 0x40u) == 0u) {
+        /* Captured UCS2 +CMT reports characters, while the generic parser
+         * consumes octets. Hex bodies end at this line; never swallow URCs. */
+        const char *last = strrchr(header, ',');
+        if (last == NULL || length > SMS_DELIVER_UD_MAX / 2u || payload_len != length * 4u)
+            return MODEM_SMS_DIRECT_REJECTED;
+        int n = snprintf(s_3gpp_header, sizeof(s_3gpp_header), "%.*s,%u",
+                         (int)(last - header), header, (unsigned)length * 2u);
+        return n >= 0 && (size_t)n < sizeof(s_3gpp_header) &&
+            modem_sms_direct_parse_3gpp_text(s_3gpp_header, payload, payload_len, out)
+                ? MODEM_SMS_DIRECT_ACCEPTED : MODEM_SMS_DIRECT_REJECTED;
+    }
     if ((fo & 0x40u) != 0u || !gsm7) {
         return MODEM_SMS_DIRECT_NOT_MINE;
     }

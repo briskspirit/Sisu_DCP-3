@@ -13,7 +13,7 @@
 #define TELIT_SERVINFO_FIELD_COUNT 9u
 #define TELIT_TUNE_COMMAND_DOMAIN_MASK ((UINT64_C(1) << 35u) - 1u)
 #define TELIT_DIAG_QUERY_COUNT 43u
-#define TELIT_INIT_STEP_COUNT 23u
+#define TELIT_INIT_STEP_COUNT 24u
 #define TELIT_PROVISION_STEP_COUNT 27u
 
 typedef struct {
@@ -268,5 +268,7 @@ bool telit_maintenance_build_gpio_set(uint8_t pin, bool state,
                                       char *out, size_t out_cap);
 modem_diag_line_result_t telit_maintenance_parse_gpio(
     const char *line, modem_gpio_config_t *config);
+
+bool telit_encode_sms_text(const char *text, modem_sms_text_t *out);
 
 #endif /* MODEM_VENDOR_TELIT_INTERNAL_H */

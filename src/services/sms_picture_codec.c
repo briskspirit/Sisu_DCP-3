@@ -699,3 +699,70 @@ static size_t bounded_strlen(const char *text, size_t cap) {
     }
     return len;
 }
+
+static bool next_bmp_codepoint(const uint8_t **cursor, uint32_t *out) {
+    const uint8_t *p = *cursor;
+    uint32_t cp = *p++;
+    if (cp >= 0x80u) {
+        unsigned extra = cp >= 0xe0u && cp <= 0xefu ? 2u
+                       : cp >= 0xc2u && cp <= 0xdfu ? 1u : 0u;
+        if (extra == 0u) return false;
+        cp &= extra == 2u ? 15u : 31u;
+        for (unsigned i = 0u; i < extra; i++) {
+            if ((*p & 0xc0u) != 0x80u) return false;
+            cp = (cp << 6) | (*p++ & 63u);
+        }
+        if (cp < (extra == 2u ? 0x800u : 0x80u) ||
+            (cp >= 0xd800u && cp <= 0xdfffu) || cp >= 0xfffeu) return false;
+    }
+    *cursor = p;
+    *out = cp;
+    return true;
+}
+
+bool sms_gsm7_from_utf8(const char *text, uint8_t *out, size_t cap, size_t *length) {
+    if (text == NULL || out == NULL || length == NULL) return false;
+    const uint8_t *p = (const uint8_t *)text;
+    size_t n = 0u;
+    while (*p != 0u) {
+        uint32_t cp;
+        if (!next_bmp_codepoint(&p, &cp)) return false;
+        bool found = false;
+        for (unsigned c = 0u; c < 128u; c++) {
+            if (c != 0x1bu && gsm7_default_codepoint((uint8_t)c) == cp) {
+                if (n >= cap) return false;
+                out[n++] = (uint8_t)c;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            for (unsigned c = 0u; c < 128u; c++) {
+                if (cp != '?' && gsm7_extension_codepoint((uint8_t)c) == cp) {
+                    if (n + 2u > cap) return false;
+                    out[n++] = 0x1bu;
+                    out[n++] = (uint8_t)c;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) return false;
+    }
+    *length = n;
+    return true;
+}
+
+bool sms_ucs2_from_utf8(const char *text, uint8_t *out, size_t cap, size_t *length) {
+    if (text == NULL || out == NULL || length == NULL) return false;
+    const uint8_t *p = (const uint8_t *)text;
+    size_t n = 0u;
+    while (*p != 0u) {
+        uint32_t cp;
+        if (!next_bmp_codepoint(&p, &cp) || n + 2u > cap) return false;
+        out[n++] = (uint8_t)(cp >> 8);
+        out[n++] = (uint8_t)cp;
+    }
+    *length = n;
+    return true;
+}

@@ -247,4 +247,5 @@ const modem_vendor_t g_modem_vendor = {
                   sizeof(TELIT_AUX_URC_PREFIXES[0])),
     .parse_aux_urc = telit_parse_aux_urc,
     .translate_direct_sms = telit_translate_direct_sms,
+    .encode_sms_text = telit_encode_sms_text,
 };
