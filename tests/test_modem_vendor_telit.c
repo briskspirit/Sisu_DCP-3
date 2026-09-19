@@ -358,7 +358,7 @@ static void test_production_descriptor(void) {
               "provisioning never forces a carrier or issues factory restore");
     }
     if (auto_profile != NULL) {
-        check(auto_profile == &g_modem_vendor.provision_steps[1] &&
+        check(auto_profile == &g_modem_vendor.provision_steps[0] &&
                   auto_profile->prerequisites == MODEM_INIT_PREREQ_NONE &&
                   auto_profile->persistence == MODEM_SETTING_NVM &&
                   auto_profile->recoverable && !auto_profile->set_each_pass &&
@@ -2260,38 +2260,40 @@ static void test_3gpp_ucs2_character_length(void) {
 
 static void test_sms_profile_readback(void) {
     const char *query = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?";
-    const modem_provision_step_t *early = find_provision_step_nth(query, 0u);
-    const modem_provision_step_t *late = find_provision_step_nth(query, 1u);
+    const modem_init_step_t *early = find_init_step(query);
+    const modem_provision_step_t *late = find_provision_step_nth(query, 0u);
     check(early && late && early->recoverable && !late->recoverable,
           "early optional SMS inspection has a strict SIM-ready completion counterpart");
     if (!early || !late) return;
     const char *rows[] = {"+CNMI: 2,2,0,0,0", "#CSCSEXT: 0", "+CSCS: \"GSM\"", "+CMGF: 1", "+CSDH: 1"};
     char command[MODEM_PROVISION_COMMAND_MAX];
-    check(early->build_set_cmd(command, sizeof(command)) &&
+    check(late->build_set_cmd(command, sizeof(command)) &&
               strcmp(command, "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0") == 0,
           "profile writer orders representation before delivery and explicitly saves default profile zero");
     early->readback_begin();
-    for (unsigned i = 0; i < 5u; i++) early->parse_readback(rows[i]);
-    check(early->readback_finish(true, false) == MODEM_PROVISION_LINE_MATCH,
+    for (unsigned i = 0; i < 5u; i++) early->parse(rows[i]);
+    early->readback_finish(true, false);
+    late->readback_begin();
+    for (unsigned i = 0; i < 5u; i++) late->parse_readback(rows[i]);
+    check(late->readback_finish(true, false) == MODEM_PROVISION_LINE_MATCH,
           "profile verification requires all five settings and tolerates row order");
     early->readback_begin();
-    for (unsigned i = 0; i < 4u; i++) early->parse_readback(rows[i]);
-    check(early->readback_finish(true, false) == MODEM_PROVISION_LINE_INVALID,
-          "an OK missing one SMS setting cannot qualify the profile");
+    for (unsigned i = 0; i < 4u; i++) early->parse(rows[i]);
+    early->readback_finish(true, false);
     late->readback_begin();
     for (unsigned i = 0; i < 5u; i++) late->parse_readback(rows[i]);
     check(late->readback_finish(true, false) == MODEM_PROVISION_LINE_MISMATCH,
           "failed early inspection requires saving even after late runtime setters match");
-    early->build_set_cmd(command, sizeof(command));
-    early->readback_begin();
-    for (unsigned i = 0; i < 5u; i++) early->parse_readback(rows[i]);
-    early->parse_readback(rows[0]);
-    check(early->readback_finish(true, false) == MODEM_PROVISION_LINE_INVALID,
+    late->build_set_cmd(command, sizeof(command));
+    late->readback_begin();
+    for (unsigned i = 0; i < 5u; i++) late->parse_readback(rows[i]);
+    late->parse_readback(rows[0]);
+    check(late->readback_finish(true, false) == MODEM_PROVISION_LINE_INVALID,
           "duplicate profile fields cannot manufacture a verified aggregate");
-    early->build_set_cmd(command, sizeof(command));
-    early->readback_begin();
-    for (unsigned i = 0; i < 5u; i++) early->parse_readback(i == 0u ? "+CNMI: 0,0,0,0,0" : rows[i]);
-    check(early->readback_finish(true, false) == MODEM_PROVISION_LINE_MISMATCH,
+    late->build_set_cmd(command, sizeof(command));
+    late->readback_begin();
+    for (unsigned i = 0; i < 5u; i++) late->parse_readback(i == 0u ? "+CNMI: 0,0,0,0,0" : rows[i]);
+    check(late->readback_finish(true, false) == MODEM_PROVISION_LINE_MISMATCH,
           "stored-message delivery profile is a repairable mismatch");
 }
 

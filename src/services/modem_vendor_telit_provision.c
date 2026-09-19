@@ -111,6 +111,18 @@ static bool telit_sms_profile_set(char *out, size_t cap) {
     return true;
 }
 
+static void telit_sms_boot_profile_begin(void) {
+    telit_sms_profile_begin();
+    s_sms_profile_save_needed = true;
+}
+static bool telit_sms_boot_profile_line(const char *line) {
+    return telit_sms_profile_line(line) != MODEM_PROVISION_LINE_IGNORE;
+}
+static void telit_sms_boot_profile_finish(bool ok, bool timed_out) {
+    s_sms_profile_save_needed = !ok || timed_out || s_sms_profile_seen != 31u ||
+                               s_sms_profile_invalid || !s_sms_profile_match;
+}
+
 /* The ordinary pass remains RF-safe in CFUN=4 through antenna provisioning.
  * Once its final CFUN=5 activates the SIM, a focused completion pass enters
  * CFUN=1, applies SIM-owned URCs and the generic sleep-URC RI profile, then
@@ -128,6 +140,19 @@ const modem_init_step_t TELIT_INIT_STEPS[] = {
                          MODEM_INIT_PREREQ_NONE, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT_BOOTSTRAP("AT#CFLO=1",  2500u, 3u, false, MODEM_DEGRADE_NONE,
                          MODEM_INIT_PREREQ_NONE, MODEM_SETTING_PROFILE, NULL),
+    /* CFUN=4 deactivates the SIM and rejects these queries/writes. Inspect the
+     * boot-loaded profile first, then arm direct text delivery as early as the
+     * SIM permits. The strict completion row later verifies and saves repairs. */
+    {
+        TELIT_INIT_FIELDS("AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?",
+            2500u, 0u, true, MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_NONE,
+            MODEM_SETTING_PROFILE, telit_sms_boot_profile_line),
+        .readback_begin = telit_sms_boot_profile_begin,
+        .readback_finish = telit_sms_boot_profile_finish,
+    },
+    TELIT_INIT("AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0",
+               2500u, 0u, true, MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_NONE,
+               MODEM_SETTING_PROFILE, NULL),
     /* Keep RF off until GPIO ALT16/ALT17 and the complete #STUNEANT table
      * have passed strict provisioning readback. CFUN=5 is the final
      * provisioning row, not an init write. */
@@ -445,19 +470,6 @@ static const char TELIT_SMS_WAKE_SAVED_PROFILE_SET[] =
  * controlled reboot after the full pass. DVI remains a separately gated step:
  * ordinary boot must not change an unqualified voice transport. */
 const modem_provision_step_t TELIT_PROVISION_STEPS[] = {
-    /* Inspect the boot-loaded SMS profile before any runtime SMS writes and
-     * before RF resumes. Some images defer these commands until SIM activation;
-     * the completion-only row below then repairs and saves the same profile.
-     * CSAS does not save CNMI/CMGF: these belong to &W's AT-instance profile. */
-    {
-        .query_cmd = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?",
-        .timeout_ms = 5000u, .retry_limit = 1u, .recoverable = true,
-        .persistence = MODEM_SETTING_PROFILE,
-        .build_set_cmd = telit_sms_profile_set,
-        .parse_readback = telit_sms_profile_line,
-        .readback_begin = telit_sms_profile_begin,
-        .readback_finish = telit_sms_profile_finish,
-    },
     /* Enable persistent SIM-based selection, not a fixed carrier or one-shot
      * mode. Query/repair before board settings; never issue FWSWITCH here. */
     TELIT_PROVISION("AT#FWAUTOSIM?", "AT#FWAUTOSIM=1", 5000u, 2u, true,
@@ -666,8 +678,8 @@ const modem_provision_step_t TELIT_PROVISION_STEPS[] = {
         .parse_readback = telit_provision_psmri,
         .set_each_pass = true,
     },
-    /* RF may only resume after the antenna table and all persistent safety
-     * rows have verified. This is runtime state and causes no NVM wear. */
+    /* CSAS omits CNMI/CMGF. Save the AT-instance profile when the boot snapshot
+     * did not already prove the desired settings, then verify the runtime. */
     {
         .query_cmd = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?",
         .timeout_ms = 5000u, .retry_limit = 2u, .recoverable = false,
@@ -678,6 +690,8 @@ const modem_provision_step_t TELIT_PROVISION_STEPS[] = {
         .readback_begin = telit_sms_profile_begin,
         .readback_finish = telit_sms_profile_finish,
     },
+    /* RF may only resume after the antenna table and persistent safety rows
+     * have verified. This runtime boundary causes no NVM wear. */
     TELIT_PROVISION("AT+CFUN?", "AT+CFUN=5", 5000u, 2u, false,
                     MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_NONE,
                     MODEM_SETTING_RUNTIME, telit_provision_cfun5),

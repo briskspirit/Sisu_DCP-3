@@ -3227,6 +3227,8 @@ static void process_timeout(uint32_t now_ms) {
     if (kind == MODEM_AT_PING) {
         handle_ping_failed(now_ms);
     } else if (kind == MODEM_AT_INIT) {
+        const modem_init_step_t *step = &g_modem_vendor.init_steps[s_init_index];
+        if (step->readback_finish != NULL) step->readback_finish(false, true);
         if (++s_init_retries <= init_retry_limit()) {
             s_next_action_ms = now_ms + MODEM_POST_READY_SETTLE_MS;
         } else if (init_step_recoverable()) {
@@ -3579,6 +3581,7 @@ static void advance_state(uint32_t now_ms) {
                 return;
             }
             s_init_parse_seen = false;
+            if (step->readback_begin != NULL) step->readback_begin();
             send_command(MODEM_AT_INIT, step->cmd, step->timeout_ms, now_ms);
         } else {
             modem_begin_provision(now_ms);
@@ -4445,6 +4448,8 @@ static void finish_command_result(bool ok, const char *line) {
         }
     } else if (kind == MODEM_AT_INIT) {
         bool init_ok = ok;
+        const modem_init_step_t *step = &g_modem_vendor.init_steps[s_init_index];
+        if (step->readback_finish != NULL) step->readback_finish(ok, false);
         if (init_ok && s_init_index < g_modem_vendor.init_step_count &&
             init_step_requires_response(
                 &g_modem_vendor.init_steps[s_init_index]) &&

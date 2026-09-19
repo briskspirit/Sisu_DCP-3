@@ -23,6 +23,7 @@ static uint16_t s_e2smsri_ms;
 static uint16_t s_psmri_ms;
 static uint8_t s_cnmi_mode;
 static const char SMS_PROFILE_QUERY[] = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?";
+static const char SMS_PROFILE_RUNTIME[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0";
 static const char SMS_PROFILE_SET[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0";
 static bool s_recovery_test_message, s_recovery_test_changed;
 static unsigned s_recovery_test_reads, s_recovery_test_deletes;
@@ -530,7 +531,9 @@ static void telit_response(const char *command) {
         mh_rx_push(s_cnmi_mode == 2u ? "+CNMI: 2,2,0,0,0" : "+CNMI: 0,0,0,0,0");
         return;
     }
-    if (strcmp(command, SMS_PROFILE_SET) == 0) { s_cnmi_mode = 2u; return; }
+    if (strcmp(command, SMS_PROFILE_SET) == 0 || strcmp(command, SMS_PROFILE_RUNTIME) == 0) {
+        s_cnmi_mode = 2u; return;
+    }
     if (strcmp(command, "AT+CPMS=\"ME\"") == 0) {
         mh_rx_push(s_recovery_test_message ? "+CPMS: 1,4,1,4,1,4" : "+CPMS: 0,255,0,255,0,255");
         return;
@@ -6685,16 +6688,24 @@ static void test_stored_sms_call_and_timeout_ownership(void) {
 static void test_early_sms_profile_order_and_wear(void) {
     begin_telit(true);
     check(boot_until_ready(30000u), "early SMS profile fixture boots");
-    check(tx_first_index("AT+CFUN=4") < tx_first_index(SMS_PROFILE_QUERY) &&
-              tx_first_index(SMS_PROFILE_QUERY) < tx_first_index(SMS_PROFILE_SET) &&
-              tx_first_index(SMS_PROFILE_SET) < tx_first_index("AT+CFUN=5"),
-          "SMS delivery format is repaired and saved before RF activation");
+    check(tx_first_index(SMS_PROFILE_QUERY) < tx_first_index(SMS_PROFILE_RUNTIME) &&
+              tx_first_index(SMS_PROFILE_RUNTIME) < tx_first_index("AT+CFUN=4") &&
+              tx_first_index(SMS_PROFILE_SET) < tx_last_index("AT+CFUN=5"),
+          "boot profile is inspected before RF-off invalidates SIM commands, then repaired and saved");
     check(mh_tx_count_exact(SMS_PROFILE_SET) == 1u,
           "completion pass does not rewrite the already repaired SMS profile");
     begin_telit(true);
     s_cnmi_mode = 2u;
     check(boot_until_ready(30000u) && mh_tx_count_exact(SMS_PROFILE_SET) == 0u,
           "a matching boot-loaded SMS profile incurs no additional NVM write");
+    begin_telit(true);
+    s_hold_final_command = SMS_PROFILE_QUERY;
+    modem_service_power_on();
+    for (unsigned i = 0; i < 1000u && mh_tx_count_exact(SMS_PROFILE_RUNTIME) == 0u; i++) mh_advance(50u);
+    s_hold_final_command = NULL;
+    check(boot_until_ready(30000u) && mh_tx_count_exact(SMS_PROFILE_SET) == 1u &&
+              mh_status().provisioning_verified,
+          "an unavailable early snapshot is repaired by strict completion without permanent degradation");
 }
 
 int main(void) {

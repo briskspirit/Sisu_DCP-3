@@ -288,9 +288,11 @@ invalidate pending deletion authority. Unreadable, unsupported, conflicting,
 or locally uncommittable records stay in ME; failed passes retry after one
 minute. Recovery does not make Telit's unreadable 3GPP2 ME backend readable.
 
-Provisioning checks the boot-loaded text/direct receive profile before RF
-activation, repairs it when needed, and explicitly saves/selects profile zero.
-A SIM-ready completion check covers modules that reject those early queries.
+Initialization inspects the boot-loaded text/direct receive profile and attempts
+early receive setup immediately after UART bootstrap, before CFUN=4 deactivates
+the SIM. Strict SIM-ready completion verifies it and saves/selects profile zero
+when the boot snapshot was different or unavailable. Commands rejected while
+the SIM is still starting are retried in that completion pass.
 The setup keeps CMGF=1, CSDH=1, GSM character representation and direct CNMI;
 recovery never switches to PDU mode. A matching profile avoids another NVM
 write. Two observed automatic startup status drops are recoverable within a

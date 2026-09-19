@@ -62,6 +62,10 @@ typedef struct {
     /* Optional response validator/parser. It may update vendor-private
      * provisioning state, but must not lock or transmit. */
     bool (*parse)(const char *line);
+    /* Optional vendor-owned snapshot around an init query. Unlike provisioning
+     * these hooks only record evidence; they do not qualify or write settings. */
+    void (*readback_begin)(void);
+    void (*readback_finish)(bool ok, bool timed_out);
     modem_init_capture_t capture;
     /* Ignore inbound CTS only for bootstrap commands needed to establish the
      * modem's own command-mode flow-control policy. Hardware RTS remains
