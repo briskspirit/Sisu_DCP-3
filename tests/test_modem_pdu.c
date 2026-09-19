@@ -736,7 +736,59 @@ static void test_address_command_variants(void) {
     assert_true(strlen(small) < sizeof(small), "tight buffer not overrun");
 }
 
+static void test_text_mode_bodies(void) {
+    static const uint8_t payload[] = {0x00u, 0x1au, 0x1bu, 0xffu};
+    sms_submit_pdu_t submit = {
+        .number = "1234", .payload = payload, .payload_len = sizeof(payload),
+        .mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
+        .segment = 1u, .segment_total = 1u,
+    };
+    char body[SMS_SUBMIT_PDU_HEX_MAX];
+    assert_true(sms_submit_text_build(&submit, body, sizeof(body)) &&
+                strcmp(body, "001A1BFF") == 0,
+                "unported binary text body has no SUBMIT envelope or prompt controls");
+    submit.position = 0u;
+    submit.segment = 1u;
+    submit.dest_port = 0x1234u;
+    submit.source_port = 0x5678u;
+    assert_true(sms_submit_text_build(&submit, body, sizeof(body)) &&
+                strcmp(body, "06050412345678001A1BFF") == 0,
+                "arbitrary binary ports retain exact text-mode UDH");
+    submit.position = 0u;
+    submit.segment = 1u;
+    submit.segment_total = 2u;
+    submit.reference = 0x42u;
+    submit.mode = MODEM_BINARY_SMS_MODE_F5_CONCAT_FIRST_VP;
+    assert_true(sms_submit_text_build(&submit, body, sizeof(body)) &&
+                strcmp(body, "0B0003420201050412345678001A1BFF") == 0,
+                "F5 concat-first mode keeps its UDH without embedding VP or DCS");
+    submit.position = 0u;
+    submit.segment = 1u;
+    submit.mode = MODEM_BINARY_SMS_MODE_F5_PORT_FIRST;
+    assert_true(sms_submit_text_build(&submit, body, sizeof(body)) &&
+                strcmp(body, "0B0504123456780003420201001A1BFF") == 0,
+                "F5 port-first mode keeps port and concat order");
+
+    submit.position = 0u;
+    submit.segment = 1u;
+    assert_true(!sms_submit_text_build(&submit, body, 5u) &&
+                submit.position == 0u && submit.segment == 1u,
+                "short text-mode output buffer does not consume a segment");
+    submit.mode = (modem_binary_sms_mode_t)99;
+    assert_true(!sms_submit_text_build(&submit, body, sizeof(body)),
+                "unknown text-mode encoding rejected");
+    submit.mode = MODEM_BINARY_SMS_MODE_GSM7_TEXT;
+    submit.payload = (const uint8_t *)"hellohello";
+    submit.payload_len = 10u;
+    assert_true(!sms_submit_text_build(&submit, body, 10u) && submit.position == 0u,
+                "GSM diagnostic requires room for its terminator");
+    assert_true(sms_submit_text_build(&submit, body, sizeof(body)) &&
+                strcmp(body, "hellohello") == 0,
+                "GSM diagnostic emits characters, not packed PDU hex");
+}
+
 int main(void) {
+    test_text_mode_bodies();
     test_gsm7_code_alphabet();
     test_gsm7_pack_length_sweep();
     test_gsm7_pack_known_vector();

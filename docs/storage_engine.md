@@ -85,8 +85,9 @@ category-full isolation, and interrupted storage operations. Service and release
 builds passed the flash and stack guards. Physical power cuts were not repeated
 on this integrated layout. Ordinary multipart/Unicode SMS storage is covered by
 host tests; additional external live reception was not qualified in this run.
-The loopback also exposed the separate, pre-existing
-[outgoing character-encoding limitation](sms_direct_delivery_design.md#outgoing-character-encoding-limitation).
+The loopback also exposed a separate, pre-existing outgoing character-encoding
+bug, subsequently fixed in the Telit adapter. See
+[outgoing character encoding](sms_direct_delivery_design.md#outgoing-character-encoding).
 
 ## User Space Budgets
 

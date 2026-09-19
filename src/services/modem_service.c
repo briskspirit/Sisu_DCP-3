@@ -118,7 +118,7 @@ typedef enum {
     MODEM_AT_PROVISION_REBOOT,
     MODEM_AT_CSQ,
     MODEM_AT_SIGNAL,
-    MODEM_AT_SMS_MODE_RESTORE, /* idle AT+CMGF=1 after a cancelled op may have left PDU mode */
+    MODEM_AT_SMS_MODE_RESTORE, /* repair outgoing SMS parameters after cancellation */
     MODEM_AT_SMS_SETUP_CSMP, /* deferred SMS setup retry (CSMP), init timing self-heal */
     MODEM_AT_SMS_WAKE_ARM, /* transient vendor command proving SMS can wake DTR sleep via RI */
     MODEM_AT_CEREG,
@@ -132,11 +132,10 @@ typedef enum {
     MODEM_AT_CALL_FORWARD,
     MODEM_AT_VOICE_MAILBOX,
     MODEM_AT_MESSAGE_WAITING,
-    MODEM_AT_SMS_CMGF_PDU,
+    MODEM_AT_SMS_BINARY_TEXT_SETUP,
     MODEM_AT_SMS_CMGF_TEXT,
     MODEM_AT_SMS_CMGS_PROMPT,
     MODEM_AT_SMS_CMGS_FINAL,
-    MODEM_AT_SMS_PICTURE_TEXT_SETUP,
     MODEM_AT_SMS_TEXT_SETUP,
     MODEM_AT_DIAG_QUERY,        /* one Net Monitor v2 query; always yields on final */
     MODEM_AT_MAINTENANCE,
@@ -2562,12 +2561,12 @@ static void feed_byte(uint8_t byte) {
         }
     }
     /* '>' is the SMS-send prompt only while we are actually waiting for it
-     * (AT+CMGS / AT+CMGW). Otherwise it is an ordinary character -- intercepting
+     * (AT+CMGS). Otherwise it is an ordinary character -- intercepting
      * it globally silently strips '>' from echoes, URCs and message bodies.
      * The bare '>' must still be matched mid-line because the "> "
      * prompt carries no trailing newline. */
     if (byte == '>' && s_active &&
-        (s_active_kind == MODEM_AT_SMS_CMGS_PROMPT)) {
+        s_active_kind == MODEM_AT_SMS_CMGS_PROMPT) {
         process_prompt();
         return;
     }
@@ -2576,14 +2575,8 @@ static void feed_byte(uint8_t byte) {
     if (event == MODEM_LINE_FRAMER_LINE) {
         process_line(modem_line_framer_line(&s_line_framer));
     } else if (event == MODEM_LINE_FRAMER_DROPPED) {
-        /* A line we were depending on is gone; abort any in-progress +CMGR
-         * body collection so the next line is not mistaken for the body.
-         * A lost body then degrades to a graceful empty read. The same goes
-         * for a +CMT header waiting for its body line: the dropped line was
-         * that body, so the collector must not eat the next line instead.
-         * (A header with a <length> reads its body raw and is normally not
-         * pending here; the reset is unconditional either way.) */
-
+        /* A +CMT header may be waiting for this body line. Do not consume
+         * the following AT reply as its replacement. */
         modem_sms_direct_reset();
         s_line_drop_count++;
         LOGW("modem", "dropped overlong AT line");
@@ -2716,10 +2709,7 @@ static void direct_feed_raw(uint8_t byte) {
     direct_apply_step(step, tpdu_len);
 }
 
-/* The oldest held entry (smallest sequence number), or UINT8_MAX. */
-
-/* Retry CSMP repair in bounded bursts, without monopolizing the AT channel.
- * PDU-only repair retains its existing bounded retry policy. */
+/* Retry CSMP repair in bounded bursts, without monopolizing the AT channel. */
 static bool sms_mode_restore_start(uint32_t now_ms) {
     if (!s_sms_mode_restore_pending || s_operation != MODEM_OP_NONE || s_active ||
         s_dtr_wake_pending || (s_sms_mode_restore_retry_ms != 0u &&
@@ -2727,25 +2717,14 @@ static bool sms_mode_restore_start(uint32_t now_ms) {
         return false;
     }
     if (s_sms_mode_restore_attempts >= MODEM_SMS_MODE_RESTORE_ATTEMPTS) {
-        if (s_sms_text_parameters_dirty) {
-            LOGW("modem", "SMS parameter repair deferred; SMS work remains blocked");
-            s_sms_mode_restore_attempts = 0u;
-            s_sms_mode_restore_retry_ms = now_ms + MODEM_SMS_MODE_RESTORE_RETRY_MS;
-            return false;
-        }
-        LOGW("modem", "SMS text-mode restore gave up after %u attempts",
-             (unsigned)s_sms_mode_restore_attempts);
-        s_sms_mode_restore_pending = false;
+        LOGW("modem", "SMS parameter repair deferred; SMS work remains blocked");
+        s_sms_mode_restore_attempts = 0u;
+        s_sms_mode_restore_retry_ms = now_ms + MODEM_SMS_MODE_RESTORE_RETRY_MS;
         return false;
     }
-    send_command(MODEM_AT_SMS_MODE_RESTORE, s_sms_text_parameters_dirty
-                     ? "AT+CMGF=1;+CSMP=17,167,0,0" : "AT+CMGF=1", 5000u, now_ms);
+    send_command(MODEM_AT_SMS_MODE_RESTORE, "AT+CMGF=1;+CSMP=17,167,0,0", 5000u, now_ms);
     return true;
 }
-
-/* Idle-scheduler drain: queue one STORE_DELIVERED request for the oldest
- * held entry. Same gate as the neighbouring background branches; never
- * touches DTR/RI. Returns true only when a request was queued. */
 
 static void process_line(char *line) {
     while (*line == ' ') {
@@ -2790,8 +2769,8 @@ static void process_line(char *line) {
     if (parse_final_result(line, &ok)) {
         /* Complete the active command on a call-progress token ONLY when a call
          * command is active; otherwise route it as the URC it is. Without this,
-         * a remote hangup (unsolicited NO CARRIER) during an in-call AT+CMGR /
-         * Net Monitor poll would finish that command as failed -- and on a
+         * a remote hangup (unsolicited NO CARRIER) during a Net Monitor poll
+         * would finish that command as failed -- and on a
          * CMGS_FINAL it would report an already-accepted SMS send as failed,
          * causing a duplicate resend. OK / ERROR / +CME / +CMS stay universal
          * finals for any active command. */
@@ -2802,8 +2781,7 @@ static void process_line(char *line) {
             return;
         }
         if (s_active && s_operation == MODEM_OP_SEND_BINARY_SMS &&
-            (s_active_kind == MODEM_AT_SMS_CMGF_PDU ||
-             s_active_kind == MODEM_AT_SMS_PICTURE_TEXT_SETUP ||
+            (s_active_kind == MODEM_AT_SMS_BINARY_TEXT_SETUP ||
              s_active_kind == MODEM_AT_SMS_CMGS_PROMPT ||
              s_active_kind == MODEM_AT_SMS_CMGS_FINAL ||
              s_active_kind == MODEM_AT_SMS_CMGF_TEXT)) {
@@ -3586,7 +3564,7 @@ static void advance_state(uint32_t now_ms) {
              * DTR asserted and schedules another bounded background cycle. */
             sms_wake_send_arm(now_ms);
         } else if (sms_mode_restore_start(now_ms)) {
-            /* AT+CMGF=1 after a cancelled operation left PDU mode possible. */
+            /* Repair outgoing parameters after a cancelled SMS operation. */
         } else if (supplementary_start_background(now_ms)) {
             /* Lowest-priority background work: voicemail number, message
              * waiting, then local call-forwarding flags. */
@@ -5091,9 +5069,9 @@ static bool at_kind_is_operation(modem_at_kind_t kind) {
            kind == MODEM_AT_CALL_SUPPLEMENTARY ||
            kind == MODEM_AT_CALL_FORWARD || kind == MODEM_AT_VOICE_MAILBOX ||
            kind == MODEM_AT_MESSAGE_WAITING ||
-           kind == MODEM_AT_SMS_CMGF_PDU ||
+           kind == MODEM_AT_SMS_BINARY_TEXT_SETUP ||
            kind == MODEM_AT_SMS_CMGF_TEXT || kind == MODEM_AT_SMS_CMGS_PROMPT ||
-           kind == MODEM_AT_SMS_CMGS_FINAL || kind == MODEM_AT_SMS_PICTURE_TEXT_SETUP ||
+           kind == MODEM_AT_SMS_CMGS_FINAL ||
            kind == MODEM_AT_SMS_TEXT_SETUP ||
            kind == MODEM_AT_POWER_OFF || kind == MODEM_AT_DEBUG ||
            kind == MODEM_AT_MAINTENANCE;
@@ -6000,11 +5978,10 @@ static bool sms_protocol_command_from_at(modem_at_kind_t at_kind,
         return false;
     }
     switch (at_kind) {
-    case MODEM_AT_SMS_CMGF_PDU:        *out = MODEM_SMS_COMMAND_CMGF_PDU; return true;
+    case MODEM_AT_SMS_BINARY_TEXT_SETUP:        *out = MODEM_SMS_COMMAND_BINARY_TEXT_SETUP; return true;
     case MODEM_AT_SMS_CMGF_TEXT:       *out = MODEM_SMS_COMMAND_CMGF_TEXT; return true;
     case MODEM_AT_SMS_CMGS_PROMPT:     *out = MODEM_SMS_COMMAND_CMGS_PROMPT; return true;
     case MODEM_AT_SMS_CMGS_FINAL:      *out = MODEM_SMS_COMMAND_CMGS_FINAL; return true;
-    case MODEM_AT_SMS_PICTURE_TEXT_SETUP: *out = MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP; return true;
     case MODEM_AT_SMS_TEXT_SETUP:      *out = MODEM_SMS_COMMAND_TEXT_SETUP; return true;
     default: return false;
     }
@@ -6013,11 +5990,10 @@ static bool sms_protocol_command_from_at(modem_at_kind_t at_kind,
 static modem_at_kind_t sms_protocol_command_to_at(
     modem_sms_command_kind_t kind) {
     switch (kind) {
-    case MODEM_SMS_COMMAND_CMGF_PDU:        return MODEM_AT_SMS_CMGF_PDU;
+    case MODEM_SMS_COMMAND_BINARY_TEXT_SETUP:        return MODEM_AT_SMS_BINARY_TEXT_SETUP;
     case MODEM_SMS_COMMAND_CMGF_TEXT:       return MODEM_AT_SMS_CMGF_TEXT;
     case MODEM_SMS_COMMAND_CMGS_PROMPT:     return MODEM_AT_SMS_CMGS_PROMPT;
     case MODEM_SMS_COMMAND_CMGS_FINAL:      return MODEM_AT_SMS_CMGS_FINAL;
-    case MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP: return MODEM_AT_SMS_PICTURE_TEXT_SETUP;
     case MODEM_SMS_COMMAND_TEXT_SETUP: return MODEM_AT_SMS_TEXT_SETUP;
     default:                                return MODEM_AT_NONE;
     }
@@ -6037,7 +6013,6 @@ static bool sms_protocol_request_view(modem_sms_protocol_request_t *out) {
     out->dest_port = s_current_request.dest_port;
     out->source_port = s_current_request.source_port;
     out->binary_mode = (modem_binary_sms_mode_t)s_current_request.binary_mode;
-    out->picture_text_mode = true;
     return true;
 }
 
@@ -6121,10 +6096,9 @@ static bool sms_protocol_emit(const modem_sms_protocol_action_t *action) {
         s_command_deadline_ms = action->data.body.now_ms +
             action->data.body.timeout_ms;
         if (action->data.body.binary) {
-            LOGI("modem", "binary SMS body sent segment=%u/%u tpdu=%u hex=%u",
+            LOGI("modem", "binary SMS body sent segment=%u/%u bytes=%u",
                  (unsigned)action->data.body.segment,
                  (unsigned)action->data.body.segment_total,
-                 (unsigned)action->data.body.tpdu_len,
                  (unsigned)action->data.body.length);
         }
         LOGD("modem", "SMS body sent");
@@ -6181,9 +6155,7 @@ static bool sms_protocol_emit(const modem_sms_protocol_action_t *action) {
         s_sms_terminal_published = false;
         if (modem_sms_protocol_settings_restore_needed()) {
             s_sms_text_parameters_dirty |= modem_sms_protocol_text_parameters_dirty();
-            /* The operation completed (its result is already published) but
-             * its format/parameter cleanup never succeeded.
-             * Every SMS operation, not only STORE_DELIVERED. */
+            /* The result is already published, but parameter cleanup failed. */
             s_sms_mode_restore_pending = true;
             s_sms_mode_restore_attempts = 0u;
             s_sms_mode_restore_retry_ms = 0u;

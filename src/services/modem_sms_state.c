@@ -3,9 +3,9 @@
 #include <string.h>
 #include "services/sms_submit_codec.h"
 
-static char s_binary_pdu_hex[SMS_SUBMIT_PDU_HEX_MAX + 1u];
+static char s_binary_body[SMS_SUBMIT_PDU_HEX_MAX + 1u];
 static uint16_t s_binary_position;
-static uint8_t s_binary_tpdu_len, s_binary_segment, s_binary_segment_total;
+static uint8_t s_binary_segment, s_binary_segment_total;
 /* Preserve the concatenation reference across modem session restarts. */
 static uint8_t s_binary_reference;
 static bool s_binary_send_ok;
@@ -75,9 +75,7 @@ bool modem_sms_state_binary_build_segment(
         .segment_total = s_binary_segment_total,
         .reference = s_binary_reference,
     };
-    if (!sms_submit_pdu_build(&submit, s_binary_pdu_hex,
-                              sizeof(s_binary_pdu_hex),
-                              &s_binary_tpdu_len)) {
+    if (!sms_submit_text_build(&submit, s_binary_body, sizeof(s_binary_body))) {
         return false;
     }
     s_binary_position = submit.position;
@@ -90,34 +88,13 @@ void modem_sms_state_binary_segment_view(
     if (out == NULL) {
         return;
     }
-    out->pdu_hex = s_binary_pdu_hex;
-    out->tpdu_len = s_binary_tpdu_len;
-    /* sms_submit_pdu_build() already post-incremented s_binary_segment before
+    out->body = s_binary_body;
+    /* sms_submit_text_build() already post-incremented s_binary_segment before
      * the '>' prompt fires. The -1u recovers the one-based segment just written.
      * Do NOT drop it: that is a real off-by-one, not display decoration. */
     out->segment = s_binary_segment > 0u
         ? (uint8_t)(s_binary_segment - 1u) : 0u;
     out->segment_total = s_binary_segment_total;
-}
-
-bool modem_sms_state_picture_build_text_segment(
-    const char *number, const uint8_t *payload, uint16_t payload_len,
-    uint16_t dest_port, uint16_t source_port) {
-    sms_submit_pdu_t submit = {
-        .number = number, .payload = payload, .payload_len = payload_len,
-        .position = s_binary_position, .dest_port = dest_port,
-        .source_port = source_port, .mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
-        .segment = s_binary_segment, .segment_total = s_binary_segment_total,
-        .reference = s_binary_reference,
-    };
-    if (!sms_submit_picture_text_build(&submit, s_binary_pdu_hex,
-                                       sizeof(s_binary_pdu_hex))) {
-        return false;
-    }
-    s_binary_tpdu_len = 0u; /* The body is user data, not a TPDU. */
-    s_binary_position = submit.position;
-    s_binary_segment = submit.segment;
-    return true;
 }
 
 bool modem_sms_state_binary_has_more(uint16_t payload_len) {

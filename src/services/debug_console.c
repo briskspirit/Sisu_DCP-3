@@ -145,7 +145,7 @@ static void poll_keycal(uint32_t now_ms);
 static void hw_change_log(const app_t *app) __attribute__((noinline));
 static void command_ui(app_t *app, char *args);
 static void command_text(char *args);
-static void command_pdu7(char *args);
+static void command_gsm7(char *args);
 static void command_binary(char *args);
 static void command_binary_f5(char *args);
 static void command_port(char *args);
@@ -658,8 +658,8 @@ static void handle_line(app_t *app, char *line) {
         printf("[debug] queued AT ok=%u cmd=%s\n", ok ? 1u : 0u, at);
     } else if (strcmp(cmd, "txt") == 0) {
         command_text(cursor);
-    } else if (strcmp(cmd, "pdu7") == 0) {
-        command_pdu7(cursor);
+    } else if (strcmp(cmd, "gsm7") == 0) {
+        command_gsm7(cursor);
     } else if (strcmp(cmd, "bin") == 0) {
         command_binary(cursor);
     } else if (strcmp(cmd, "binf5") == 0) {
@@ -748,7 +748,7 @@ static void print_help(void) {
     printf("[debug]   poweron | poweroff       ; modem-only power controls\n");
     printf("[debug]   at AT+COMMAND\n");
     printf("[debug]   txt <number> <message>\n");
-    printf("[debug]   pdu7 <number>             ; GSM-7 DCS 00 PDU-mode control\n");
+    printf("[debug]   gsm7 <number>             ; GSM-7 DCS 00 text-mode control\n");
     printf("[debug]   bin <number>              ; 8-bit DCS 04, no UDH\n");
     printf("[debug]   binf5 <number>            ; 8-bit DCS F5, no UDH\n");
     printf("[debug]   port <number>             ; 8-bit DCS 04, port UDH 158A/0000\n");
@@ -2768,14 +2768,14 @@ static void command_text(char *args) {
     printf("[debug] queued text sms ok=%u number=%s\n", ok ? 1u : 0u, number);
 }
 
-static void command_pdu7(char *args) {
+static void command_gsm7(char *args) {
     char *cursor = args;
     char *number = next_token(&cursor);
     if (number == 0) {
-        printf("[debug] usage: pdu7 <number>\n");
+        printf("[debug] usage: gsm7 <number>\n");
         return;
     }
-    static const uint8_t payload[] = {'P', 'D', 'U', 'T', 'E', 'S', 'T'};
+    static const uint8_t payload[] = {'G', 'S', 'M', 'T', 'E', 'S', 'T'};
     uint32_t request_id = 0u;
     bool ok = modem_service_request_send_binary_sms_mode(number,
                                                          payload,
@@ -2788,7 +2788,7 @@ static void command_pdu7(char *args) {
         s_waiting_sms_result = true;
         s_waiting_sms_request_id = request_id;
     }
-    printf("[debug] queued pdu7 sms ok=%u number=%s\n", ok ? 1u : 0u, number);
+    printf("[debug] queued gsm7 sms ok=%u number=%s\n", ok ? 1u : 0u, number);
 }
 
 static void command_binary(char *args) {

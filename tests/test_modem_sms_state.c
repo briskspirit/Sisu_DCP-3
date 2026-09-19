@@ -39,15 +39,12 @@ static bool binary_segment_matches(sms_submit_pdu_t *expected,
                                    uint8_t expected_segment,
                                    uint8_t expected_total) {
     char expected_hex[SMS_SUBMIT_PDU_HEX_MAX + 1u];
-    uint8_t expected_tpdu_len = 0u;
-    if (!sms_submit_pdu_build(expected, expected_hex, sizeof(expected_hex),
-                              &expected_tpdu_len)) {
+    if (!sms_submit_text_build(expected, expected_hex, sizeof(expected_hex))) {
         return false;
     }
     modem_sms_binary_segment_view_t actual;
     modem_sms_state_binary_segment_view(&actual);
-    return strcmp(actual.pdu_hex, expected_hex) == 0 &&
-           actual.tpdu_len == expected_tpdu_len &&
+    return strcmp(actual.body, expected_hex) == 0 &&
            actual.segment == expected_segment &&
            actual.segment_total == expected_total;
 }

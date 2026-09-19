@@ -10,7 +10,7 @@
 #define SMS_SUBMIT_PDU_HEX_MAX 384u
 
 /* A caller-owned view of one logical submit. The codec advances position and
- * segment only after a complete PDU has been emitted; all other fields are
+ * segment only after a complete segment has been emitted; all other fields are
  * immutable transaction inputs. */
 typedef struct {
     const char *number;
@@ -30,10 +30,10 @@ bool sms_submit_pdu_build(sms_submit_pdu_t *submit,
                           size_t hex_cap,
                           uint8_t *out_tpdu_len);
 
-/* Same segment/UDH as PDU mode, for +CMGS in text mode with DCS 4.
- * Only the production picture framing (DCS04_PORT_FIRST) is accepted. */
-bool sms_submit_picture_text_build(sms_submit_pdu_t *submit,
-                                   char *hex, size_t hex_cap);
+/* User data only for text-mode CMGS, preserving the same binary UDH.
+ * Binary modes return hex octets; the GSM7 diagnostic mode returns characters. */
+bool sms_submit_text_build(sms_submit_pdu_t *submit,
+                           char *body, size_t body_cap);
 
 /* Exposed as codec primitives so their 3GPP bounds and fixed vectors can be
  * tested without reaching through the modem service translation unit. */

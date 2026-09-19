@@ -15,11 +15,10 @@ typedef enum {
 } modem_sms_protocol_operation_t;
 
 typedef enum {
-    MODEM_SMS_COMMAND_CMGF_PDU = 0,
+    MODEM_SMS_COMMAND_BINARY_TEXT_SETUP = 0,
     MODEM_SMS_COMMAND_CMGF_TEXT,
     MODEM_SMS_COMMAND_CMGS_PROMPT,
     MODEM_SMS_COMMAND_CMGS_FINAL,
-    MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP,
     MODEM_SMS_COMMAND_TEXT_SETUP,
 } modem_sms_command_kind_t;
 
@@ -36,7 +35,6 @@ typedef struct {
     uint16_t dest_port;
     uint16_t source_port;
     modem_binary_sms_mode_t binary_mode;
-    bool picture_text_mode;
 } modem_sms_protocol_request_t;
 
 typedef enum {
@@ -68,7 +66,6 @@ typedef struct {
             bool binary;
             uint8_t segment;
             uint8_t segment_total;
-            uint8_t tpdu_len;
         } body;
         struct {
             uint32_t now_ms;
@@ -131,10 +128,7 @@ void modem_sms_protocol_resume_after_prompt_abort(
  * already handed to the modem as safely retryable. */
 modem_sms_outcome_t modem_sms_protocol_cancel_outcome(
     const modem_sms_protocol_request_t *request);
-/* True when AT+CMGF=0 crossed the UART and no AT+CMGF=1 has completed since,
- * so cancelling now may leave the module in PDU mode. Read it BEFORE
- * modem_sms_protocol_cancel(), which resets the protocol state. */
-bool modem_sms_protocol_pdu_mode_possible(void);
+/* Read before cancel(), which clears the protocol's dispatch evidence. */
 bool modem_sms_protocol_settings_restore_needed(void);
 bool modem_sms_protocol_text_parameters_dirty(void);
 void modem_sms_protocol_cancel(void);

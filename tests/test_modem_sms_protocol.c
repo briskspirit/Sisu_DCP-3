@@ -198,13 +198,13 @@ static void test_dispatch_evidence(void) {
     modem_sms_protocol_request_t r = {.request_id=3u, .operation=MODEM_SMS_PROTOCOL_SEND_BINARY,
         .number="123", .binary=&byte, .binary_len=1u};
     reset_fixture(); s_auto_dispatch_commands = false;
-    check(modem_sms_protocol_begin(&r, &s_hooks, 1u) && !modem_sms_protocol_pdu_mode_possible(),
+    check(modem_sms_protocol_begin(&r, &s_hooks, 1u) && !modem_sms_protocol_settings_restore_needed(),
           "queued mode command is not dispatch evidence");
-    modem_sms_protocol_command_dispatched(MODEM_SMS_COMMAND_CMGF_PDU);
-    check(modem_sms_protocol_pdu_mode_possible(), "dispatch establishes possible PDU mode");
-    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGF_PDU, &r, &s_hooks, 2u);
+    modem_sms_protocol_command_dispatched(MODEM_SMS_COMMAND_BINARY_TEXT_SETUP);
+    check(modem_sms_protocol_settings_restore_needed(), "dispatch establishes outgoing parameter changes");
+    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, &r, &s_hooks, 2u);
     modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGF_TEXT, &r, &s_hooks, 3u);
-    check(modem_sms_protocol_pdu_mode_possible(), "lost restore final retains repair obligation");
+    check(modem_sms_protocol_settings_restore_needed(), "lost restore final retains repair obligation");
     modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &r, &s_hooks, 4u);
     check(!modem_sms_protocol_settings_restore_needed(), "confirmed restore clears obligation");
 }
@@ -224,16 +224,16 @@ static void test_binary_prompt_timeout_restore(void) {
 
     check(modem_sms_protocol_begin(&request, &s_hooks, 200u),
           "binary send begins");
-    check_command(0u, MODEM_SMS_COMMAND_CMGF_PDU, "AT+CMGF=0", 5000u,
-                  false, false, "binary send first enters PDU mode");
+    check_command(0u, MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, "AT+CMGF=1;+CSMP=81,167,0,4", 5000u,
+                  false, false, "binary send sets text-mode DCS and UDHI");
     clear_actions();
     modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 210u);
+        MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, true, &request, &s_hooks, 210u);
     check(s_action_count == 1u &&
               s_actions[0].type == MODEM_SMS_ACTION_COMMAND &&
               s_actions[0].command_kind == MODEM_SMS_COMMAND_CMGS_PROMPT &&
               strncmp(s_actions[0].command, "AT+CMGS=", 8u) == 0,
-          "PDU mode builds a segment and opens its prompt");
+          "text mode builds a segment and opens its prompt");
 
     clear_actions();
     check(modem_sms_protocol_on_prompt(
@@ -242,7 +242,7 @@ static void test_binary_prompt_timeout_restore(void) {
               s_actions[0].type == MODEM_SMS_ACTION_BODY &&
               s_actions[0].binary && s_actions[0].body_len != 0u &&
               s_actions[0].timeout_ms == 120000u,
-          "binary prompt emits PDU hex under the long network deadline");
+          "binary prompt emits user-data hex under the long network deadline");
 
     reset_fixture();
     check(modem_sms_protocol_begin(&request, &s_hooks, 230u),
@@ -258,7 +258,7 @@ static void test_binary_prompt_timeout_restore(void) {
     clear_actions();
     modem_sms_protocol_resume_after_prompt_abort(
         &request, &s_hooks, 750u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1", 5000u,
+    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0", 5000u,
                   false, false,
                   "post-ESC continuation restores text mode exactly once");
 }
@@ -278,7 +278,7 @@ static void test_binary_cleanup_duplicate_wedge(void) {
           "accepted binary cleanup fixture begins");
     clear_actions();
     modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 251u);
+        MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, true, &request, &s_hooks, 251u);
     clear_actions();
     check(modem_sms_protocol_on_prompt(
               MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 252u),
@@ -303,7 +303,7 @@ static void test_binary_cleanup_duplicate_wedge(void) {
           "unsent binary cleanup fixture begins");
     clear_actions();
     modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_PDU, false, &request, &s_hooks, 265u);
+        MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, false, &request, &s_hooks, 265u);
     clear_actions();
     modem_sms_protocol_on_final(
         MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 261u);
@@ -320,7 +320,7 @@ static void test_binary_cleanup_duplicate_wedge(void) {
           "accepted binary timeout fixture begins");
     clear_actions();
     modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 267u);
+        MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, true, &request, &s_hooks, 267u);
     clear_actions();
     check(modem_sms_protocol_on_prompt(
               MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 268u),
@@ -345,10 +345,10 @@ static void test_binary_cleanup_duplicate_wedge(void) {
           "unsent binary timeout fixture begins");
     clear_actions();
     modem_sms_protocol_on_timeout(
-        MODEM_SMS_COMMAND_CMGF_PDU, &request, &s_hooks, 271u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1", 5000u,
+        MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, &request, &s_hooks, 271u);
+    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0", 5000u,
                   false, false,
-                  "PDU-mode timeout still attempts text-mode restoration");
+                  "setup timeout still attempts parameter restoration");
     clear_actions();
     modem_sms_protocol_on_timeout(
         MODEM_SMS_COMMAND_CMGF_TEXT, &request, &s_hooks, 263u);
@@ -378,7 +378,7 @@ static void test_binary_uncertainty_boundaries(void) {
           "binary final-timeout fixture begins");
     clear_actions();
     modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 331u);
+        MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, true, &request, &s_hooks, 331u);
     clear_actions();
     check(modem_sms_protocol_on_prompt(
               MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 332u),
@@ -386,7 +386,7 @@ static void test_binary_uncertainty_boundaries(void) {
     clear_actions();
     modem_sms_protocol_on_timeout(
         MODEM_SMS_COMMAND_CMGS_FINAL, &request, &s_hooks, 333u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1", 5000u,
+    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0", 5000u,
                   false, false,
                   "lost binary final restores text mode before publishing");
     clear_actions();
@@ -407,7 +407,7 @@ static void test_binary_uncertainty_boundaries(void) {
           "multipart binary partial-acceptance fixture begins");
     clear_actions();
     modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 341u);
+        MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, true, &request, &s_hooks, 341u);
     clear_actions();
     check(modem_sms_protocol_on_prompt(
               MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 342u),
@@ -474,14 +474,13 @@ static void test_picture_text_send(void) {
         .number = "5550100", .binary = payload, .binary_len = sizeof(payload),
         .dest_port = 0x158au, .source_port = 0u,
         .binary_mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
-        .picture_text_mode = true,
     };
     check(modem_sms_protocol_begin(&request, &s_hooks, 100u), "picture text send begins");
-    check_command(0u, MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP, "AT+CMGF=1;+CSMP=81,167,0,4",
+    check_command(0u, MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, "AT+CMGF=1;+CSMP=81,167,0,4",
                   5000u, false, false, "picture send keeps native reception in text mode");
     check(modem_sms_protocol_text_parameters_dirty(), "dispatched CSMP needs cleanup");
     clear_actions();
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP, true, &request, &s_hooks, 110u);
+    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, true, &request, &s_hooks, 110u);
     check(strcmp(s_actions[0].command, "AT+CMGS=\"5550100\"") == 0,
           "picture opens addressed text-mode prompt");
     clear_actions();
@@ -494,14 +493,13 @@ static void test_picture_text_send(void) {
     check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0",
                   5000u, false, false, "picture restores ordinary text parameters");
     modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, false, &request, &s_hooks, 140u);
-    check(modem_sms_protocol_text_parameters_dirty() && modem_sms_protocol_settings_restore_needed() &&
-              !modem_sms_protocol_pdu_mode_possible(),
+    check(modem_sms_protocol_text_parameters_dirty() && modem_sms_protocol_settings_restore_needed(),
           "failed cleanup remains repairable after an accepted send");
 
     reset_fixture();
     check(modem_sms_protocol_begin(&request, &s_hooks, 200u), "picture setup timeout fixture");
     clear_actions();
-    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_PICTURE_TEXT_SETUP, &request, &s_hooks, 210u);
+    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, &request, &s_hooks, 210u);
     check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0",
                   5000u, false, false, "partial compound setup is cleaned up after timeout");
     modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 220u);
@@ -541,7 +539,44 @@ static void test_unicode_text_cleanup(void) {
                   5000u, false, false, "Unicode abort repairs DCS");
 }
 
+static void test_binary_text_setup_variants(void) {
+    static const uint8_t bytes[] = {0x41u, 0x42u};
+    static const struct {
+        modem_binary_sms_mode_t mode;
+        uint16_t port;
+        const char *command;
+        const char *body;
+    } cases[] = {
+        {MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST, 0u, "AT+CMGF=1;+CSMP=17,167,0,4", "4142"},
+        {MODEM_BINARY_SMS_MODE_F5_PORT_FIRST, 0u, "AT+CMGF=1;+CSMP=17,167,0,245", "4142"},
+        {MODEM_BINARY_SMS_MODE_F5_CONCAT_FIRST_VP, 0x1234u,
+         "AT+CMGF=1;+CSMP=81,167,0,245", "060504123400004142"},
+        {MODEM_BINARY_SMS_MODE_GSM7_TEXT, 0x1234u, "AT+CMGF=1;+CSMP=17,167,0,0", "AB"},
+    };
+    for (size_t i = 0u; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_fixture();
+        modem_sms_protocol_request_t request = {
+            .request_id = 100u, .operation = MODEM_SMS_PROTOCOL_SEND_BINARY,
+            .number = "5550100", .binary = bytes, .binary_len = sizeof(bytes),
+            .dest_port = cases[i].port, .binary_mode = cases[i].mode,
+        };
+        check(modem_sms_protocol_begin(&request, &s_hooks, 1u), "binary diagnostic starts");
+        check_command(0u, MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, cases[i].command,
+                      5000u, false, false, "binary diagnostic keeps text receive mode");
+        clear_actions();
+        modem_sms_protocol_on_final(MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, true, &request, &s_hooks, 2u);
+        check(strcmp(s_actions[0].command, "AT+CMGS=\"5550100\"") == 0,
+              "binary diagnostic uses addressed text prompt");
+        clear_actions();
+        check(modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 3u) &&
+              s_actions[0].body_len == strlen(cases[i].body) &&
+              memcmp(s_actions[0].body, cases[i].body, s_actions[0].body_len) == 0,
+              "binary diagnostic emits exact text-mode body");
+    }
+}
+
 int main(void) {
+    test_binary_text_setup_variants();
     test_unicode_text_cleanup();
     test_text_transport();
     test_dispatch_evidence();

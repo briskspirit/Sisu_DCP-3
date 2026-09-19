@@ -40,6 +40,16 @@ static bool build_segment(sms_submit_pdu_t *submit,
         : (uint8_t)remain;
     bool gsm7_text = mode_gsm7_text(submit->mode);
 
+    if (user_data_only && gsm7_text) {
+        if ((size_t)chunk_len + 1u > hex_cap) return false;
+        for (size_t i = 0u; i < chunk_len; i++)
+            hex[i] = (char)sms_submit_gsm7_code(submit->payload[submit->position + i]);
+        hex[chunk_len] = '\0';
+        submit->position = (uint16_t)(submit->position + chunk_len);
+        submit->segment++;
+        return true;
+    }
+
     uint8_t pdu[180];
     size_t pos = 0u;
     pdu[pos++] = 0x00u; /* SMSC: use modem/SIM default. */
@@ -148,12 +158,11 @@ bool sms_submit_pdu_build(sms_submit_pdu_t *submit, char *hex,
     return build_segment(submit, hex, hex_cap, out_tpdu_len, false);
 }
 
-bool sms_submit_picture_text_build(sms_submit_pdu_t *submit, char *hex,
-                                   size_t hex_cap) {
+bool sms_submit_text_build(sms_submit_pdu_t *submit, char *body,
+                           size_t body_cap) {
     uint8_t ignored;
-    return submit != NULL && submit->mode == MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST &&
-           (submit->dest_port != 0u || submit->source_port != 0u) &&
-           build_segment(submit, hex, hex_cap, &ignored, true);
+    return submit != NULL && (unsigned)submit->mode <= MODEM_BINARY_SMS_MODE_GSM7_TEXT &&
+           build_segment(submit, body, body_cap, &ignored, true);
 }
 
 bool sms_submit_pack_gsm7(const uint8_t *src,

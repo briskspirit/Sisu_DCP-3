@@ -105,13 +105,12 @@ Therefore:
 - init keeps `AT+CMGF=1`, adds `AT+CSDH=1`, and replaces
   `AT+CNMI=1,1,0,0,0` with `AT+CNMI=2,2,0,0,0` (mode 2 buffers URCs while
   the link is reserved and flushes them afterwards);
-- production picture sending stays in text mode with temporary 8-bit/UDHI
+- picture and diagnostic binary sending stay in text mode with temporary 8-bit/UDHI
   CSMP settings, then restores normal text settings. Local file operations do
   not change modem modes;
-- a `+CMT` that lands inside a diagnostic binary-send PDU window is parsed in its PDU form
-  (3GPP: standard SMS-DELIVER, pass-through; 3GPP2: Telit PDU, UDH already
-  stripped by the module). Lost headers cannot be reconstructed reliably;
-  this remains a transport limitation, not a lossless fallback.
+- normal firmware paths never select `+CMGF=0`. Native PDU-form parsing remains
+  available for diagnostics, but cannot reconstruct a 3GPP2 UDH already stripped
+  by the module. It is not a lossless fallback.
 
 ### Acknowledgement
 

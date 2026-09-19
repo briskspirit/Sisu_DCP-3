@@ -61,8 +61,8 @@ typedef enum {
     SMS_FLOW_FAULT_NONE = 0,
     SMS_FLOW_FAULT_CPMS_ERROR,
     SMS_FLOW_FAULT_CPMS_TIMEOUT,
-    SMS_FLOW_FAULT_CMGF_PDU_ERROR,
-    SMS_FLOW_FAULT_CMGF_PDU_TIMEOUT,
+    SMS_FLOW_FAULT_BINARY_SETUP_ERROR,
+    SMS_FLOW_FAULT_BINARY_SETUP_TIMEOUT,
     SMS_FLOW_FAULT_CMGS_PROMPT_ERROR,
     SMS_FLOW_FAULT_CMGS_PROMPT_TIMEOUT,
     SMS_FLOW_FAULT_CMGS_FINAL_ERROR,
@@ -404,10 +404,11 @@ static void telit_sms_inject_crossed_urcs(void) {
 }
 
 static bool telit_sms_response(const char *command) {
-    if (strcmp(command, "AT+CMGF=0") == 0) {
-        if (s_sms_flow_fault == SMS_FLOW_FAULT_CMGF_PDU_ERROR) {
+    if (strncmp(command, "AT+CMGF=1;+CSMP=81,", 18u) == 0 ||
+        strcmp(command, "AT+CMGF=1;+CSMP=17,167,0,4") == 0) {
+        if (s_sms_flow_fault == SMS_FLOW_FAULT_BINARY_SETUP_ERROR) {
             s_mh_final = MH_FINAL_ERROR;
-        } else if (s_sms_flow_fault == SMS_FLOW_FAULT_CMGF_PDU_TIMEOUT) {
+        } else if (s_sms_flow_fault == SMS_FLOW_FAULT_BINARY_SETUP_TIMEOUT) {
             s_mh_final = MH_FINAL_NONE;
         }
         return true;
@@ -2679,10 +2680,8 @@ static void test_sms_text_send_failures_and_prompt_settle(void) {
 
 
 static bool build_expected_binary_segment(sms_submit_pdu_t *submit,
-                                          char *pdu,
-                                          uint8_t *tpdu_len) {
-    return sms_submit_pdu_build(submit, pdu, SMS_SUBMIT_PDU_HEX_MAX,
-                                tpdu_len);
+                                          char *body) {
+    return sms_submit_text_build(submit, body, SMS_SUBMIT_PDU_HEX_MAX);
 }
 
 static void test_sms_binary_send_contract(void) {
@@ -2704,36 +2703,34 @@ static void test_sms_binary_send_contract(void) {
         .segment_total = 1u,
         .reference = 1u,
     };
-    char expected_pdu[SMS_SUBMIT_PDU_HEX_MAX];
-    uint8_t expected_tpdu = 0u;
-    check(build_expected_binary_segment(&expected, expected_pdu,
-                                        &expected_tpdu),
+    char expected_body[SMS_SUBMIT_PDU_HEX_MAX];
+    check(build_expected_binary_segment(&expected, expected_body),
           "one-segment binary golden builds independently");
     uint32_t sent_before = mh_status().sms_sent_count;
     check(modem_service_request_send_binary_sms(
               number, payload, sizeof(payload), 0x1234u, 0u),
           "one-segment binary SMS is admitted");
     mh_settle();
-    char cmgs[24];
-    snprintf(cmgs, sizeof(cmgs), "AT+CMGS=%u", (unsigned)expected_tpdu);
-    size_t pdu_mode = tx_event_cstr("AT+CMGF=0", 0u);
-    size_t cmgs_event = tx_event_cstr(cmgs, pdu_mode + 1u);
-    size_t pdu_event = tx_event_raw(expected_pdu, strlen(expected_pdu),
+    char cmgs[48];
+    sms_submit_format_text_command(cmgs, sizeof(cmgs), "AT+CMGS", number, false);
+    size_t setup_event = tx_event_cstr("AT+CMGF=1;+CSMP=81,167,0,4", 0u);
+    size_t cmgs_event = tx_event_cstr(cmgs, setup_event + 1u);
+    size_t body_event = tx_event_raw(expected_body, strlen(expected_body),
                                     cmgs_event + 1u);
-    size_t sub_event = tx_event_raw(&sub, 1u, pdu_event + 1u);
-    size_t text_mode = tx_event_cstr("AT+CMGF=1", sub_event + 1u);
+    size_t sub_event = tx_event_raw(&sub, 1u, body_event + 1u);
+    size_t text_mode = tx_event_cstr("AT+CMGF=1;+CSMP=17,167,0,0", sub_event + 1u);
     modem_sms_send_result_t result;
-    check(pdu_mode != SIZE_MAX && cmgs_event != SIZE_MAX &&
-              pdu_event != SIZE_MAX && sub_event != SIZE_MAX &&
+    check(setup_event != SIZE_MAX && cmgs_event != SIZE_MAX &&
+              body_event != SIZE_MAX && sub_event != SIZE_MAX &&
               text_mode != SIZE_MAX,
-          "one-segment binary send emits exact PDU-mode wire order");
+          "one-segment binary send emits exact text-mode wire order");
     check(modem_service_pop_sms_send_result(&result) &&
               result.request_id == s_last_sms_request_id &&
               result.kind == MODEM_SMS_REQUEST_SEND_BINARY &&
               result.outcome == MODEM_SMS_OUTCOME_OK &&
               !modem_service_pop_sms_send_result(&result) &&
               mh_status().sms_sent_count == sent_before + 1u &&
-              mh_tx_count_exact("AT+CMGF=1") == 1u,
+              mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == 1u,
           "one-segment binary send restores text mode and completes once");
 
     uint8_t multipart[130];
@@ -2752,12 +2749,10 @@ static void test_sms_binary_send_contract(void) {
         .segment_total = 2u,
         .reference = 2u,
     };
-    char pdu1[SMS_SUBMIT_PDU_HEX_MAX];
-    char pdu2[SMS_SUBMIT_PDU_HEX_MAX];
-    uint8_t tpdu1 = 0u;
-    uint8_t tpdu2 = 0u;
-    check(build_expected_binary_segment(&expected, pdu1, &tpdu1) &&
-              build_expected_binary_segment(&expected, pdu2, &tpdu2) &&
+    char body1[SMS_SUBMIT_PDU_HEX_MAX];
+    char body2[SMS_SUBMIT_PDU_HEX_MAX];
+    check(build_expected_binary_segment(&expected, body1) &&
+              build_expected_binary_segment(&expected, body2) &&
               expected.position == sizeof(multipart) &&
               expected.segment == 3u,
           "multipart binary goldens advance one shared reference monotonically");
@@ -2766,31 +2761,31 @@ static void test_sms_binary_send_contract(void) {
               number, multipart, sizeof(multipart), 0x1234u, 0u),
           "multipart binary SMS is admitted");
     mh_settle();
-    char cmgs1[24];
-    char cmgs2[24];
-    snprintf(cmgs1, sizeof(cmgs1), "AT+CMGS=%u", (unsigned)tpdu1);
-    snprintf(cmgs2, sizeof(cmgs2), "AT+CMGS=%u", (unsigned)tpdu2);
-    pdu_mode = tx_event_cstr("AT+CMGF=0", 0u);
-    size_t cmgs1_event = tx_event_cstr(cmgs1, pdu_mode + 1u);
-    size_t pdu1_event = tx_event_raw(pdu1, strlen(pdu1), cmgs1_event + 1u);
-    size_t sub1_event = tx_event_raw(&sub, 1u, pdu1_event + 1u);
+    char cmgs1[48];
+    char cmgs2[48];
+    sms_submit_format_text_command(cmgs1, sizeof(cmgs1), "AT+CMGS", number, false);
+    sms_submit_format_text_command(cmgs2, sizeof(cmgs2), "AT+CMGS", number, false);
+    setup_event = tx_event_cstr("AT+CMGF=1;+CSMP=81,167,0,4", 0u);
+    size_t cmgs1_event = tx_event_cstr(cmgs1, setup_event + 1u);
+    size_t body1_event = tx_event_raw(body1, strlen(body1), cmgs1_event + 1u);
+    size_t sub1_event = tx_event_raw(&sub, 1u, body1_event + 1u);
     size_t cmgs2_event = tx_event_cstr(cmgs2, sub1_event + 1u);
-    size_t pdu2_event = tx_event_raw(pdu2, strlen(pdu2), cmgs2_event + 1u);
-    size_t sub2_event = tx_event_raw(&sub, 1u, pdu2_event + 1u);
-    text_mode = tx_event_cstr("AT+CMGF=1", sub2_event + 1u);
-    check(pdu_mode != SIZE_MAX && cmgs1_event != SIZE_MAX &&
-              pdu1_event != SIZE_MAX && sub1_event != SIZE_MAX &&
-              cmgs2_event != SIZE_MAX && pdu2_event != SIZE_MAX &&
+    size_t body2_event = tx_event_raw(body2, strlen(body2), cmgs2_event + 1u);
+    size_t sub2_event = tx_event_raw(&sub, 1u, body2_event + 1u);
+    text_mode = tx_event_cstr("AT+CMGF=1;+CSMP=17,167,0,0", sub2_event + 1u);
+    check(setup_event != SIZE_MAX && cmgs1_event != SIZE_MAX &&
+              body1_event != SIZE_MAX && sub1_event != SIZE_MAX &&
+              cmgs2_event != SIZE_MAX && body2_event != SIZE_MAX &&
               sub2_event != SIZE_MAX && text_mode != SIZE_MAX &&
               tx_event_count_raw_byte(0x1au) == 2u,
-          "multipart send emits both exact PDUs before one text-mode restore");
+          "multipart send emits both exact bodies before one parameter restore");
     check(modem_service_pop_sms_send_result(&result) &&
               result.request_id == s_last_sms_request_id &&
               result.kind == MODEM_SMS_REQUEST_SEND_BINARY &&
               result.outcome == MODEM_SMS_OUTCOME_OK &&
               !modem_service_pop_sms_send_result(&result) &&
               mh_status().sms_sent_count == sent_before + 1u &&
-              mh_tx_count_exact("AT+CMGF=1") == 1u,
+              mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == 1u,
           "multipart send publishes and counts one logical SMS, not segments");
 }
 
@@ -2804,11 +2799,11 @@ static void test_sms_binary_failures_and_prompt_settle(void) {
         bool counted;
         const char *name;
     } cases[] = {
-        {SMS_FLOW_FAULT_CMGF_PDU_ERROR, 0u, 0u, MODEM_SMS_OUTCOME_ERROR, false,
-         "binary PDU-mode error"},
-        {SMS_FLOW_FAULT_CMGF_PDU_TIMEOUT, 5001u, 1u,
+        {SMS_FLOW_FAULT_BINARY_SETUP_ERROR, 0u, 1u, MODEM_SMS_OUTCOME_ERROR, false,
+         "binary text setup error"},
+        {SMS_FLOW_FAULT_BINARY_SETUP_TIMEOUT, 5001u, 1u,
          MODEM_SMS_OUTCOME_TIMEOUT, false,
-         "binary PDU-mode timeout"},
+         "binary text setup timeout"},
         {SMS_FLOW_FAULT_CMGS_PROMPT_ERROR, 0u, 1u,
          MODEM_SMS_OUTCOME_ERROR, false,
          "binary prompt error"},
@@ -2852,7 +2847,7 @@ static void test_sms_binary_failures_and_prompt_settle(void) {
                   !modem_service_pop_sms_send_result(&result) &&
                   !mh_status().operation_busy;
         bool restore_ok =
-            mh_tx_count_exact("AT+CMGF=1") == cases[i].restore_count &&
+            mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == cases[i].restore_count &&
                   mh_status().sms_sent_count ==
                       sent_before + (cases[i].counted ? 1u : 0u);
         if (!terminal_ok || !restore_ok) {
@@ -2860,7 +2855,7 @@ static void test_sms_binary_failures_and_prompt_settle(void) {
                     "SMS matrix case: %s (have=%u outcome=%u restore=%zu count=%lu busy=%u)\n",
                     cases[i].name, have_result ? 1u : 0u,
                     have_result ? (unsigned)result.outcome : 0u,
-                    mh_tx_count_exact("AT+CMGF=1"),
+                    mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0"),
                     (unsigned long)(mh_status().sms_sent_count - sent_before),
                     mh_status().operation_busy ? 1u : 0u);
         }
@@ -2884,16 +2879,16 @@ static void test_sms_binary_failures_and_prompt_settle(void) {
     mh_advance(5001u);
     size_t esc_event = tx_event_raw_byte(0x1bu, 0u);
     modem_sms_send_result_t result;
-    check(esc_event != SIZE_MAX && mh_tx_count_exact("AT+CMGF=1") == 0u &&
+    check(esc_event != SIZE_MAX && mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == 0u &&
               !modem_service_pop_sms_send_result(&result) &&
               tx_event_cstr("AT+CSQ", 0u) == SIZE_MAX,
           "binary prompt timeout defers both restore and queued command");
     mh_advance(499u);
-    check(mh_tx_count_exact("AT+CMGF=1") == 0u,
+    check(mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == 0u,
           "binary restore remains deferred through the ESC quarantine");
     mh_advance(1u);
     size_t restore_event = tx_event_cstr(
-        "AT+CMGF=1", esc_event == SIZE_MAX ? 0u : esc_event + 1u);
+        "AT+CMGF=1;+CSMP=17,167,0,0", esc_event == SIZE_MAX ? 0u : esc_event + 1u);
     size_t debug_event = tx_event_cstr(
         "AT+CSQ", restore_event == SIZE_MAX ? 0u : restore_event + 1u);
     bool settle_observed = esc_event != SIZE_MAX &&
@@ -2902,7 +2897,7 @@ static void test_sms_binary_failures_and_prompt_settle(void) {
                 s_mh_tx_events[esc_event].at_ms >= 500u;
     modem_debug_result_t debug_result;
     check(settle_observed && debug_event != SIZE_MAX &&
-              mh_tx_count_exact("AT+CMGF=1") == 1u &&
+              mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == 1u &&
               modem_service_pop_sms_send_result(&result) &&
               result.request_id == s_last_sms_request_id &&
               result.kind == MODEM_SMS_REQUEST_SEND_BINARY &&
@@ -3104,7 +3099,7 @@ static void test_sms_recovery_cancels_every_uncommitted_operation(void) {
             return;
         }
         s_sms_flow_fault = operation == 1u
-            ? SMS_FLOW_FAULT_CMGF_PDU_TIMEOUT
+            ? SMS_FLOW_FAULT_BINARY_SETUP_TIMEOUT
             : SMS_FLOW_FAULT_CMGS_PROMPT_TIMEOUT;
         check(request_sms_operation_for_transport_case(operation),
               "SMS recovery target is admitted");
