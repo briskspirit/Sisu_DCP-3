@@ -37,10 +37,14 @@ typedef enum {
     MESSAGE_MERGE_FULL,
 } message_merge_t;
 
+/* Sole core0 owner, non-reentrant: decoding uses static scratch to stay within
+ * the firmware stack budget. No returned structure borrows that scratch. */
 bool message_file_draft(message_file_t *file, const char *address, const char *text);
 bool message_file_receive(message_file_t *file, const char *pdu);
 message_merge_t message_file_merge(message_file_t *file, const char *pdu);
 bool message_file_complete(const message_file_t *file);
+/* Only a complete, unambiguous control is eligible; fragments stay durable. */
+bool message_file_is_vvm_control(const message_file_t *file);
 bool message_file_encode(const message_file_t *file, uint8_t *dst, size_t cap, size_t *len);
 bool message_file_decode(message_file_t *file, const uint8_t *src, size_t len);
 bool message_file_metadata(const message_file_t *file, message_metadata_t *out);

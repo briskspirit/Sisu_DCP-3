@@ -608,6 +608,8 @@ storage_record_result_t storage_objects_open(void) {
     if (rc != 0) return result_for(fs, rc);
     if (fs->fs.block_count != USER_BLOCKS) return STORAGE_RECORD_ERROR;
     if (s_objects_ready) return STORAGE_RECORD_OK;
+    /* Single-owner filesystem; avoid two lfs_info frames on the MCU stack. */
+    static struct lfs_info info;
     storage_backend_t backend = {.ctx = fs};
     uint8_t counter[4];
     size_t len = 0;
@@ -616,7 +618,6 @@ storage_record_result_t storage_objects_open(void) {
     if (result == STORAGE_RECORD_NOT_FOUND) {
         /* Never reseed a lost allocator over existing objects. Directory
          * creation happens only after this counter has committed. */
-        struct lfs_info info;
         for (unsigned i = 0; i < STORAGE_OBJECT_COLLECTION_COUNT; i++) {
             rc = lfs_stat(&fs->fs, OBJECT_DIRS[i], &info);
             if (rc != LFS_ERR_NOENT) {
@@ -632,7 +633,6 @@ storage_record_result_t storage_objects_open(void) {
     if (len != sizeof(counter) || read_u32(counter) == 0u) return STORAGE_RECORD_ERROR;
     s_next_object = read_u32(counter);
     for (unsigned i = 0; i < STORAGE_OBJECT_COLLECTION_COUNT; i++) {
-        struct lfs_info info;
         rc = lfs_stat(&fs->fs, OBJECT_DIRS[i], &info);
         if (rc == LFS_ERR_NOENT) {
             rc = budget_begin(fs, (storage_user_pool_t)i, false);

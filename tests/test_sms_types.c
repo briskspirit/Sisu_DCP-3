@@ -1,6 +1,7 @@
 #include <stdio.h>
 
 #include "services/sms_types.h"
+#include "services/message_types.h"
 
 _Static_assert(MODEM_SMS_TEXT_MAX == 160u, "SMS text capacity changed");
 _Static_assert(MODEM_SMS_DECODED_TEXT_MAX == 320u,
@@ -13,41 +14,21 @@ _Static_assert(MODEM_SMS_TIMESTAMP_MAX == 24u,
                "SMS timestamp capacity changed");
 _Static_assert(MODEM_SMS_STATUS_MAX == 12u, "SMS status capacity changed");
 _Static_assert(MODEM_SMS_SEGMENT_MAX == 8u, "SMS segment capacity changed");
-_Static_assert(MODEM_SMS_RECORD_MAX == 255u, "SMS record capacity changed");
+_Static_assert(MESSAGE_MAILBOX_LIMIT == 500u, "local mailbox limit changed");
+_Static_assert(MESSAGE_TEXT_MAX == 2560u, "assembled text bound changed");
+_Static_assert(sizeof(message_metadata_t) == 68u, "local metadata RAM budget changed");
 
 _Static_assert(sizeof(modem_sms_message_t) == 472u,
                "modem_sms_message_t layout changed");
 _Static_assert(sizeof(((modem_sms_message_t *)0)->text) ==
                    MODEM_SMS_DECODED_TEXT_MAX + 1u,
                "decoded SMS text member does not expose the full UTF-8 bound");
-_Static_assert(sizeof(modem_sms_record_t) == 96u,
-               "modem_sms_record_t layout changed");
 #if defined(__ARM_EABI__)
-_Static_assert(sizeof(modem_sms_mailbox_t) == 1u,
-               "target modem_sms_mailbox_t layout changed");
-_Static_assert(sizeof(modem_sms_mailbox_result_t) == 12u,
-               "target modem_sms_mailbox_result_t layout changed");
-_Static_assert(sizeof(modem_sms_read_result_t) == 488u,
-               "target modem_sms_read_result_t layout changed");
 _Static_assert(sizeof(modem_sms_send_result_t) == 8u,
                "target modem_sms_send_result_t layout changed");
-_Static_assert(sizeof(modem_sms_save_result_t) == 8u,
-               "target modem_sms_save_result_t layout changed");
-_Static_assert(sizeof(modem_sms_delete_result_t) == 8u,
-               "target modem_sms_delete_result_t layout changed");
 #else
-_Static_assert(sizeof(modem_sms_mailbox_t) == 4u,
-               "host modem_sms_mailbox_t layout changed");
-_Static_assert(sizeof(modem_sms_mailbox_result_t) == 20u,
-               "host modem_sms_mailbox_result_t layout changed");
-_Static_assert(sizeof(modem_sms_read_result_t) == 496u,
-               "host modem_sms_read_result_t layout changed");
 _Static_assert(sizeof(modem_sms_send_result_t) == 12u,
                "host modem_sms_send_result_t layout changed");
-_Static_assert(sizeof(modem_sms_save_result_t) == 16u,
-               "host modem_sms_save_result_t layout changed");
-_Static_assert(sizeof(modem_sms_delete_result_t) == 16u,
-               "host modem_sms_delete_result_t layout changed");
 #endif
 
 _Static_assert(MODEM_SMS_REQUEST_SEND_TEXT != MODEM_SMS_REQUEST_SEND_BINARY,

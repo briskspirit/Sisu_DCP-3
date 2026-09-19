@@ -15,6 +15,7 @@
 #include "services/input_keys.h"
 #include "services/log.h"
 #include "services/modem_service.h"
+#include "services/message_service.h"
 #include "services/sms_picture_codec.h"
 #include "storage/store_service.h"
 #include "services/strings.h"
@@ -54,7 +55,6 @@ static const char *const MESSAGES_ROOT_LABELS[] = {
     "Voice\nmailbox\nnumber",
 };
 static const char *const MESSAGE_INBOX_OPTIONS[] = {"Reply", "Forward", "Edit", "Use number", "Erase", "Details"};
-static const char *const MESSAGE_INBOX_PICTURE_OPTIONS[] = {"Save", "Forward", "Use number", "Erase", "Details"};
 static const char *const MESSAGE_OUTBOX_OPTIONS[] = {"Send", "Edit", "Use number", "Erase", "Details"};
 static const char *const MESSAGE_SETTINGS_TOP_LABELS[] = {"Set 1", "Common"};
 static const char *const MESSAGE_SETTINGS_SET_LABELS[] = {"Message centre number", "Messages sent as", "Message validity"};
@@ -78,7 +78,6 @@ static const uint16_t MESSAGES_ROOT_SID[] = {
 };
 static const uint16_t MESSAGE_INBOX_OPTIONS_SID[] = {0x347u, 0u, 0x344u, 0u, 0u, 0u}; /* Reply, Edit */
 static const uint16_t MESSAGE_OUTBOX_OPTIONS_SID[] = {0u, 0x344u, 0u, 0u, 0u};    /* Edit */
-static const uint16_t MESSAGE_INBOX_PICTURE_OPTIONS_SID[] = {0x17eu, 0u, 0u, 0u, 0u}; /* Save */
 static const uint16_t MESSAGE_SETTINGS_TOP_SID[] = {0u, 0x31au};                  /* Common */
 static const uint16_t MESSAGE_SETTINGS_SET_SID[] = {0x335u, 0x336u, 0x371u};      /* Message centre number, Messages sent as, Message validity */
 static const uint16_t MESSAGE_SETTINGS_COMMON_SID[] = {0x31fu, 0x353u};           /* Delivery reports, Reply via same centre */
@@ -101,20 +100,10 @@ static void msg_localize_labels(const char *const *labels,
 }
 
 
-static bool copy_modem_sms_record(app_sms_record_t *dst,
-                                  const modem_sms_record_t *src);
-static bool copy_modem_sms_content(app_sms_content_t *dst,
-                                   const modem_sms_message_t *src);
-static void load_sms_mailbox_from_modem(app_t *app, bool complete);
-static void sms_sort_inbox_unread_first(app_sms_record_t *records, uint8_t count);
-static bool sms_request_silent_status_sync(app_t *app, uint32_t now);
-static bool sms_sync_unread_from_modem_cache(app_t *app, bool complete);
-static bool sms_status_is_unread(const char *status);
-static uint8_t sms_count_unread_rows(const app_sms_record_t *records, uint8_t count);
 static bool sms_async_ui_active(const app_t *app);
 static void sms_finish_submitted_text(app_t *app, bool sent);
 static const app_sms_record_t *current_sms_record_const(const app_t *app);
-static uint8_t current_sms_count(const app_t *app);
+static uint16_t current_sms_count(const app_t *app);
 static bool sms_outbox_is_recipientless(const app_sms_record_t *record);
 static uint8_t sms_outbox_option_count(const app_sms_record_t *record);
 static const char *sms_record_label(const app_sms_record_t *record, bool outbox, char *scratch, size_t cap);
@@ -149,9 +138,10 @@ static void messages_menu_step(app_t *app, int8_t delta);
 
 void messages_app_init(app_t *app) {
     messages_composer_init(app);
-    /* Telit's protected status octets are authoritative. The first complete
-     * post-SIM-ready inbox scan populates the standby envelope. */
-    app->sms_unread_count = 0u;
+    message_status_t status;
+    message_service_get_status(&status);
+    app->sms_unread_count = status.unread;
+    app->last_local_sms_received_count = status.received;
 }
 
 void render_messages_menu(const app_t *app, framebuffer_t *fb) {
@@ -271,23 +261,6 @@ void render_messages_list(const app_t *app, framebuffer_t *fb) {
 
     const app_sms_record_t *record = current_sms_record_const(app);
     if (app->messages_mode == MESSAGES_MODE_OPTIONS) {
-        if (app->messages_kind == MESSAGES_KIND_INBOX && record != 0 && record->picture) {
-            /* Inbox-picture options: localize "Save" (0x17e); the rest are absent
-             * from the map -> English. */
-            const char *ipic[ARRAY_COUNT(MESSAGE_INBOX_PICTURE_OPTIONS)];
-            msg_localize_labels(MESSAGE_INBOX_PICTURE_OPTIONS,
-                                MESSAGE_INBOX_PICTURE_OPTIONS_SID,
-                                (uint8_t)ARRAY_COUNT(MESSAGE_INBOX_PICTURE_OPTIONS),
-                                ipic,
-                                (uint8_t)ARRAY_COUNT(ipic));
-            draw_flat_list(fb,
-                           ipic,
-                           (uint8_t)ARRAY_COUNT(MESSAGE_INBOX_PICTURE_OPTIONS),
-                           app->messages_option_selected,
-                           "",
-                           "Select");
-            return;
-        }
         const char *const *options = app->messages_kind == MESSAGES_KIND_OUTBOX
             ? MESSAGE_OUTBOX_OPTIONS
             : MESSAGE_INBOX_OPTIONS;
@@ -314,12 +287,6 @@ void render_messages_list(const app_t *app, framebuffer_t *fb) {
         char detail[PHONEBOOK_NAME_MAX + MODEM_SMS_SENDER_MAX + 32u];
         const char *text = detail;
         if (record == 0 || !app->sms_selected_content.valid) {
-            return;
-        }
-        if (record->picture) {
-            messages_picture_draw_received_preview(
-                fb, &app->sms_selected_content.picture_message);
-            draw_softkey(fb, "Options");
             return;
         }
         if (app->messages_kind == MESSAGES_KIND_INBOX && app->messages_read_page == 1u) {
@@ -352,23 +319,6 @@ void render_messages_list(const app_t *app, framebuffer_t *fb) {
     }
 
     if (app->messages_mode == MESSAGES_MODE_DETAIL) {
-        if (record != 0 && record->picture) {
-            char text[96];
-            if (app->messages_detail_page == 0u) {
-                sms_sender_page_text(record, text, sizeof(text));
-            } else if (app->messages_detail_page == 1u) {
-                snprintf(text,
-                         sizeof(text),
-                         "Picture:\n%ux%u",
-                         (unsigned)app->sms_selected_content.picture_message.width,
-                         (unsigned)app->sms_selected_content.picture_message.height);
-            } else {
-                sms_timestamp_text(record->timestamp, text, sizeof(text));
-            }
-            draw_text_block(fb, font, text, 0, 0, FB_WIDTH, 9, 4u);
-            draw_softkey(fb, "Back");
-            return;
-        }
         char text[96];
         sms_detail_page_text(app, text, sizeof(text));
         draw_text_block(fb, font, text, 0, 0, FB_WIDTH, 9, 4u);
@@ -376,25 +326,25 @@ void render_messages_list(const app_t *app, framebuffer_t *fb) {
         return;
     }
 
-    uint8_t count = current_sms_count(app);
+    uint16_t count = current_sms_count(app);
     if (count == 0u) {
         fb_text(fb, asset_font(FONT_FS0), "No messages", 0, 9, true, FB_WIDTH);
         return;
     }
-    uint8_t selected = app->messages_selected >= count ? 0u : app->messages_selected;
-    char crumb[8];
+    uint16_t selected = app->messages_selected >= count ? 0u : app->messages_selected;
+    char crumb[12];
     snprintf(crumb,
              sizeof(crumb),
              "2-%u-%u",
              app->messages_kind == MESSAGES_KIND_OUTBOX ? 2u : 1u,
              (unsigned)(selected + 1u));
     draw_right_text_box(fb, counter, crumb, 0, 0, FB_WIDTH);
-    uint8_t start = selected > 2u ? (uint8_t)(selected - 2u) : 0u;
+    uint16_t start = selected > 2u ? (uint16_t)(selected - 2u) : 0u;
     if (count > 3u && start > count - 3u) {
-        start = (uint8_t)(count - 3u);
+        start = (uint16_t)(count - 3u);
     }
     for (uint8_t row = 0; row < 3u && start + row < count; row++) {
-        uint8_t index = (uint8_t)(start + row);
+        uint16_t index = (uint16_t)(start + row);
         const app_sms_record_t *item = app->messages_kind == MESSAGES_KIND_OUTBOX
             ? &app->sms_outbox[index]
             : &app->sms_inbox[index];
@@ -404,14 +354,14 @@ void render_messages_list(const app_t *app, framebuffer_t *fb) {
             fb_fill_rect(fb, SMS_MAILBOX_HIGHLIGHT_X, y - 1, FB_WIDTH - SMS_MAILBOX_HIGHLIGHT_X, SMS_MAILBOX_ROW_H, true);
         }
         /* 1:1 four-status envelope (v6.00 row builder 0x0022782c): inbox READ=42
-         * / UNREAD=43, outbox SENT=44 / UNSENT=45. Telit's protected mailbox
-         * status is the source of truth for both groups. */
+         * / UNREAD=43, outbox SENT=44 / UNSENT=45. Local file state
+         * is the source of truth for both groups. */
         uint16_t icon_id;
         if (app->messages_kind == MESSAGES_KIND_OUTBOX) {
-            icon_id = strstr(item->status, "UNSENT") != 0 ? SMS_OUTBOX_UNSENT_ICON_ID
+            icon_id = !item->sent ? SMS_OUTBOX_UNSENT_ICON_ID
                                                           : SMS_OUTBOX_SENT_ICON_ID;
         } else {
-            icon_id = sms_status_is_unread(item->status) ? SMS_INBOX_UNREAD_ICON_ID
+            icon_id = !item->read ? SMS_INBOX_UNREAD_ICON_ID
                                                          : SMS_INBOX_READ_ICON_ID;
         }
         fb_bitmap(fb, icon_id, 0, y, true, true);
@@ -604,9 +554,7 @@ bool handle_messages_list_key(app_t *app, uint16_t key, uint32_t now) {
         const app_sms_record_t *record = current_sms_record_const(app);
         uint8_t count = app->messages_kind == MESSAGES_KIND_OUTBOX
             ? sms_outbox_option_count(record)
-            : (record != 0 && record->picture
-                   ? (uint8_t)ARRAY_COUNT(MESSAGE_INBOX_PICTURE_OPTIONS)
-                   : (uint8_t)ARRAY_COUNT(MESSAGE_INBOX_OPTIONS));
+            : (uint8_t)ARRAY_COUNT(MESSAGE_INBOX_OPTIONS);
         if (key == KEY_UP) {
             app->messages_option_selected = app->messages_option_selected == 0u ? (uint8_t)(count - 1u) : (uint8_t)(app->messages_option_selected - 1u);
             app->dirty = true;
@@ -657,9 +605,6 @@ bool handle_messages_list_key(app_t *app, uint16_t key, uint32_t now) {
             if (record == 0) {
                 return true;
             }
-            if (record->picture) {
-                return true;
-            }
             if (app->messages_read_page == 0u) {
                 uint16_t line_count = ui_wrap_line_count(
                     asset_font(FONT_FS2), app->sms_selected_content.text,
@@ -687,7 +632,7 @@ bool handle_messages_list_key(app_t *app, uint16_t key, uint32_t now) {
         return true;
     }
 
-    uint8_t count = current_sms_count(app);
+    uint16_t count = current_sms_count(app);
     if (count == 0u) {
         if (key == KEY_C || key == KEY_NAVI) {
             open_messages_menu(app,
@@ -696,14 +641,14 @@ bool handle_messages_list_key(app_t *app, uint16_t key, uint32_t now) {
         return true;
     }
     if (key == KEY_UP) {
-        app->messages_selected = app->messages_selected == 0u ? (uint8_t)(count - 1u) : (uint8_t)(app->messages_selected - 1u);
+        app->messages_selected = app->messages_selected == 0u ? (uint16_t)(count - 1u) : (uint16_t)(app->messages_selected - 1u);
         memset(&app->sms_selected_content, 0,
                sizeof(app->sms_selected_content));
         app->dirty = true;
         return true;
     }
     if (key == KEY_DOWN) {
-        app->messages_selected = (uint8_t)((app->messages_selected + 1u) % count);
+        app->messages_selected = (uint16_t)((app->messages_selected + 1u) % count);
         memset(&app->sms_selected_content, 0,
                sizeof(app->sms_selected_content));
         app->dirty = true;
@@ -750,7 +695,7 @@ static void sms_finish_submitted_text(app_t *app, bool sent) {
 
 bool poll_sms(app_t *app, uint32_t now) {
     bool changed = false;
-    modem_status_t status;
+    static modem_status_t status;
     modem_service_get_status(&status);
     store_status_t picture_store = store_picture_commit_status();
     bool picture_failed = picture_store == STORE_STATUS_STORAGE_ERROR;
@@ -783,357 +728,168 @@ bool poll_sms(app_t *app, uint32_t now) {
         app->picture_storage_warning = false;
         changed = true;
     }
-    if (status.sms_received_count < app->last_modem_sms_received_count) {
-        /* modem_status_t is reset when the module powers down while app_t stays
-         * alive in soft-off. Rebase the monotonic service epoch before starting
-         * the authoritative scan; otherwise every completion looks crossed by
-         * an arrival and retries forever. */
-        app->last_modem_sms_received_count = status.sms_received_count;
-        app->sms_status_sync_pending = true;
-        changed = true;
-    } else if (status.sms_received_count > app->last_modem_sms_received_count) {
-        app->last_modem_sms_received_count = status.sms_received_count;
-        /* +CMTI carries only a storage index. Reconcile first so application
-         * control records (notably VVM STATUS/SYNC) can be consumed silently
-         * before any user-facing unread count, light, or tone is emitted. */
-        app->sms_status_sync_pending = true;
+    message_status_t local;
+    message_service_get_status(&local);
+    if (local.ready && app->sms_unread_count != local.unread) {
+        app->sms_unread_count = local.unread;
         changed = true;
     }
-
-    if (status.sms_user_received_count <
-        app->last_modem_user_sms_received_count) {
-        /* Same modem epoch reset as the raw revision above. This is a baseline,
-         * not a user-visible arrival, so it must not increment unread or alert. */
-        app->last_modem_user_sms_received_count =
-            status.sms_user_received_count;
-        changed = true;
-    } else if (status.sms_user_received_count >
-        app->last_modem_user_sms_received_count) {
-        uint32_t delta = status.sms_user_received_count -
-                         app->last_modem_user_sms_received_count;
-        app->last_modem_user_sms_received_count =
-            status.sms_user_received_count;
-        bool inbox_open = (app->route == APP_ROUTE_MESSAGES_LIST && app->messages_kind == MESSAGES_KIND_INBOX) ||
-                          (app->route == APP_ROUTE_DISPLAY_MESSAGE &&
-                           app->display_return_route == APP_ROUTE_MESSAGES_LIST &&
-                           app->messages_kind == MESSAGES_KIND_INBOX);
-        /* Classification completed against a protected mailbox snapshot. The
-         * exact scan result below replaces this prompt envelope bump. */
-        uint32_t unread_delta = delta;
-        while (unread_delta-- > 0u && app->sms_unread_count < UINT8_MAX) {
-            app->sms_unread_count++;
-        }
-        if (!inbox_open) {
+    if (local.received != app->last_local_sms_received_count) {
+        uint32_t delta = local.received > app->last_local_sms_received_count
+            ? local.received - app->last_local_sms_received_count : 0u;
+        app->last_local_sms_received_count = local.received;
+        bool inbox_open = sms_async_ui_active(app) && app->messages_kind == MESSAGES_KIND_INBOX;
+        if (delta != 0u && !inbox_open) {
             app->sms_received_pending = true;
-            while (delta-- > 0u && app->sms_received_pending_count < 99u) {
-                app->sms_received_pending_count++;
-            }
+            uint32_t count = app->sms_received_pending_count + delta;
+            app->sms_received_pending_count = (uint8_t)(count > 99u ? 99u : count);
             play_message_alert(app, &status, now);
         }
         changed = true;
     }
+    if ((local.storage_error && !app->sms_storage_error_seen) ||
+        local.receive_errors != app->sms_receive_errors_seen) {
+        app->sms_storage_warning = true;
+    }
+    app->sms_storage_error_seen = local.storage_error;
+    app->sms_receive_errors_seen = local.receive_errors;
 
-    /* Calls, alarms, and power transitions run before this poll. Detach their
-     * displaced UI owners immediately, but retain each request id until its
-     * exact terminal can be drained. Releasing the id here would either let a
-     * competing consumer steal it or strand the service's single-flight slot. */
-    if (app->messages_open_pending && !app->sms_status_sync_silent &&
-        !sms_async_ui_active(app)) {
+    /* Calls and alarms may replace progress UI. Keep the token until its exact
+     * completion is drained, but never let a late result steal that UI back. */
+    if (!sms_async_ui_active(app)) {
         app->messages_open_pending = false;
-        changed = true;
-    }
-    if (app->sms_open_deferred && !sms_async_ui_active(app)) {
-        /* The queued user open is UI intent layered over a silent scan. A call
-         * or alarm that displaced its Opening note also cancels that intent;
-         * the background request itself remains owned and drains silently. */
-        app->sms_open_deferred = false;
-        changed = true;
-    }
-    if (app->sms_read_waiting && !sms_async_ui_active(app)) {
         app->sms_read_waiting = false;
-        memset(&app->sms_selected_content, 0,
-               sizeof(app->sms_selected_content));
-        changed = true;
     }
-    if (app->sms_delete_waiting &&
-        !sms_progress_ui_active(app, 4u, APP_ROUTE_MESSAGES_LIST)) {
-        app->sms_delete_waiting = false;
-        changed = true;
-    }
-    if (app->sms_save_waiting &&
-        !sms_progress_ui_active(app, 4u, APP_ROUTE_SMS_COMPOSER)) {
-        app->sms_save_waiting = false;
-        changed = true;
-    }
+    if (!sms_progress_ui_active(app, 4u, APP_ROUTE_MESSAGES_LIST)) app->sms_delete_waiting = false;
+    if (!sms_progress_ui_active(app, 4u, APP_ROUTE_SMS_COMPOSER)) app->sms_save_waiting = false;
     if (app->sms_send_waiting &&
         !sms_progress_ui_active(app, 46u, app->sms_send_return_route)) {
         app->sms_send_waiting = false;
         app->sms_send_return_route = APP_ROUTE_SMS_COMPOSER;
         changed = true;
     }
-
-    /* Boot and arrival status syncs share the same request. Completion, not
-     * admission, marks the boot sync done; errors, truncation, and an interleaved
-     * +CMTI all leave the request pending for another clean scan. */
-    if (status.sim_ready &&
-        (!app->sms_boot_status_sync_done || app->sms_status_sync_pending) &&
-        !app->messages_open_pending && app->messages_open_request_id == 0u) {
-        (void)sms_request_silent_status_sync(app, now);
-    }
-
-    /* 1:1 memory-full (v6.00 "No space for new messages", SID 453): the receive
-     * store is full, so the modem rejects the next SMS-DELIVER (RP-ERROR memory-
-     * capacity-exceeded). Whether the network re-delivers after a slot frees is
-     * NOT guaranteed on LTE/VoLTE (SMSC-dependent -- [BP], verify on the live
-     * network); regardless, the user must delete to receive more, which is what
-     * the notice tells them. Rising-edge from the modem (re-arms when a delete
-     * frees space). Surface only from standby, matching the original's standby
-     * notice + alert tone; mid-task it updates silently and the envelope carries
-     * the state. */
-    if (status.sms_storage_full_events < app->last_sms_storage_full_events) {
-        /* Preserve the next real full-store edge across a modem power cycle. */
-        app->last_sms_storage_full_events = status.sms_storage_full_events;
-        changed = true;
-    }
-    if (status.sms_storage_full_events > app->last_sms_storage_full_events &&
+    if (local.full_events != app->last_sms_storage_full_events &&
         app->route == APP_ROUTE_STANDBY) {
-        /* Consume the edge only once actually shown, so a store that fills while
-         * the user is mid-menu surfaces the notice when they return to standby
-         * (rather than being silently swallowed). */
-        app->last_sms_storage_full_events = status.sms_storage_full_events;
+        app->last_sms_storage_full_events = local.full_events;
         play_message_alert(app, &status, now);
         open_display_sid(app, 2u, 0x1c5u, "No space\nfor new\nmessages", APP_ROUTE_STANDBY, now);
         changed = true;
+    } else if (app->sms_storage_warning && app->route == APP_ROUTE_STANDBY &&
+               app->input_len == 0u && !app->keyguard_locked) {
+        app->sms_storage_warning = false;
+        open_display_sid(app, 0u, 0x3b3u, "Not\nsaved", APP_ROUTE_STANDBY, now);
+        changed = true;
     }
 
-    modem_sms_mailbox_result_t mailbox_result;
-    bool mailbox_terminal = app->messages_open_request_id != 0u &&
-        modem_service_pop_sms_mailbox_result(app->messages_open_request_id,
-                                             &mailbox_result);
-    if (mailbox_terminal && !app->messages_open_pending) {
+    message_result_t result;
+    if (message_service_pop_result(app->messages_open_request_id, &result, NULL)) {
         app->messages_open_request_id = 0u;
-        app->sms_status_sync_silent = false;
-        if (app->sms_open_deferred) {
-            app->sms_open_deferred = false;
-            open_messages_mailbox(
-                app, (messages_kind_t)app->sms_open_deferred_kind, now);
+        if (app->messages_open_pending) {
+            app->messages_open_pending = false;
+            if (result.kind == MESSAGE_OP_LIST && result.outcome == MESSAGE_RESULT_OK) {
+                if (app->messages_kind == MESSAGES_KIND_INBOX) app->sms_inbox_count = result.count;
+                else app->sms_outbox_count = result.count;
+                app->sms_cache_revision = result.revision;
+                app->messages_mode = MESSAGES_MODE_LIST;
+                app->messages_selected = 0u;
+                for (uint16_t i = 0u; i < result.count; i++)
+                    if (app->sms_inbox[i].id == app->sms_list_selected_id) app->messages_selected = i;
+                if (current_sms_count(app) == 0u) sms_open_empty_notice(app, now);
+                else { app->route = APP_ROUTE_MESSAGES_LIST; app->display_record_id = 0u; }
+            } else {
+                open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MESSAGES_MENU, now);
+            }
         }
         changed = true;
-    } else if (mailbox_terminal &&
-               mailbox_result.kind != MODEM_SMS_REQUEST_MAILBOX) {
-        mailbox_result.outcome = MODEM_SMS_OUTCOME_ERROR;
-    }
-    if (app->messages_open_pending) {
-        if (mailbox_terminal) {
-            if (app->sms_status_sync_silent) {
-                /* Silent background scan: refresh the envelope straight from the
-                 * modem cache without touching the current mailbox UI. */
-                app->messages_open_pending = false;
-                app->messages_open_request_id = 0u;
-                app->sms_status_sync_silent = false;
-                bool current = app->sms_mailbox_received_count_at_start ==
-                               app->last_modem_sms_received_count;
-                if (mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-                    current && sms_sync_unread_from_modem_cache(
-                                   app, mailbox_result.complete)) {
-                    app->sms_status_sync_pending = false;
-                    app->sms_boot_status_sync_done = true;
-                } else if (mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-                           !current) {
-                    LOGI("sms", "status scan crossed by arrival; retrying");
-                }
-                if (app->sms_open_deferred) {
-                    /* A user open arrived during the scan -- run it now on the
-                     * freed result slot. */
-                    app->sms_open_deferred = false;
-                    open_messages_mailbox(app, (messages_kind_t)app->sms_open_deferred_kind, now);
-                }
-                changed = true;
-                return changed;
-            }
-            app->messages_open_pending = false;
-            app->messages_open_request_id = 0u;
-            if (!sms_async_ui_active(app)) {
-                /* A call or another top-level flow replaced the Opening dialog.
-                 * Drain this operation's result without stealing the route back. */
-                changed = true;
-                return changed;
-            }
-            app->messages_mode = MESSAGES_MODE_LIST;
-            app->messages_selected = 0u;
-            app->messages_read_page = 0u;
-            app->messages_read_scroll = 0u;
-            if (mailbox_result.outcome != MODEM_SMS_OUTCOME_OK) {
-                if (mailbox_result.sim_not_ready) {
-                    open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_MAIN_MENU, now);
-                } else {
-                    open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MAIN_MENU, now);
-                }
-                changed = true;
-                return changed;
-            }
-            load_sms_mailbox_from_modem(app, mailbox_result.complete);
-            uint8_t count = current_sms_count(app);
-            if (count == 0u) {
-                sms_open_empty_notice(app, now);
-            } else {
-                app->route = APP_ROUTE_MESSAGES_LIST;
-                app->display_record_id = 0u;
-                app->dirty = true;
-            }
-            changed = true;
-        } else if (time_diff_ms(now, app->messages_open_started_ms + SMS_MAILBOX_TIMEOUT_MS) >= 0) {
-            app->messages_open_pending = false;
-            if (app->sms_status_sync_silent) {
-                /* Background scan timed out: drop it silently -- never yank the
-                 * user out of standby with a failure dialog, and clear the flag
-                 * so a later real open is not mistaken for a silent reconcile.
-                 * If a user open was queued behind it, run that now. */
-                app->sms_status_sync_silent = false;
-                /* Keep a user open queued behind the still-owned request. Its
-                 * exact late terminal above frees the channel and starts it. */
-            } else if (sms_async_ui_active(app)) {
-                open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MAIN_MENU, now);
-            }
-            changed = true;
-        }
+    } else if (app->messages_open_pending &&
+               time_diff_ms(now, app->messages_open_started_ms + SMS_MAILBOX_TIMEOUT_MS) >= 0) {
+        app->messages_open_pending = false;
+        open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MESSAGES_MENU, now);
+        changed = true;
     }
 
-    modem_sms_read_result_t read_result;
-    bool read_terminal = app->sms_read_request_id != 0u &&
-        modem_service_pop_sms_read_result(app->sms_read_request_id,
-                                          &read_result);
-    if (read_terminal && !app->sms_read_waiting) {
+    static message_content_t read_content;
+    if (message_service_pop_result(app->sms_read_request_id, &result, &read_content)) {
         app->sms_read_request_id = 0u;
-        changed = true;
-    } else if (read_terminal && read_result.kind != MODEM_SMS_REQUEST_READ) {
-        read_result.outcome = MODEM_SMS_OUTCOME_ERROR;
-    }
-    if (app->sms_read_waiting) {
-        if (read_terminal) {
-            if (read_result.request_identity_hash !=
-                app->sms_read_identity_hash) {
-                LOGW("sms", "discarded stale read result hash=%08lx expected=%08lx",
-                     (unsigned long)read_result.request_identity_hash,
-                     (unsigned long)app->sms_read_identity_hash);
-                read_result.outcome = MODEM_SMS_OUTCOME_ERROR;
-            }
+        if (app->sms_read_waiting) {
             app->sms_read_waiting = false;
-            app->sms_read_request_id = 0u;
-            if (!sms_async_ui_active(app)) {
-                memset(&app->sms_selected_content, 0,
-                       sizeof(app->sms_selected_content));
-                changed = true;
-                return changed;
-            }
             const app_sms_record_t *record = current_sms_record_const(app);
-            bool valid = read_result.outcome == MODEM_SMS_OUTCOME_OK &&
-                         record != NULL &&
-                         read_result.identity_hash == app->sms_read_identity_hash &&
-                         read_result.identity_hash == record->identity_hash &&
-                         copy_modem_sms_content(&app->sms_selected_content,
-                                                &read_result.message) &&
-                         app->sms_selected_content.picture == record->picture;
-            if (valid) {
+            if (result.kind == MESSAGE_OP_READ && result.outcome == MESSAGE_RESULT_OK &&
+                record != NULL && result.object_id == app->sms_read_object_id &&
+                result.object_id == record->id &&
+                read_content.metadata.id == result.object_id) {
+                memset(&app->sms_selected_content, 0, sizeof(app->sms_selected_content));
+                app->sms_selected_content.valid = true;
+                copy_text(app->sms_selected_content.text, sizeof(app->sms_selected_content.text),
+                          read_content.metadata.binary ? ts_or(SID_DATA_MESSAGE, "Data message") : read_content.text);
                 app->messages_mode = MESSAGES_MODE_READ;
                 app->messages_read_page = 0u;
                 app->messages_read_scroll = 0u;
                 app->route = APP_ROUTE_MESSAGES_LIST;
                 app->display_record_id = 0u;
                 messages_mark_current_read(app);
-                app->dirty = true;
-            } else if (read_result.sim_not_ready) {
-                open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready",
-                                 APP_ROUTE_MESSAGES_MENU, now);
             } else {
-                memset(&app->sms_selected_content, 0,
-                       sizeof(app->sms_selected_content));
-                open_display(app, 0u, "Message", "function", "failed",
-                             APP_ROUTE_MESSAGES_LIST, now);
+                memset(&app->sms_selected_content, 0, sizeof(app->sms_selected_content));
+                open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MESSAGES_LIST, now);
             }
-            changed = true;
-        } else if (time_diff_ms(now,
-                                app->sms_read_started_ms +
-                                    SMS_READ_TIMEOUT_MS) >= 0) {
-            app->sms_read_waiting = false;
-            memset(&app->sms_selected_content, 0,
-                   sizeof(app->sms_selected_content));
-            if (sms_async_ui_active(app)) {
-                open_display(app, 0u, "Message", "function", "failed",
-                             APP_ROUTE_MESSAGES_LIST, now);
-            }
-            changed = true;
         }
+        changed = true;
+    } else if (app->sms_read_waiting &&
+               time_diff_ms(now, app->sms_read_started_ms + SMS_READ_TIMEOUT_MS) >= 0) {
+        app->sms_read_waiting = false;
+        open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MESSAGES_LIST, now);
+        changed = true;
     }
 
-    modem_sms_delete_result_t delete_result;
-    bool delete_terminal = app->sms_delete_request_id != 0u &&
-        modem_service_pop_sms_delete_result(app->sms_delete_request_id,
-                                            &delete_result);
-    if (delete_terminal && !app->sms_delete_waiting) {
-        if (delete_result.kind == MODEM_SMS_REQUEST_DELETE &&
-            delete_result.outcome == MODEM_SMS_OUTCOME_OK) {
-            app->sms_status_sync_pending = true;
-        }
+    if (message_service_pop_result(app->sms_delete_request_id, &result, NULL)) {
         app->sms_delete_request_id = 0u;
-        changed = true;
-    } else if (delete_terminal &&
-               delete_result.kind != MODEM_SMS_REQUEST_DELETE) {
-        delete_result.outcome = MODEM_SMS_OUTCOME_ERROR;
-    }
-    if (app->sms_delete_waiting) {
-        if (delete_terminal) {
+        if (app->sms_delete_waiting) {
             app->sms_delete_waiting = false;
-            app->sms_delete_request_id = 0u;
-            if (delete_result.outcome == MODEM_SMS_OUTCOME_OK) {
+            const app_sms_record_t *record = current_sms_record_const(app);
+            if (result.kind == MESSAGE_OP_DELETE && result.outcome == MESSAGE_RESULT_OK &&
+                record != NULL && record->id == result.object_id &&
+                result.object_id == app->sms_delete_object_id) {
                 sms_remove_current_local(app, now);
-            } else if (delete_result.sim_not_ready) {
-                open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_MAIN_MENU, now);
-            } else if (delete_result.outcome ==
-                       MODEM_SMS_OUTCOME_UNCERTAIN) {
-                open_display_sid(app, 0u, 0x229u, "Result\nunknown",
-                                 APP_ROUTE_MESSAGES_LIST, now);
             } else {
                 open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MESSAGES_LIST, now);
             }
-            changed = true;
-        } else if (time_diff_ms(now, app->sms_delete_started_ms + SMS_DELETE_TIMEOUT_MS) >= 0) {
-            app->sms_delete_waiting = false;
-            open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MESSAGES_LIST, now);
-            changed = true;
         }
+        changed = true;
+    } else if (app->sms_delete_waiting &&
+               time_diff_ms(now, app->sms_delete_started_ms + SMS_DELETE_TIMEOUT_MS) >= 0) {
+        app->sms_delete_waiting = false;
+        open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MESSAGES_LIST, now);
+        changed = true;
     }
 
-    modem_sms_save_result_t save_result;
-    bool save_terminal = app->sms_save_request_id != 0u &&
-        modem_service_pop_sms_save_result(app->sms_save_request_id,
-                                          &save_result);
-    if (save_terminal && !app->sms_save_waiting) {
+    if (message_service_pop_result(app->sms_save_request_id, &result, NULL)) {
         app->sms_save_request_id = 0u;
-        changed = true;
-    } else if (save_terminal && save_result.kind != MODEM_SMS_REQUEST_SAVE) {
-        save_result.outcome = MODEM_SMS_OUTCOME_ERROR;
-    }
-    if (app->sms_save_waiting) {
-        if (save_terminal) {
+        if (app->sms_save_waiting) {
             app->sms_save_waiting = false;
-            app->sms_save_request_id = 0u;
-            if (save_result.outcome == MODEM_SMS_OUTCOME_OK) {
+            if (result.kind == MESSAGE_OP_SAVE && result.outcome == MESSAGE_RESULT_OK)
                 open_display_sid(app, 3u, 0x365u, "Message\nsaved", APP_ROUTE_SMS_COMPOSER, now);
-            } else if (save_result.sim_not_ready) {
-                open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_SMS_COMPOSER, now);
-            } else if (save_result.outcome == MODEM_SMS_OUTCOME_UNCERTAIN) {
-                open_display_sid(app, 0u, 0x229u, "Result\nunknown",
-                                 APP_ROUTE_SMS_COMPOSER, now);
-            } else {
-                open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_SMS_COMPOSER, now);
-            }
-            changed = true;
-        } else if (time_diff_ms(now, app->sms_save_started_ms + SMS_SAVE_TIMEOUT_MS) >= 0) {
-            app->sms_save_waiting = false;
-            open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_SMS_COMPOSER, now);
-            changed = true;
+            else if (result.outcome == MESSAGE_RESULT_FULL)
+                open_display_sid(app, 0u, 0x280u, "Memory full", APP_ROUTE_SMS_COMPOSER, now);
+            else
+                open_display_sid(app, 0u, 0x3b3u, "Not\nsaved", APP_ROUTE_SMS_COMPOSER, now);
         }
+        changed = true;
+    } else if (app->sms_save_waiting &&
+               time_diff_ms(now, app->sms_save_started_ms + SMS_SAVE_TIMEOUT_MS) >= 0) {
+        app->sms_save_waiting = false;
+        open_display_sid(app, 0u, 0x3b3u, "Not\nsaved", APP_ROUTE_SMS_COMPOSER, now);
+        changed = true;
+    }
+    if (local.ready && app->sms_cache_revision != local.revision &&
+        app->route == APP_ROUTE_MESSAGES_LIST && app->messages_mode == MESSAGES_MODE_LIST &&
+        (app->messages_kind == MESSAGES_KIND_INBOX || app->messages_kind == MESSAGES_KIND_OUTBOX) &&
+        app->messages_open_request_id == 0u && app->sms_read_request_id == 0u &&
+        app->sms_delete_request_id == 0u) {
+        const app_sms_record_t *record = current_sms_record_const(app);
+        uint32_t selected_id = record != NULL ? record->id : 0u;
+        open_messages_mailbox(app, (messages_kind_t)app->messages_kind, now);
+        app->sms_list_selected_id = selected_id;
+        changed = true;
     }
 
     modem_sms_send_result_t send_result;
@@ -1187,76 +943,9 @@ void open_messages_menu(app_t *app, uint8_t selected) {
     app->dirty = true;
 }
 
-/* Background inbox scan that only refreshes authoritative Telit read status --
- * no UI change and no "Opening" dialog. Skips if an open is already pending,
- * the SIM is not ready, or call control owns the modem. */
-static bool sms_request_silent_status_sync(app_t *app, uint32_t now) {
-    if (app->messages_open_pending) {
-        return false;
-    }
-    modem_status_t status;
-    modem_service_get_status(&status);
-    if (!status.sim_ready || status.call_state == MODEM_CALL_RINGING ||
-        status.call_state == MODEM_CALL_ANSWERING ||
-        status.call_state == MODEM_CALL_ENDING || status.waiting_call ||
-        status.ring_active) {
-        return false;
-    }
-    uint32_t request_id = 0u;
-    if (!modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX,
-                                           &request_id)) {
-        return false;
-    }
-    /* Deliberately does NOT touch app->messages_kind / app->sms_inbox. Remember
-     * the arrival generation so completion cannot publish a view made stale by
-     * a +CMTI received while CMGL/CMGR was in progress. */
-    app->messages_open_pending = true;
-    app->messages_open_request_id = request_id;
-    app->sms_status_sync_silent = true;
-    app->sms_mailbox_received_count_at_start = status.sms_received_count;
-    app->messages_open_started_ms = now;
-    return true;
-}
-
-/* Replace the envelope count from a complete protected inbox view without
- * copying rows into the app's current mailbox buffer. */
-static bool sms_sync_unread_from_modem_cache(app_t *app, bool complete) {
-    if (!complete) {
-        return false;
-    }
-    uint8_t count = modem_service_sms_mailbox_count();
-    uint16_t unread = 0u;
-    for (uint16_t i = 0u; i < count; i++) {
-        modem_sms_record_t m;
-        if (!modem_service_sms_mailbox_entry((uint8_t)i, &m)) {
-            return false;
-        }
-        if (sms_status_is_unread(m.status)) {
-            unread++;
-        }
-    }
-    app->sms_unread_count = (uint8_t)unread;
-    LOGI("sms", "status sync seen=%u unread=%u",
-         (unsigned)count, (unsigned)app->sms_unread_count);
-    return true;
-}
-
 void open_messages_mailbox(app_t *app, messages_kind_t kind, uint32_t now) {
-    /* A background status sync owns the single mailbox-result slot. Queue this
-     * user open behind it; a second request cannot be admitted until the exact
-     * first terminal is consumed. Pictures don't use the modem, so they never
-     * collide. */
-    if (kind != MESSAGES_KIND_PICTURES &&
-        app->messages_open_request_id != 0u) {
-        if (app->messages_open_pending && app->sms_status_sync_silent) {
-            app->sms_open_deferred = true;
-            app->sms_open_deferred_kind = (uint8_t)kind;
-            open_display_sid(app, 35u, 0x33du, "Opening",
-                             APP_ROUTE_MESSAGES_LIST, now);
-        } else {
-            open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy",
-                             APP_ROUTE_MAIN_MENU, now);
-        }
+    if (kind != MESSAGES_KIND_PICTURES && app->messages_open_request_id != 0u) {
+        open_display_sid(app, 0u, 0x20fu, "Not allowed", APP_ROUTE_MESSAGES_MENU, now);
         return;
     }
     app->messages_kind = (uint8_t)kind;
@@ -1264,14 +953,10 @@ void open_messages_mailbox(app_t *app, messages_kind_t kind, uint32_t now) {
     app->messages_selected = 0u;
     app->messages_read_page = 0u;
     app->messages_read_scroll = 0u;
-    memset(&app->sms_selected_content, 0,
-           sizeof(app->sms_selected_content));
+    memset(&app->sms_selected_content, 0, sizeof(app->sms_selected_content));
     app->sms_read_waiting = false;
-    if (!app->sms_status_sync_silent) {
-        app->messages_open_pending = false;
-    }
+    app->messages_open_pending = false;
     app->messages_open_started_ms = now;
-
     if (kind == MESSAGES_KIND_PICTURES) {
         messages_picture_open_list(app);
         return;
@@ -1280,24 +965,15 @@ void open_messages_mailbox(app_t *app, messages_kind_t kind, uint32_t now) {
         app->sms_received_pending = false;
         app->sms_received_pending_count = 0u;
     }
-
-    modem_status_t status;
-    modem_service_get_status(&status);
-    if (!status.sim_ready) {
-        open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_MAIN_MENU, now);
-        return;
-    }
-    modem_sms_mailbox_t mailbox = kind == MESSAGES_KIND_OUTBOX
-        ? MODEM_SMS_MAILBOX_OUTBOX
-        : MODEM_SMS_MAILBOX_INBOX;
+    message_mailbox_t mailbox = kind == MESSAGES_KIND_OUTBOX ? MESSAGE_OUTBOX : MESSAGE_INBOX;
     uint32_t request_id = 0u;
-    if (!modem_service_request_sms_mailbox(mailbox, &request_id)) {
-        open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy", APP_ROUTE_MAIN_MENU, now);
+    if (!message_service_request_list(mailbox, app->sms_inbox, APP_SMS_RECORD_LIMIT, &request_id)) {
+        open_display_sid(app, 0u, 0x20fu, "Not allowed", APP_ROUTE_MESSAGES_MENU, now);
         return;
     }
     app->messages_open_pending = true;
     app->messages_open_request_id = request_id;
-    app->sms_mailbox_received_count_at_start = status.sms_received_count;
+    app->sms_list_selected_id = 0u;
     open_display_sid(app, 35u, 0x33du, "Opening", APP_ROUTE_MESSAGES_LIST, now);
 }
 
@@ -1336,180 +1012,49 @@ void start_sms_send(app_t *app, const char *recipient, const char *text, app_rou
     open_display_sid(app, 46u, 0x35fu, "Sending\nmessage", return_route, now);
 }
 
-static bool copy_modem_sms_record(app_sms_record_t *dst,
-                                  const modem_sms_record_t *src) {
-    if (dst == NULL || src == NULL || src->index_count == 0u ||
-        src->index_count > MODEM_SMS_SEGMENT_MAX) {
-        return false;
-    }
-    memset(dst, 0, sizeof(*dst));
-    memcpy(dst->modem_indices, src->indices,
-           src->index_count * sizeof(src->indices[0]));
-    dst->modem_index_count = src->index_count;
-    dst->identity_hash = src->identity_hash;
-    dst->from_storage = true;
-    dst->picture = src->picture;
-    dst->quarantined = src->quarantined;
-    copy_text(dst->status, sizeof(dst->status), src->status);
-    copy_text(dst->address, sizeof(dst->address), src->sender);
-    copy_text(dst->timestamp, sizeof(dst->timestamp), src->timestamp);
-    return true;
-}
-
-static bool copy_modem_sms_content(app_sms_content_t *dst,
-                                   const modem_sms_message_t *src) {
-    if (dst == NULL || src == NULL) {
-        return false;
-    }
-    memset(dst, 0, sizeof(*dst));
-    if (src->binary && src->has_ports &&
-        src->dest_port == SMS_CODEC_PICTURE_PORT &&
-        sms_picture_payload_decode(src->binary_data, src->binary_len, &dst->picture_message)) {
-        dst->picture = true;
-        dst->valid = true;
-        return true;
-    }
-    if (src->binary || src->has_ports) {
-        /* Port-addressed SMS is application data even when TP-DCS uses GSM7.
-         * Nokia v6.00 exposes unsupported stored payloads as "Data message";
-         * never render carrier control text (for example VVM credentials). */
-        copy_text(dst->text, sizeof(dst->text), "Data message");
-    } else {
-        copy_text(dst->text, sizeof(dst->text), src->text);
-    }
-    dst->valid = true;
-    return true;
-}
-
-static void load_sms_mailbox_from_modem(app_t *app, bool complete) {
-    app_sms_record_t *records = app->messages_kind == MESSAGES_KIND_OUTBOX ? app->sms_outbox : app->sms_inbox;
-    uint8_t *count_ptr = app->messages_kind == MESSAGES_KIND_OUTBOX ? &app->sms_outbox_count : &app->sms_inbox_count;
-    uint8_t count = modem_service_sms_mailbox_count();
-    *count_ptr = 0u;
-    for (uint8_t i = 0u; i < count; i++) {
-        modem_sms_record_t message;
-        if (modem_service_sms_mailbox_entry(i, &message)) {
-            if (copy_modem_sms_record(&records[*count_ptr], &message)) {
-                (*count_ptr)++;
-            }
-        }
-    }
-    if (app->messages_kind == MESSAGES_KIND_INBOX) {
-        sms_sort_inbox_unread_first(records, *count_ptr);
-        bool current = app->sms_mailbox_received_count_at_start ==
-                       app->last_modem_sms_received_count;
-        if (complete && *count_ptr == count && current) {
-            app->sms_unread_count = sms_count_unread_rows(records, *count_ptr);
-            app->sms_status_sync_pending = false;
-            app->sms_boot_status_sync_done = true;
-        } else if (complete && !current) {
-            app->sms_status_sync_pending = true;
-        }
-    }
-}
-
-static bool sms_status_is_unread(const char *status) {
-    return status != NULL && strstr(status, "UNREAD") != NULL;
-}
-
-static uint8_t sms_count_unread_rows(const app_sms_record_t *records, uint8_t count) {
-    uint8_t unread = 0u;
-    for (uint16_t i = 0u; i < count; i++) {
-        if (sms_status_is_unread(records[i].status)) {
-            unread++;
-        }
-    }
-    return unread;
-}
-
-/* Row ordering key: unread rows first (v6.00 dispatcher lists status 3/unread
- * before status 1/read), then newest-first within each group. The SMS timestamp
- * is fixed-width "YY/MM/DD,HH:MM:SS..." so a plain strncmp is chronological; a
- * larger string is later, hence sorts earlier (descending). Returns true if `a`
- * should be placed before `b`. */
-static bool sms_row_orders_before(const app_sms_record_t *a, const app_sms_record_t *b) {
-    bool a_unread = sms_status_is_unread(a->status);
-    bool b_unread = sms_status_is_unread(b->status);
-    if (a_unread != b_unread) {
-        return a_unread; /* unread ahead of read */
-    }
-    return strncmp(a->timestamp, b->timestamp, SMS_TIMESTAMP_SORT_LEN) > 0; /* newer first */
-}
-
-/* Stable insertion sort by sms_row_orders_before: unread first, newest first. */
-static void sms_sort_inbox_unread_first(app_sms_record_t *records, uint8_t count) {
-    for (uint16_t i = 1u; i < count; i++) {
-        app_sms_record_t key = records[i];
-        uint16_t j = i;
-        while (j > 0u && sms_row_orders_before(&key, &records[j - 1u])) {
-            records[j] = records[j - 1u];
-            j--;
-        }
-        records[j] = key;
-    }
-}
-
-/* A successful selected CMGR runs with Telit status consumption enabled. Mirror
- * that confirmed transition in the loaded row so its icon and envelope update
- * immediately; the next protected scan reads the same state back from Telit. */
+/* Mirror the already committed local read-state transition in this view. */
 static void messages_mark_current_read(app_t *app) {
     if (app->messages_kind != MESSAGES_KIND_INBOX) {
         return;
     }
-    uint8_t count = app->sms_inbox_count;
+    uint16_t count = app->sms_inbox_count;
     if (count == 0u) {
         return;
     }
-    uint8_t selected = app->messages_selected >= count ? (uint8_t)(count - 1u) : app->messages_selected;
+    uint16_t selected = app->messages_selected >= count ? (uint16_t)(count - 1u) : app->messages_selected;
     app_sms_record_t *record = &app->sms_inbox[selected];
-    if (sms_status_is_unread(record->status)) {
-        copy_text(record->status, sizeof(record->status), "REC READ");
-        if (app->sms_unread_count > 0u) {
-            app->sms_unread_count--;
-        }
-    }
+    record->read = true;
 }
 
 static const app_sms_record_t *current_sms_record_const(const app_t *app) {
-    uint8_t count = current_sms_count(app);
+    uint16_t count = current_sms_count(app);
     if (count == 0u || app->messages_kind == MESSAGES_KIND_PICTURES) {
         return 0;
     }
-    uint8_t selected = app->messages_selected >= count ? (uint8_t)(count - 1u) : app->messages_selected;
+    uint16_t selected = app->messages_selected >= count ? (uint16_t)(count - 1u) : app->messages_selected;
     return app->messages_kind == MESSAGES_KIND_OUTBOX ? &app->sms_outbox[selected] : &app->sms_inbox[selected];
 }
 
-static uint8_t current_sms_count(const app_t *app) {
+static uint16_t current_sms_count(const app_t *app) {
     return app->messages_kind == MESSAGES_KIND_OUTBOX ? app->sms_outbox_count : app->sms_inbox_count;
 }
 
 static void sms_begin_read_current(app_t *app, uint32_t now) {
     const app_sms_record_t *record = current_sms_record_const(app);
-    if (record == NULL || record->modem_index_count == 0u ||
-        record->modem_index_count > MODEM_SMS_SEGMENT_MAX) {
-        open_display(app, 0u, "Message", "function", "failed",
-                     APP_ROUTE_MESSAGES_LIST, now);
-        return;
-    }
+    if (record == NULL || record->id == 0u) return;
     uint32_t request_id = 0u;
-    if (app->sms_read_waiting ||
-        !modem_service_request_sms_read(record->modem_indices,
-                                        record->modem_index_count,
-                                        record->quarantined,
-                                        record->identity_hash,
-                                        &request_id)) {
-        open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy",
-                         APP_ROUTE_MESSAGES_LIST, now);
+    if (app->sms_read_request_id != 0u || !message_service_request_read(
+            app->messages_kind == MESSAGES_KIND_OUTBOX ? MESSAGE_OUTBOX : MESSAGE_INBOX,
+            record->id, &request_id)) {
+        open_display_sid(app, 0u, 0x20fu, "Not allowed", APP_ROUTE_MESSAGES_LIST, now);
         return;
     }
-    memset(&app->sms_selected_content, 0,
-           sizeof(app->sms_selected_content));
+    memset(&app->sms_selected_content, 0, sizeof(app->sms_selected_content));
     app->sms_read_waiting = true;
     app->sms_read_request_id = request_id;
     app->sms_read_started_ms = now;
-    app->sms_read_identity_hash = record->identity_hash;
-    open_display_sid(app, 35u, 0x33du, "Opening",
-                     APP_ROUTE_MESSAGES_LIST, now);
+    app->sms_read_object_id = record->id;
+    open_display_sid(app, 35u, 0x33du, "Opening", APP_ROUTE_MESSAGES_LIST, now);
 }
 
 static bool sms_outbox_is_recipientless(const app_sms_record_t *record) {
@@ -1531,12 +1076,6 @@ static const char *sms_record_label(const app_sms_record_t *record,
         copy_text(scratch, cap, "");
         return scratch;
     }
-    if (record->picture) {
-        copy_text(scratch, cap, "Picture message");
-        return scratch;
-    }
-    /* v6.00 labels a saved recipient-less draft "Message" in Outbox instead
-     * of exposing its body as the list-row label. */
     if (outbox && sms_outbox_is_recipientless(record)) {
         copy_text(scratch, cap, ts_or(0x337u, "Message"));
         return scratch;
@@ -1678,62 +1217,40 @@ static void sms_use_number_candidate(const app_sms_record_t *record,
 }
 
 static void sms_delete_current(app_t *app, uint32_t now) {
-    uint8_t count = current_sms_count(app);
-    if (count == 0u) {
-        open_messages_menu(app, app->messages_kind == MESSAGES_KIND_OUTBOX ? 1u : 0u);
-        return;
-    }
     const app_sms_record_t *record = current_sms_record_const(app);
-    if (record != 0 && record->from_storage) {
-        /* Storage-backed record: delete every constituent modem slot. Index 0
-         * is valid; from_storage is the ownership discriminator. Local flash
-         * pictures fall through to the local removal below. */
-        modem_status_t status;
-        modem_service_get_status(&status);
-        if (!status.sim_ready) {
-            open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_MAIN_MENU, now);
-            return;
-        }
-        uint32_t request_id = 0u;
-        if (!modem_service_request_delete_sms_indices(
-                record->modem_indices, record->modem_index_count,
-                &request_id)) {
-            open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy", APP_ROUTE_MAIN_MENU, now);
-            return;
-        }
-        app->sms_delete_waiting = true;
-        app->sms_delete_request_id = request_id;
-        app->sms_delete_started_ms = now;
-        open_display_sid(app, 4u, 0x328u, "Erasing\nmessage", APP_ROUTE_MESSAGES_LIST, now);
+    if (record == NULL) return;
+    uint32_t request_id = 0u;
+    if (app->sms_delete_request_id != 0u || !message_service_request_delete(
+            app->messages_kind == MESSAGES_KIND_OUTBOX ? MESSAGE_OUTBOX : MESSAGE_INBOX,
+            record->id, &request_id)) {
+        open_display_sid(app, 0u, 0x20fu, "Not allowed", APP_ROUTE_MESSAGES_LIST, now);
         return;
     }
-    sms_remove_current_local(app, now);
+    app->sms_delete_waiting = true;
+    app->sms_delete_request_id = request_id;
+    app->sms_delete_object_id = record->id;
+    app->sms_delete_started_ms = now;
+    open_display_sid(app, 4u, 0x328u, "Erasing\nmessage", APP_ROUTE_MESSAGES_LIST, now);
 }
 
 static void sms_remove_current_local(app_t *app, uint32_t now) {
-    uint8_t count = current_sms_count(app);
+    uint16_t count = current_sms_count(app);
     if (count == 0u) {
         sms_open_empty_notice(app, now);
         return;
     }
     app_sms_record_t *records = app->messages_kind == MESSAGES_KIND_OUTBOX ? app->sms_outbox : app->sms_inbox;
-    uint8_t *count_ptr = app->messages_kind == MESSAGES_KIND_OUTBOX ? &app->sms_outbox_count : &app->sms_inbox_count;
-    uint8_t selected = app->messages_selected >= count ? (uint8_t)(count - 1u) : app->messages_selected;
-    /* The delete result confirms that this logical message (all of its modem
-     * segments) left the authoritative store. Reflect one unread logical row. */
-    if (app->messages_kind == MESSAGES_KIND_INBOX &&
-        sms_status_is_unread(records[selected].status) &&
-        app->sms_unread_count > 0u) {
-        app->sms_unread_count--;
-    }
-    for (uint8_t i = selected; i + 1u < count; i++) {
+    uint16_t *count_ptr = app->messages_kind == MESSAGES_KIND_OUTBOX ? &app->sms_outbox_count : &app->sms_inbox_count;
+    uint16_t selected = app->messages_selected >= count ? (uint16_t)(count - 1u) : app->messages_selected;
+    /* The complete logical message has left the local store. */
+    for (uint16_t i = selected; i + 1u < count; i++) {
         records[i] = records[i + 1u];
     }
     (*count_ptr)--;
     memset(&app->sms_selected_content, 0,
            sizeof(app->sms_selected_content));
     if (app->messages_selected >= *count_ptr && *count_ptr > 0u) {
-        app->messages_selected = (uint8_t)(*count_ptr - 1u);
+        app->messages_selected = (uint16_t)(*count_ptr - 1u);
     }
     app->messages_mode = MESSAGES_MODE_LIST;
     if (*count_ptr == 0u) {
@@ -1763,17 +1280,11 @@ void messages_save_composed_message(app_t *app, uint32_t now) {
         return;
     }
 
-    modem_status_t status;
-    modem_service_get_status(&status);
-    if (!status.sim_ready) {
-        open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_SMS_COMPOSER, now);
-        return;
-    }
     uint32_t request_id = 0u;
-    if (!modem_service_request_save_sms(
+    if (!message_service_request_save(
             app->sms_recipient_prefill, app->sms_composer_text,
             &request_id)) {
-        open_display_sid(app, 0u, 0x2b4u, "SIM card\nbusy", APP_ROUTE_SMS_COMPOSER, now);
+        open_display_sid(app, 0u, 0x20fu, "Not allowed", APP_ROUTE_SMS_COMPOSER, now);
         return;
     }
     app->sms_save_waiting = true;
@@ -1796,39 +1307,6 @@ static void sms_select_read_option(app_t *app, uint32_t now) {
         app->dirty = true;
         return;
     }
-    if (app->messages_kind == MESSAGES_KIND_INBOX && record->picture) {
-        uint8_t option = app->messages_option_selected;
-        if (option >= ARRAY_COUNT(MESSAGE_INBOX_PICTURE_OPTIONS)) {
-            option = 0u;
-        }
-        const char *label = MESSAGE_INBOX_PICTURE_OPTIONS[option];
-        if (strcmp(label, "Save") == 0) {
-            messages_picture_save_received(app, &content->picture_message, now);
-        } else if (strcmp(label, "Forward") == 0) {
-            open_display_sid(app, 2u, 0x17fu, "Save picture\nmessage first?", APP_ROUTE_MESSAGES_LIST, now);
-        } else if (strcmp(label, "Use number") == 0) {
-            char candidate[MODEM_PHONE_MAX + 1u];
-            sms_use_number_candidate(record, "", candidate,
-                                     sizeof(candidate));
-            if (candidate[0] == '\0') {
-                open_display_sid(app, 2u, 0x33au, "No number\nfound\non this screen", APP_ROUTE_MESSAGES_LIST, now);
-                return;
-            }
-            copy_text(app->input_text, sizeof(app->input_text), candidate);
-            app->input_len = (uint8_t)strlen(app->input_text);
-            app->input_action = APP_STANDBY_ACTION_CALL;
-            app->star_cycle_until_ms = 0u;
-            app->route = APP_ROUTE_STANDBY;
-            app->dirty = true;
-        } else if (strcmp(label, "Erase") == 0) {
-            sms_delete_current(app, now);
-        } else if (strcmp(label, "Details") == 0) {
-            app->messages_mode = MESSAGES_MODE_DETAIL;
-            app->messages_detail_page = 0u;
-            app->dirty = true;
-        }
-        return;
-    }
     uint8_t option = app->messages_option_selected;
     uint8_t option_count = app->messages_kind == MESSAGES_KIND_OUTBOX
         ? sms_outbox_option_count(record)
@@ -1840,6 +1318,12 @@ static void sms_select_read_option(app_t *app, uint32_t now) {
         ? MESSAGE_OUTBOX_OPTIONS[option]
         : MESSAGE_INBOX_OPTIONS[option];
     const char *body = content->text;
+    if ((strcmp(label, "Forward") == 0 || strcmp(label, "Edit") == 0 ||
+         strcmp(label, "Send") == 0) &&
+        (record->binary || strlen(body) > MODEM_SMS_TEXT_MAX)) {
+        open_display_sid(app, 0u, 0x20fu, "Not allowed", APP_ROUTE_MESSAGES_LIST, now);
+        return;
+    }
     if (strcmp(label, "Reply") == 0) {
         open_sms_composer(app, "", record->address, now);
     } else if (strcmp(label, "Forward") == 0) {

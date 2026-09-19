@@ -7,13 +7,13 @@ Rev B2 reserves the last 448 KiB of internal flash for two littlefs volumes:
 | Volume | Address range (inclusive) | Size | Current records |
 | --- | --- | --- | --- |
 | System | `0x10190000..0x1019ffff` | 64 KiB | Settings, board identity, battery and charge state |
-| User | `0x101a0000..0x101fffff` | 384 KiB | Call lists, T9, pictures, tones, divert history, contacts; future SMS |
+| User | `0x101a0000..0x101fffff` | 384 KiB | Call lists, T9, pictures, tones, divert history, contacts, SMS |
 
 The build guard protects both regions. All sixteen existing persistent units
 use littlefs. The old journal's flash allocation has been reclaimed. Its code
 is retained for a possible FRAM backend, but is not linked into normal firmware.
-Phonebook contacts are separate local files. Ordinary SMS bodies remain
-modem-backed in this stage.
+Contacts and logical SMS are separate local files, independent of SIM or
+carrier profile. The modem supplies transport only.
 
 littlefs v2.11.3 is vendored with its BSD-3-Clause license and a documented
 [local changes](../third_party/littlefs/README.sisu.md). Its adapter
@@ -118,9 +118,34 @@ readback and reuse after deletion, reconstructed usage after remount, the
 The chosen policy is **one file per logical SMS**, including multipart SMS.
 There will not be a separate file for each segment or a shared message database.
 Incomplete reception belongs in one per-message staging file, atomically replaced
-as parts arrive. The local message service and encoded-segment codec now have
-host coverage; routing modem reception and the mailbox UI through them is the
-next integration step. Ordinary SMS contents are still modem-backed until then.
+as parts arrive. Direct modem reception queues normalized DELIVER segments into
+the local service. Listing, reading, saving and deleting never send ME commands.
+Successful network sends queue a separate local sent copy; failure to save that
+copy cannot turn an accepted transmission into a retryable send failure.
+
+The RAM index holds at most 500 inbox and 500 outbox entries (12 bytes each),
+plus 64 pending identities. One shared UI metadata buffer holds 500 rows
+(34,000 bytes); only the selected body is decoded. List requests borrow that
+buffer until their exact completion token returns. The service fills it inside
+the storage window, and an incomplete list is never published. Together with the
+500-contact cache, these caches and codec scratch remain below the agreed
+roughly 100 KiB allowance.
+
+Files retain up to eight normal segments; conflicting fragments are preserved
+in a quarantined file rather than silently overwritten. Plain bodies decode
+into up to 2560 UTF-8 bytes. Compose/forward retains the current 160-byte draft
+limit: a larger received body can be read but is explicitly refused by edit/send
+instead of being truncated. Binary and quarantined content uses the translated
+Data message label. Complete recognized multipart voicemail controls are removed
+from staging before publication.
+
+The eight-entry receive/sent-copy RAM queue retries BUSY, I/O and FULL outcomes.
+A full outbox cannot block an incoming message behind it. Once staged, fragments
+survive reboot. Incomplete SMS currently have no automatic expiry; the 32 KiB
+staging budget and 64-entry bound are enforced. Queue overflow and malformed
+deliveries are reported as receive losses. Because the modem acknowledges the
+network before local commit, sudden power loss can still lose RAM-only arrivals;
+this is not end-to-end exactly-once delivery.
 
 Message bodies retain the encoded DELIVER segments in one versioned file.
 Read/unread state uses a fixed four-byte littlefs attribute, atomically updated
@@ -157,7 +182,7 @@ The historical stage-1 power-cut bench uses obsolete addresses and must not be
 flashed onto this layout. Its retained results describe that earlier test only.
 
 The C firmware exposes a typed local NVM service backed by littlefs.
-Contacts are local objects. Ordinary SMS contents remain modem-backed, while preferences, profile state,
+Contacts and SMS are local objects. Preferences, profile state,
 clock/alarm preferences, speed dials, call-register lists, T9 learned words,
 saved and pending picture messages, own-tone/composer drafts, call-divert editing
 history, and per-pack battery health/SOC evidence are stored through this layer.
@@ -168,8 +193,8 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
   handshake implemented in `nvm_flash_hal.c`.
 - `storage_lfs`: filesystem/block-device adapter and atomic opaque records.
 - `storage_objects`: independent user-record files with durable IDs, CRCs,
-  atomic replacement and directory iteration. Contacts use this interface;
-  ordinary SMS storage and multipart assembly are the next stage.
+  atomic replacement and directory iteration. Contacts, inbox, outbox and
+  incomplete SMS use this interface.
 - `storage_user_space`: category usage and budgets, enforced inside the adapter;
   application code never handles littlefs block numbers or allocation callbacks.
 - `storage_backend`: record read/write contract and board composition point.
@@ -229,18 +254,12 @@ The flash budget guard protects the combined 448 KiB reservation, leaving
 preserves the legacy ID/order contract and 16-bit diagnostics mask. Small
 records share filesystem metadata blocks instead of owning 8 KiB sector pairs.
 
-The removed SMS-status journal was unit 14. Removing it did not change the
-index, unit ID, or flash offset of any older live setting, call log, or semantic
-blob. Battery learning later reused that pair with a distinct payload magic, so
-an upgraded phone rejects stale SMS-status bytes before its first learner write.
-The charge supervisor retains legacy unit ID 15. Its stop
-latch is read before the first charger-enable output is driven after boot, so a
-reset cannot silently restart a software-terminated charge. Its fixed 128-byte
-`CGS4` payload persists maintenance rearm state, the automatic-rearm loop guard,
-and the latest qualified-FULL authorization. Deployed `CGS3` records migrate
-with an in-progress rearm guard consumed. `CGS2` records recover maintenance
-authority only from an intrinsically qualified terminal reason, while `CGS1`
-records remain unqualified.
+Battery learning occupies unit 14 and the charge supervisor unit 15. The charge
+stop latch is read before the first charger-enable output is driven after boot,
+so a reset cannot silently restart a software-terminated charge. The 128-byte
+`CGS4` payload persists maintenance rearm state, its automatic-rearm loop guard,
+and qualified-FULL authorization. Obsolete call, picture, learner and charge
+payloads are rejected; deployment starts from erased volumes, not legacy imports.
 
 ## Board IMEI provisioning
 
@@ -255,13 +274,9 @@ live diagnostic data, but that path cannot mutate the board identity.
 Loading a malformed serial clears only the serial field and re-arms first-run
 provisioning; Made, Repaired, Purchasing date, and flags are retained.
 
-Firmware predating the calls-domain Life timer stored a donor value at offset
-8 of the warranty payload and deferred its flash write until 30 accumulated
-call minutes. On upgrade, the store seeds the new lifetime counter from the
-largest of the new value, the legacy donor, and the surviving All-calls total.
-The donor slot remains read-only for migration safety because the two records
-cannot be committed atomically. Clear timers resets Last/All/Received/Dialled
-only; it never resets the service Life timer.
+The Life timer belongs only to call accounting. Clear timers resets
+Last/All/Received/Dialled, never the service Life timer. No warranty donor or
+All-calls migration runs during initialization.
 
 The v6.00 `*#06#` presentation is preserved: PPM record index 337 (runtime SID
 `0x18b`) is rendered by display record `0x1f` in FS0 over the full 84-pixel
@@ -296,30 +311,16 @@ records, and IDs above 65535. The old modem phonebook protocol is removed.
 
 ## SMS read/unread ownership
 
-The 3210 ordinary SMS mailbox uses the SIM and reads the GSM status octet for its four
-inbox icons (read 42 / unread 43 / sent 44 / unsent 45). On the Telit WWX,
-`AT#SMSUCS=1` prevents `CMGL` and `CMGR` from changing `REC UNREAD` to
-`REC READ`; this behavior was verified on the live module. The modem status is
-therefore the sole read/unread authority, and no SMS status is persisted in RP
-flash for ordinary SMS. Picture messages use the separate host-owned workflow.
+The local service owns read/unread state. Listing leaves attributes unchanged;
+an explicit successful body read commits the selected message's read flag.
+The boot scan rebuilds the unread count from durable attributes. Reception
+increments the arrival counter only after a complete logical message has been
+published, not for every transport fragment.
 
-- Metadata scans first issue `AT#SMSUCS=1`, then list/read the mailbox with
-  status preservation enabled.
-- An explicit user body-open issues `AT#SMSUCS=0`, reads the selected logical
-  message, and restores `AT#SMSUCS=1` on success, error, timeout, or preemption.
-  Only that selected message becomes read.
-- A complete protected inbox scan replaces the RAM unread count directly from
-  `REC UNREAD` rows. Incomplete or malformed scans cannot replace a known count.
-- `+CMTI` increments the envelope immediately and leaves a status sync pending.
-  The scan records the arrival counter at admission; if another `+CMTI` crosses
-  the scan, its result is not published and a clean scan is retried.
-- Compact row metadata and a content identity remain in RAM for lazy body reads.
-  The identity rejects a read if a reusable modem slot changed between listing
-  and selection; it is not a read-state database.
-
-Row order (inbox): unread first, then newest-first — `strncmp` on the fixed-width
-`YY/MM/DD,HH:MM:SS` timestamp is chronological, so a descending compare floats the
-newest to the top within each read/unread group.
+Inbox order is unread first, then newest timestamp and durable ID. Selection,
+read, delete and completion tokens use durable IDs, never reusable modem slot
+numbers. SIM removal, carrier-profile switches and modem reboots do not clear
+mailboxes or their read state. The original read/unread/sent/unsent icons remain.
 
 ## Call Records
 

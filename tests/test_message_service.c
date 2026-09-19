@@ -86,9 +86,28 @@ static message_result_t result(uint32_t token, bool read) {
     assert(message_service_pop_result(token, &r, read ? &content : NULL));
     assert(!message_service_pop_result(token, &r, NULL)); return r;
 }
+
+static void make_control_pdu(char *out, uint8_t seq, const char *text) {
+    sms_deliver_t d = {0};
+    strcpy(d.address, "+18135550123");
+    assert(sms_deliver_scts_encode(2026, 9, 19, 12, 0, seq, 0, d.scts));
+    d.dcs = 4u; d.udhi = true;
+    const uint8_t header[] = {11, 0, 3, 17, 2, seq, 5, 4, 0x15, 0x7c, 0, 0};
+    memcpy(d.ud, header, sizeof(header));
+    size_t n = strlen(text);
+    assert(n <= sizeof(d.ud) - sizeof(header));
+    memcpy(d.ud + sizeof(header), text, n);
+    d.udl = d.ud_len = (uint8_t)(sizeof(header) + n);
+    uint8_t len;
+    assert(sms_deliver_build(&d, out, SMS_DELIVER_HEX_MAX, &len));
+}
 static uint32_t first_id(message_mailbox_t box) {
-    message_metadata_t meta;
-    assert(message_service_entry(box, 0, &meta)); return meta.id;
+    static message_metadata_t rows[MESSAGE_MAILBOX_LIMIT];
+    uint32_t token;
+    assert(message_service_request_list(box, rows, MESSAGE_MAILBOX_LIMIT, &token));
+    message_result_t r = result(token, false);
+    assert(r.outcome == MESSAGE_RESULT_OK && r.count > 0u);
+    return rows[0].id;
 }
 
 static void test_codec(void) {
@@ -155,7 +174,8 @@ static void test_mailboxes(void) {
     assert(status().unread == 0u && status().received == 0u);
     assert(message_service_receive(pdu[0])); drain();
     assert(status().inbox == 1u && status().received == 0u);
-    assert(message_service_request_list(MESSAGE_INBOX, &token));
+    static message_metadata_t rows[MESSAGE_MAILBOX_LIMIT];
+    assert(message_service_request_list(MESSAGE_INBOX, rows, MESSAGE_MAILBOX_LIMIT, &token));
     assert(result(token, false).outcome == MESSAGE_RESULT_OK);
     assert(message_service_request_delete(MESSAGE_INBOX, inbox, &token));
     assert(result(token, false).outcome == MESSAGE_RESULT_OK);
@@ -163,6 +183,20 @@ static void test_mailboxes(void) {
 }
 
 static void test_multipart(void) {
+    fresh();
+    make_control_pdu(pdu[0], 1u, "//VVM:SYNC:");
+    make_control_pdu(pdu[1], 2u, "ev=NM;id=123;");
+    assert(message_service_receive(pdu[0])); drain();
+    assert(status().pending == 1u && status().filtered_controls == 0u);
+    reopen();
+    assert(message_service_receive(pdu[1])); drain();
+    assert(status().pending == 0u && status().inbox == 0u &&
+           status().received == 0u && status().filtered_controls == 1u);
+    make_control_pdu(pdu[1], 2u, "not a control");
+    assert(message_service_receive(pdu[0]));
+    assert(message_service_receive(pdu[1])); drain();
+    assert(status().inbox == 1u && status().filtered_controls == 1u);
+
     fresh();
     char text[68]; memset(text, 'A', 67); text[67] = 0;
     for (unsigned i = 0; i < 8; i++) {
@@ -252,7 +286,93 @@ static void test_busy_and_full(void) {
     assert(status().pending == 0u);
 }
 
+static void test_sent_copy_and_category_isolation(void) {
+    fresh();
+    assert(message_service_sent("123", "Network accepted"));
+    drain();
+    uint32_t sent = first_id(MESSAGE_OUTBOX), token;
+    reopen();
+    assert(message_service_request_read(MESSAGE_OUTBOX, sent, &token));
+    assert(result(token, true).outcome == MESSAGE_RESULT_OK && content.metadata.sent &&
+           strcmp(content.text, "Network accepted") == 0);
+    assert(message_file_draft(&file, "123", "Category fill"));
+    size_t len;
+    assert(message_file_encode(&file, wire, sizeof(wire), &len));
+    unsigned added = 0;
+    for (;;) {
+        uint32_t id;
+        assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);
+        storage_record_result_t rc = storage_object_write(STORAGE_OBJECT_OUTBOX, id, wire, len);
+        if (rc == STORAGE_RECORD_FULL) break;
+        assert(rc == STORAGE_RECORD_OK);
+        assert(++added < MESSAGE_MAILBOX_LIMIT);
+    }
+    reopen();
+    unsigned count = status().outbox;
+    assert(message_service_sent("123", "Waiting for outbox room"));
+    make_pdu(pdu[0], 1, 1, 0, 40, "Inbox must remain available");
+    assert(message_service_receive(pdu[0]));
+    drain();
+    assert(status().inbox == 1u && status().outbox == count && status().queued == 1u);
+    /* Reclaim a whole quota block, then the exact held sent copy can commit. */
+    for (unsigned n = 0; n < 16u && status().queued; n++) {
+        assert(message_service_request_delete(MESSAGE_OUTBOX, first_id(MESSAGE_OUTBOX), &token));
+        assert(result(token, false).outcome == MESSAGE_RESULT_OK);
+        drain();
+    }
+    assert(status().queued == 0u && status().inbox == 1u);
+    printf("outbox budget held %u compact records; full outbox did not block inbox\n", count);
+}
+
+static void test_io_retry_and_corrupt_record(void) {
+    fresh();
+    make_pdu(pdu[0], 1, 1, 0, 45, "Retained across an I/O error");
+    assert(message_service_receive(pdu[0]));
+    io_error = true; tick();
+    assert(status().queued == 1u && status().storage_error && !status().ready);
+    io_error = false; drain();
+    assert(status().inbox == 1u && status().queued == 0u && !status().storage_error);
+    uint32_t id = first_id(MESSAGE_INBOX);
+    assert(storage_object_write(STORAGE_OBJECT_INBOX, id, (const uint8_t *)"bad", 3u) == STORAGE_RECORD_OK);
+    reopen();
+    assert(!status().ready && status().storage_error);
+    size_t len = 0u;
+    assert(storage_object_read(STORAGE_OBJECT_INBOX, id, wire, sizeof(wire), &len) == STORAGE_RECORD_OK &&
+           len == 3u && memcmp(wire, "bad", 3u) == 0);
+}
+
+static void test_delete_power_cuts(void) {
+    fresh();
+    make_pdu(pdu[0], 1, 1, 0, 50, "Atomic delete");
+    assert(message_service_receive(pdu[0])); drain();
+    uint32_t id = first_id(MESSAGE_INBOX), token;
+    memcpy(baseline, media, sizeof(media));
+    operations = 0;
+    assert(message_service_request_delete(MESSAGE_INBOX, id, &token));
+    assert(result(token, false).outcome == MESSAGE_RESULT_OK);
+    unsigned count = operations;
+    for (unsigned point = 1; point <= count; point++) {
+        for (tear = 0; tear < 3; tear++) {
+            storage_lfs_deinit(); memcpy(media, baseline, sizeof(media)); reopen();
+            operations = 0; cut_at = point;
+            if (setjmp(cut) == 0) {
+                assert(message_service_request_delete(MESSAGE_INBOX, id, &token));
+                drain(); assert(false);
+            }
+            cut_at = 0; reopen(); drain();
+            assert(status().ready && !status().storage_error && status().inbox <= 1u && status().pending == 0u);
+            if (status().inbox) {
+                assert(first_id(MESSAGE_INBOX) == id);
+                assert(message_service_request_delete(MESSAGE_INBOX, id, &token));
+                assert(result(token, false).outcome == MESSAGE_RESULT_OK);
+            }
+            reopen(); drain(); assert(status().inbox == 0u && status().pending == 0u);
+        }
+    }
+}
+
 int main(void) {
     test_codec(); test_mailboxes(); test_multipart(); test_power_cuts(); test_busy_and_full();
+    test_sent_copy_and_category_isolation(); test_io_retry_and_corrupt_record(); test_delete_power_cuts();
     storage_lfs_deinit(); puts("PASS: local messages");
 }

@@ -39,6 +39,7 @@
 #include "storage/store_service.h"
 #include "audio/nau88c22_codec.h"
 #include "services/sms_picture_codec.h"
+#include "services/message_service.h"
 #include "services/modem_service.h"
 #include "services/modem_vendor.h"
 #include "../../src/services/modem_service_test.h"
@@ -357,6 +358,28 @@ static const char *s_mh_cgsn_response;
 static size_t s_mh_recovery_store_tx_count;
 bool store_service_ready(void) { return s_mh_store_ready; }
 static unsigned s_mh_picture_parts;
+static char s_mh_local_pdu[SMS_DELIVER_HEX_MAX];
+static unsigned s_mh_local_received, s_mh_local_sent, s_mh_local_lost;
+static bool s_mh_local_reject;
+bool message_service_receive(const char *pdu) {
+    if (s_mh_local_reject) { s_mh_local_lost++; return false; }
+    snprintf(s_mh_local_pdu, sizeof(s_mh_local_pdu), "%s", pdu);
+    s_mh_local_received++;
+    return true;
+}
+bool message_service_sent(const char *address, const char *text) {
+    (void)address; (void)text;
+    if (s_mh_local_reject) { s_mh_local_lost++; return false; }
+    s_mh_local_sent++;
+    return true;
+}
+void message_service_note_receive_loss(void) { s_mh_local_lost++; }
+void message_service_get_status(message_status_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->ready = true;
+    out->received = s_mh_local_received;
+    out->receive_errors = s_mh_local_lost;
+}
 store_status_t store_picture_receive_pdu(const char *pdu, uint32_t now_ms) {
     (void)now_ms;
     sms_codec_message_t part;
@@ -532,6 +555,9 @@ void mh_settle(void) {
 }
 
 void mh_begin(void) {
+    s_mh_local_pdu[0] = 0;
+    s_mh_local_received = s_mh_local_sent = s_mh_local_lost = 0u;
+    s_mh_local_reject = false;
     s_mh_now = 0u;
     s_mh_rx_len = s_mh_rx_pos = 0u;
     s_mh_rx_stuck_readable = false;

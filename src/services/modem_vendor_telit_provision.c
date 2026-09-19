@@ -119,8 +119,8 @@ const modem_init_step_t TELIT_INIT_STEPS[] = {
                MODEM_SETTING_RUNTIME, NULL),
     /* Direct delivery (<mt>=2): Verizon 3GPP2 messages cannot be read back
      * from the CDMA store on this image ($QCMTI rows fail in every mode), so
-     * every carrier's SMS-DELIVER is routed to the host as +CMT and re-stored
-     * as a 23.040 PDU by modem_service. Mode 2 buffers the URC while the
+     * every carrier's SMS-DELIVER is routed to the host as +CMT, normalized
+     * to a 23.040 PDU, and queued for local littlefs storage. Mode 2 buffers the URC while the
      * TA-TE link is reserved and flushes it afterwards; DTR sleep unchanged. */
     TELIT_INIT("AT+CNMI=2,2,0,0,0",    2500u, 3u, false, MODEM_DEGRADE_NONE,
                MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),
@@ -362,32 +362,6 @@ static modem_provision_line_t telit_provision_psmri(
 static const char TELIT_SMS_WAKE_SAVED_PROFILE_SET[] =
     "AT#WKIO=0;#E2SMSRI=0;\\R2&W0";
 
-static modem_provision_line_t telit_provision_cpms(const char *line) {
-    if (!telit_starts_with(line, "+CPMS:")) {
-        return MODEM_PROVISION_LINE_IGNORE;
-    }
-    telit_csv_view_t fields[9];
-    size_t count = 0u;
-    if (!telit_view_split_prefixed(line, "+CPMS:", fields, 9u, &count) ||
-        count != 9u) {
-        return MODEM_PROVISION_LINE_INVALID;
-    }
-    for (size_t i = 0u; i < count; i++) {
-        if (i == 0u || i == 3u || i == 6u) {
-            continue;
-        }
-        uint32_t value = 0u;
-        if (!telit_view_parse_u32(fields[i], UINT16_MAX, &value)) {
-            return MODEM_PROVISION_LINE_INVALID;
-        }
-    }
-    bool match = telit_view_equals(fields[0], MODEM_SMS_STORAGE) &&
-                 telit_view_equals(fields[3], MODEM_SMS_STORAGE) &&
-                 telit_view_equals(fields[6], MODEM_SMS_STORAGE);
-    return match ? MODEM_PROVISION_LINE_MATCH
-                 : MODEM_PROVISION_LINE_MISMATCH;
-}
-
 #define TELIT_PROVISION(query_, set_, timeout_, retries_, recoverable_, \
                         degrade_, prereq_, persistence_, parser_) \
     { \
@@ -558,10 +532,6 @@ const modem_provision_step_t TELIT_PROVISION_STEPS[] = {
     TELIT_PROVISION("AT#NWSCANTMR?", "AT#NWSCANTMR=60", 5000u, 2u, true,
                     MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_NONE,
                     MODEM_SETTING_NVM, telit_provision_scan_timer),
-    TELIT_PROVISION("AT+CPMS?", "AT+CPMS=\"ME\",\"ME\",\"ME\"",
-                    15000u, 2u, true, MODEM_DEGRADE_SMS_SETUP,
-                    MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_NVM,
-                    telit_provision_cpms),
     TELIT_PROVISION("AT#ECAMURC?", "AT#ECAMURC=1", 5000u, 2u, false,
                     MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_SIM_READY,
                     MODEM_SETTING_NVM_REBOOT, telit_provision_ecamurc),
@@ -661,4 +631,3 @@ _Static_assert(sizeof(TELIT_PROVISION_STEPS) /
 
 #undef TELIT_PROVISION
 #undef TELIT_PROVISION_IF
-

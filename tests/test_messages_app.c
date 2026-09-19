@@ -1,3 +1,4 @@
+#include "services/message_service.h"
 /* App-level characterization for Messages. The test drives public routes and
  * keys against production code so Phase 5A translation-unit splits cannot
  * quietly change composition or picture-message behavior. */
@@ -86,23 +87,23 @@ static char s_encoded_text[STORE_PICTURE_TEXT_MAX + 1u];
 static bool s_send_result_ready;
 static modem_sms_send_result_t s_send_result;
 static bool s_save_result_ready;
-static modem_sms_save_result_t s_save_result;
+static message_result_t s_save_result;
 static bool s_delete_result_ready;
-static modem_sms_delete_result_t s_delete_result;
+static message_result_t s_delete_result;
 static uint32_t s_next_sms_request_id;
-static modem_sms_record_t s_mailbox[6];
-static uint8_t s_mailbox_count;
+static message_metadata_t s_mailbox[MESSAGE_MAILBOX_LIMIT];
+static uint16_t s_mailbox_count;
+static message_metadata_t *s_list_rows;
+static uint16_t s_list_capacity;
+static message_content_t s_read_content;
 static bool s_mailbox_result_ready;
-static modem_sms_mailbox_result_t s_mailbox_result;
+static message_result_t s_mailbox_result;
 static unsigned s_mailbox_requests;
-static modem_sms_mailbox_t s_mailbox_requested_kind;
+static message_mailbox_t s_mailbox_requested_kind;
 static unsigned s_read_requests;
-static uint16_t s_read_indices[MODEM_SMS_SEGMENT_MAX];
-static uint8_t s_read_index_count;
-static bool s_read_quarantined;
-static uint32_t s_read_identity_hash;
+static uint32_t s_read_id;
 static bool s_read_result_ready;
-static modem_sms_read_result_t s_read_result;
+static message_result_t s_read_result;
 static unsigned s_display_calls;
 static uint8_t s_display_record;
 static uint16_t s_display_sid;
@@ -177,12 +178,12 @@ static void reset_fixture(void) {
     s_mailbox_result_ready = false;
     memset(&s_mailbox_result, 0, sizeof(s_mailbox_result));
     s_mailbox_requests = 0u;
-    s_mailbox_requested_kind = MODEM_SMS_MAILBOX_INBOX;
+    s_mailbox_requested_kind = MESSAGE_INBOX;
     s_read_requests = 0u;
-    memset(s_read_indices, 0, sizeof(s_read_indices));
-    s_read_index_count = 0u;
-    s_read_quarantined = false;
-    s_read_identity_hash = 0u;
+    s_read_id = 0u;
+    s_list_rows = NULL;
+    s_list_capacity = 0u;
+    memset(&s_read_content, 0, sizeof(s_read_content));
     s_read_result_ready = false;
     memset(&s_read_result, 0, sizeof(s_read_result));
     s_display_calls = 0u;
@@ -417,8 +418,6 @@ void modem_service_get_status(modem_status_t *out) {
     out->sim_ready = s_modem_sim_ready;
     out->call_state = s_modem_call_state;
     out->sms_received_count = s_modem_sms_received_count;
-    out->sms_user_received_count = s_modem_sms_user_received_count;
-    out->sms_storage_full_events = s_modem_sms_storage_full_events;
 }
 
 static bool admit_sms_request(bool accepted, uint32_t *request_id_out) {
@@ -433,12 +432,11 @@ static bool admit_sms_request(bool accepted, uint32_t *request_id_out) {
     return true;
 }
 
-bool modem_service_request_save_sms(const char *number, const char *text,
-                                    uint32_t *request_id_out) {
+bool message_service_request_save(const char *number, const char *text, uint32_t *token) {
     s_save_sms_requests++;
     copy_text(s_saved_sms_number, sizeof(s_saved_sms_number), number);
     copy_text(s_saved_sms_text, sizeof(s_saved_sms_text), text);
-    return admit_sms_request(s_save_sms_accept, request_id_out);
+    return admit_sms_request(s_save_sms_accept, token);
 }
 
 bool modem_service_get_voice_mailbox_number(char *out, size_t out_cap) {
@@ -446,34 +444,20 @@ bool modem_service_get_voice_mailbox_number(char *out, size_t out_cap) {
     return false;
 }
 
-bool modem_service_request_sms_mailbox(modem_sms_mailbox_t mailbox,
-                                       uint32_t *request_id_out) {
-    s_mailbox_requests++;
-    s_mailbox_requested_kind = mailbox;
-    return admit_sms_request(true, request_id_out);
+bool message_service_request_list(message_mailbox_t mailbox, message_metadata_t *rows,
+                                  uint16_t capacity, uint32_t *token) {
+    s_mailbox_requests++; s_mailbox_requested_kind = mailbox;
+    s_list_rows = rows; s_list_capacity = capacity;
+    return admit_sms_request(true, token);
 }
 
-bool modem_service_request_sms_read(const uint16_t *indices,
-                                    uint8_t index_count,
-                                    bool quarantined,
-                                    uint32_t expected_identity_hash,
-                                    uint32_t *request_id_out) {
-    s_read_requests++;
-    s_read_index_count = index_count;
-    if (index_count <= MODEM_SMS_SEGMENT_MAX) {
-        memcpy(s_read_indices, indices, index_count * sizeof(indices[0]));
-    }
-    s_read_quarantined = quarantined;
-    s_read_identity_hash = expected_identity_hash;
-    return admit_sms_request(true, request_id_out);
+bool message_service_request_read(message_mailbox_t mailbox, uint32_t id, uint32_t *token) {
+    (void)mailbox; s_read_requests++; s_read_id = id;
+    return admit_sms_request(true, token);
 }
 
-bool modem_service_request_delete_sms_indices(const uint16_t *indices,
-                                              uint8_t index_count,
-                                              uint32_t *request_id_out) {
-    (void)indices;
-    (void)index_count;
-    return admit_sms_request(true, request_id_out);
+bool message_service_request_delete(message_mailbox_t mailbox, uint32_t id, uint32_t *token) {
+    (void)mailbox; (void)id; return admit_sms_request(true, token);
 }
 
 bool modem_service_request_send_sms(const char *number, const char *text,
@@ -548,61 +532,17 @@ bool modem_service_pop_sms_send_result(uint32_t request_id,
     return true;
 }
 
-bool modem_service_pop_sms_mailbox_result(uint32_t request_id,
-                                          modem_sms_mailbox_result_t *out) {
-    if (!s_mailbox_result_ready || request_id == 0u || out == NULL ||
-        s_mailbox_result.request_id != request_id) {
-        return false;
-    }
-    *out = s_mailbox_result;
-    s_mailbox_result_ready = false;
-    return true;
-}
 
-bool modem_service_pop_sms_read_result(uint32_t request_id,
-                                       modem_sms_read_result_t *out) {
-    if (!s_read_result_ready || request_id == 0u || out == NULL ||
-        s_read_result.request_id != request_id) {
-        return false;
-    }
-    *out = s_read_result;
-    s_read_result_ready = false;
-    return true;
-}
 
-bool modem_service_pop_sms_delete_result(uint32_t request_id,
-                                         modem_sms_delete_result_t *out) {
-    if (!s_delete_result_ready || request_id == 0u || out == NULL ||
-        s_delete_result.request_id != request_id) {
-        return false;
-    }
-    *out = s_delete_result;
-    s_delete_result_ready = false;
-    return true;
-}
 
-bool modem_service_pop_sms_save_result(uint32_t request_id,
-                                       modem_sms_save_result_t *out) {
-    if (!s_save_result_ready || request_id == 0u || out == NULL ||
-        s_save_result.request_id != request_id) {
-        return false;
-    }
-    *out = s_save_result;
-    s_save_result_ready = false;
-    return true;
-}
 
-uint8_t modem_service_sms_mailbox_count(void) {
-    return s_mailbox_count;
-}
 
-bool modem_service_sms_mailbox_entry(uint8_t position, modem_sms_record_t *out) {
-    if (position >= s_mailbox_count) {
-        return false;
-    }
-    *out = s_mailbox[position];
-    return true;
-}
+
+
+
+
+
+
 
 void open_display(app_t *app,
                   uint8_t record_id,
@@ -984,21 +924,7 @@ static void seed_picture(uint8_t slot,
     copy_text(picture->text, sizeof(picture->text), text);
 }
 
-static void seed_mailbox_row(uint8_t position,
-                             uint16_t index,
-                             uint32_t identity_hash,
-                             const char *status,
-                             const char *sender,
-                             const char *timestamp) {
-    modem_sms_record_t *row = &s_mailbox[position];
-    memset(row, 0, sizeof(*row));
-    row->indices[0] = index;
-    row->index_count = 1u;
-    row->identity_hash = identity_hash;
-    copy_text(row->status, sizeof(row->status), status);
-    copy_text(row->sender, sizeof(row->sender), sender);
-    copy_text(row->timestamp, sizeof(row->timestamp), timestamp);
-}
+
 
 /* --------------------------------------------------------------- scenarios */
 
@@ -1594,72 +1520,12 @@ static void test_picture_send_contract(void) {
           "uncertain picture send uses the neutral Result unknown note");
 }
 
-static void test_incoming_picture_save_and_replace(void) {
-    reset_fixture();
-    app_t app;
-    memset(&app, 0, sizeof(app));
-    app.messages_kind = MESSAGES_KIND_INBOX;
-    app.messages_mode = MESSAGES_MODE_OPTIONS;
-    app.messages_option_selected = 0u;
-    app.sms_inbox_count = 1u;
-    app.sms_inbox[0].picture = true;
-    app.sms_selected_content.valid = true;
-    app.sms_selected_content.picture = true;
-    app.sms_selected_content.picture_message.used = true;
-    app.sms_selected_content.picture_message.width = STORE_PICTURE_WIDTH;
-    app.sms_selected_content.picture_message.height = STORE_PICTURE_HEIGHT;
-    copy_text(app.sms_selected_content.picture_message.text,
-              sizeof(app.sms_selected_content.picture_message.text),
-              "received");
 
-    (void)handle_messages_list_key(&app, KEY_NAVI, 10000u);
-    check(s_picture_writes == 1u && s_picture_last_written_slot == 0u,
-          "Save stores an incoming picture in the first free slot");
-    check(app.messages_kind == MESSAGES_KIND_PICTURES &&
-              app.messages_mode == MESSAGES_MODE_READ,
-          "saved incoming picture opens its preview");
-
-    reset_fixture();
-    memset(&app, 0, sizeof(app));
-    for (uint8_t slot = 0u; slot < STORE_PICTURE_SLOT_COUNT; slot++) {
-        seed_picture(slot, "occupied", STORE_PICTURE_WIDTH, STORE_PICTURE_HEIGHT);
-    }
-    app.messages_kind = MESSAGES_KIND_INBOX;
-    app.messages_mode = MESSAGES_MODE_OPTIONS;
-    app.sms_inbox_count = 1u;
-    app.sms_inbox[0].picture = true;
-    app.sms_selected_content.valid = true;
-    app.sms_selected_content.picture = true;
-    copy_text(app.sms_selected_content.picture_message.text,
-              sizeof(app.sms_selected_content.picture_message.text),
-              "replacement");
-    (void)handle_messages_list_key(&app, KEY_NAVI, 10010u);
-    check(app.messages_picture_save_pending &&
-              app.messages_kind == MESSAGES_KIND_PICTURES &&
-              app.messages_mode == MESSAGES_MODE_LIST,
-          "a full picture store opens the replacement selector");
-    (void)handle_messages_list_key(&app, KEY_C, 10015u);
-    check(!app.messages_picture_save_pending &&
-              app.messages_kind == MESSAGES_KIND_INBOX &&
-              app.messages_mode == MESSAGES_MODE_READ &&
-              app.messages_selected == 0u,
-          "C cancels replacement and returns to the originating inbox picture");
-    app.messages_mode = MESSAGES_MODE_OPTIONS;
-    app.messages_option_selected = 0u;
-    (void)handle_messages_list_key(&app, KEY_NAVI, 10016u);
-    (void)handle_messages_list_key(&app, KEY_DOWN, 10020u);
-    (void)handle_messages_list_key(&app, KEY_NAVI, 10030u);
-    check(!app.messages_picture_save_pending && s_picture_last_written_slot == 1u,
-          "replacement writes the selected physical slot");
-    check_str(s_pictures[1].text, "replacement", "replacement stores the received picture");
-    check(s_display_sid == 0x17du, "replacement shows Old picture replaced");
-}
 
 static void test_local_picture_receive_flow(void) {
     reset_fixture();
     app_t app = {0};
     app.route = APP_ROUTE_STANDBY;
-    app.sms_boot_status_sync_done = true;
     seed_picture(0u, "template", STORE_PICTURE_WIDTH, STORE_PICTURE_HEIGHT);
     s_pending_picture = s_pictures[0];
     copy_text(s_pending_picture.text, sizeof(s_pending_picture.text), "received caption");
@@ -1766,150 +1632,62 @@ static void test_local_picture_receive_flow(void) {
 
 static void test_mailbox_sort_and_lazy_read(void) {
     reset_fixture();
-    app_t app;
-    memset(&app, 0, sizeof(app));
-    app.sms_boot_status_sync_done = true;
-    seed_mailbox_row(0u, 10u, 0x10u, "REC READ", "+10", "26/08/19,12:00:00");
-    seed_mailbox_row(1u, 11u, 0x11u, "REC UNREAD", "+11", "26/08/18,09:00:00");
-    seed_mailbox_row(2u, 12u, 0x12u, "REC UNREAD", "+12", "26/08/19,11:00:00");
-    seed_mailbox_row(3u, 13u, 0x13u, "REC READ", "+13", "26/08/17,08:00:00");
-    s_mailbox_count = 4u;
-
-    open_messages_mailbox(&app, MESSAGES_KIND_INBOX, 11000u);
-    check(s_mailbox_requests == 1u &&
-              s_mailbox_requested_kind == MODEM_SMS_MAILBOX_INBOX,
-          "opening Inbox requests one protected modem mailbox snapshot");
-    check(s_read_requests == 0u,
-          "mailbox list admission does not eagerly read message bodies");
-
-    s_mailbox_result_ready = true;
-    s_mailbox_result.request_id = app.messages_open_request_id;
-    s_mailbox_result.kind = MODEM_SMS_REQUEST_MAILBOX;
-    s_mailbox_result.outcome = MODEM_SMS_OUTCOME_OK;
-    s_mailbox_result.complete = true;
-    s_mailbox_result.mailbox = MODEM_SMS_MAILBOX_INBOX;
-    check(poll_sms(&app, 11010u), "mailbox completion reports a UI change");
-    check(app.sms_inbox_count == 4u && app.sms_unread_count == 2u,
-          "complete mailbox load publishes all rows and authoritative unread count");
-    check_str(app.sms_inbox[0].address, "+12",
-              "newest unread row sorts first");
-    check_str(app.sms_inbox[1].address, "+11",
-              "older unread row stays ahead of all read rows");
-    check_str(app.sms_inbox[2].address, "+10",
-              "newest read row follows the unread group");
-    check_str(app.sms_inbox[3].address, "+13",
-              "oldest read row sorts last");
-    check(s_read_requests == 0u,
-          "loading and sorting the mailbox still performs no body read");
-
-    (void)handle_messages_list_key(&app, KEY_NAVI, 11020u);
-    check(s_read_requests == 1u && s_read_index_count == 1u &&
-              s_read_indices[0] == 12u && s_read_identity_hash == 0x12u,
-          "opening the selected row lazily reads its exact modem identity");
-    check(app.sms_read_waiting && app.messages_mode == MESSAGES_MODE_LIST,
-          "the list remains intact while the selected body is pending");
-
-    s_read_result_ready = true;
-    s_read_result.request_id = app.sms_read_request_id;
-    s_read_result.kind = MODEM_SMS_REQUEST_READ;
-    s_read_result.outcome = MODEM_SMS_OUTCOME_OK;
-    s_read_result.request_identity_hash = 0x12u;
-    s_read_result.identity_hash = 0x12u;
-    char expanded_body[MODEM_SMS_DECODED_TEXT_MAX + 1u];
-    for (size_t i = 0u; i < MODEM_SMS_TEXT_MAX; i++) {
-        expanded_body[i * 2u] = (char)0xceu;
-        expanded_body[i * 2u + 1u] = (char)0x94u;
+    app_t app = {0};
+    s_modem_sim_ready = false;
+    for (uint16_t i = 0u; i < MESSAGE_MAILBOX_LIMIT; i++) {
+        s_mailbox[i].id = 70000u + i;
+        snprintf(s_mailbox[i].address, sizeof(s_mailbox[i].address), "+%u", i);
     }
-    expanded_body[MODEM_SMS_DECODED_TEXT_MAX] = '\0';
-    copy_text(s_read_result.message.text,
-              sizeof(s_read_result.message.text),
-              expanded_body);
-    check(poll_sms(&app, 11030u), "selected body completion reports a UI change");
-    check(app.messages_mode == MESSAGES_MODE_READ &&
-              app.sms_selected_content.valid,
-          "matching lazy read opens the selected message");
-    check(strlen(app.sms_selected_content.text) ==
-              MODEM_SMS_DECODED_TEXT_MAX &&
-              memcmp(app.sms_selected_content.text, expanded_body,
-                     sizeof(expanded_body)) == 0,
-          "lazy read carries the full worst-case UTF-8 body into the UI");
-    check_str(app.sms_inbox[0].status, "REC READ",
-              "opening an unread row updates its loaded status immediately");
-    check(app.sms_unread_count == 1u,
-          "opening an unread row decrements the authoritative envelope count");
-
-    reset_fixture();
-    memset(&app, 0, sizeof(app));
-    app.sms_boot_status_sync_done = true;
-    seed_mailbox_row(0u, 21u, 0x2100u, "REC UNREAD", "+21",
-                     "26/08/20,10:00:00");
-    s_mailbox[0].indices[1] = 23u;
-    s_mailbox[0].index_count = 2u;
-    s_mailbox[0].quarantined = true;
-    s_mailbox_count = 1u;
-    open_messages_mailbox(&app, MESSAGES_KIND_INBOX, 11100u);
+    s_mailbox_count = MESSAGE_MAILBOX_LIMIT;
+    open_messages_mailbox(&app, MESSAGES_KIND_INBOX, 11000u);
+    check(s_mailbox_requests == 1u && s_read_requests == 0u, "offline local list requests no modem read");
+    s_mailbox_result = (message_result_t){.request_id=app.messages_open_request_id,
+        .kind=MESSAGE_OP_LIST, .outcome=MESSAGE_RESULT_OK};
     s_mailbox_result_ready = true;
-    s_mailbox_result.request_id = app.messages_open_request_id;
-    s_mailbox_result.kind = MODEM_SMS_REQUEST_MAILBOX;
-    s_mailbox_result.outcome = MODEM_SMS_OUTCOME_OK;
-    s_mailbox_result.complete = true;
-    s_mailbox_result.mailbox = MODEM_SMS_MAILBOX_INBOX;
-    check(poll_sms(&app, 11110u) && app.sms_inbox_count == 1u &&
-              app.sms_inbox[0].quarantined,
-          "mailbox copy preserves explicit quarantine ownership");
-    (void)handle_messages_list_key(&app, KEY_NAVI, 11120u);
-    check(s_read_requests == 1u && s_read_quarantined &&
-              s_read_index_count == 2u && s_read_indices[0] == 21u &&
-              s_read_indices[1] == 23u,
-          "opening a quarantine reads every observed modem row in data mode");
+    (void)poll_sms(&app, 11010u);
+    check(app.sms_inbox_count == 500u && app.sms_unread_count == 500u, "full-domain list and unread count do not wrap");
+    app.messages_selected = 499u;
+    (void)handle_messages_list_key(&app, KEY_NAVI, 11020u);
+    check(s_read_id == 70499u && s_read_requests == 1u, "read uses full durable ID beyond 16 bits");
+    s_read_result = (message_result_t){.request_id=app.sms_read_request_id, .object_id=70499u,
+        .kind=MESSAGE_OP_READ, .outcome=MESSAGE_RESULT_OK};
+    s_read_content.metadata.id = 70499u;
+    memset(s_read_content.text, 'x', MESSAGE_TEXT_MAX);
+    s_read_content.text[MESSAGE_TEXT_MAX] = 0;
     s_read_result_ready = true;
+    (void)poll_sms(&app, 11030u);
+    check(app.messages_mode == MESSAGES_MODE_READ && strlen(app.sms_selected_content.text) == MESSAGE_TEXT_MAX &&
+          app.sms_inbox[499].read, "whole multipart text is readable and local read state is mirrored");
+    app.messages_mode = MESSAGES_MODE_LIST;
+    (void)handle_messages_list_key(&app, KEY_NAVI, 11040u);
     s_read_result.request_id = app.sms_read_request_id;
-    s_read_result.kind = MODEM_SMS_REQUEST_READ;
-    s_read_result.outcome = MODEM_SMS_OUTCOME_OK;
-    s_read_result.request_identity_hash = 0x2100u;
-    s_read_result.identity_hash = 0x2100u;
-    s_read_result.message.binary = true;
-    check(poll_sms(&app, 11130u) &&
-              app.messages_mode == MESSAGES_MODE_READ &&
-              app.sms_selected_content.valid &&
-              !app.sms_selected_content.picture,
-          "quarantined body opens as an ordinary Nokia data message");
-    check_str(app.sms_selected_content.text, "Data message",
-              "quarantine never exposes partial picture bytes");
+    s_read_result.object_id = 123u; s_read_result_ready = true;
+    (void)poll_sms(&app, 11050u);
+    check(!app.sms_selected_content.valid, "foreign object cannot replace selected body");
 }
 
 static void test_outbox_send_uses_visible_draft(void) {
     reset_fixture();
-    app_t app;
-    memset(&app, 0, sizeof(app));
-    app.messages_kind = MESSAGES_KIND_OUTBOX;
-    app.messages_mode = MESSAGES_MODE_OPTIONS;
-    app.messages_option_selected = 0u; /* Send */
+    app_t app = {0};
+    app.messages_kind = MESSAGES_KIND_OUTBOX; app.messages_mode = MESSAGES_MODE_OPTIONS;
     app.sms_outbox_count = 1u;
-    copy_text(app.sms_outbox[0].address,
-              sizeof(app.sms_outbox[0].address), "5550100");
+    copy_text(app.sms_outbox[0].address, sizeof(app.sms_outbox[0].address), "5550100");
     app.sms_selected_content.valid = true;
-    for (size_t i = 0u; i < MODEM_SMS_TEXT_MAX + 24u; i++) {
-        app.sms_selected_content.text[i] = (char)('A' + (i % 26u));
-    }
-    app.sms_selected_content.text[MODEM_SMS_TEXT_MAX + 24u] = '\0';
-
+    memset(app.sms_selected_content.text, 'A', 184u); app.sms_selected_content.text[184] = 0;
     (void)handle_messages_list_key(&app, KEY_NAVI, 12000u);
-
-    check(s_send_sms_requests == 1u,
-          "Outbox Send admits exactly one text request");
-    check_str(s_send_sms_number, "5550100",
-              "Outbox Send preserves the stored recipient");
-    check(strlen(app.sms_composer_text) == MODEM_SMS_TEXT_MAX &&
-              strcmp(s_send_sms_text, app.sms_composer_text) == 0,
-          "Outbox Send submits exactly the bounded draft shown to the user");
+    check(s_send_sms_requests == 0u && s_display_sid == 0x20fu,
+          "oversized stored body is never silently truncated and sent");
+    app.messages_mode = MESSAGES_MODE_OPTIONS;
+    copy_text(app.sms_selected_content.text, sizeof(app.sms_selected_content.text), "Complete body");
+    (void)handle_messages_list_key(&app, KEY_NAVI, 12010u);
+    check(s_send_sms_requests == 1u && strcmp(s_send_sms_text, "Complete body") == 0,
+          "normal outbox body is sent intact");
 }
 
 static void test_async_sms_request_ownership(void) {
     reset_fixture();
     app_t app;
     memset(&app, 0, sizeof(app));
-    app.sms_boot_status_sync_done = true;
     app.route = APP_ROUTE_DISPLAY_MESSAGE;
     app.display_record_id = 46u;
     app.display_return_route = APP_ROUTE_SMS_COMPOSER;
@@ -1936,7 +1714,6 @@ static void test_async_sms_request_ownership(void) {
 
     reset_fixture();
     memset(&app, 0, sizeof(app));
-    app.sms_boot_status_sync_done = true;
     app.route = APP_ROUTE_INCOMING_CALL;
     app.sms_send_waiting = true;
     app.sms_send_request_id = 21u;
@@ -1966,7 +1743,6 @@ static void test_async_sms_request_ownership(void) {
 
     reset_fixture();
     memset(&app, 0, sizeof(app));
-    app.sms_boot_status_sync_done = true;
     app.route = APP_ROUTE_INCOMING_CALL;
     app.sms_send_waiting = true;
     app.sms_send_request_id = 22u;
@@ -1995,125 +1771,33 @@ static void test_async_sms_request_ownership(void) {
 
     reset_fixture();
     memset(&app, 0, sizeof(app));
-    app.sms_boot_status_sync_done = true;
+    open_messages_mailbox(&app, MESSAGES_KIND_INBOX, 2030u);
+    uint32_t owner = app.messages_open_request_id;
     app.route = APP_ROUTE_INCOMING_CALL;
-    app.messages_open_pending = true;
-    app.messages_open_request_id = 23u;
-    app.sms_status_sync_silent = true;
-    app.sms_open_deferred = true;
-    app.sms_open_deferred_kind = MESSAGES_KIND_INBOX;
-    check(poll_sms(&app, 2030u) && !app.sms_open_deferred &&
-              app.messages_open_pending &&
-              app.messages_open_request_id == 23u &&
-              app.route == APP_ROUTE_INCOMING_CALL,
-          "call preemption cancels only the user open layered over a silent scan");
+    (void)poll_sms(&app, 2031u);
+    check(!app.messages_open_pending && app.messages_open_request_id == owner,
+          "call detaches list UI but retains token");
+    s_mailbox_result = (message_result_t){.request_id=owner, .kind=MESSAGE_OP_LIST, .outcome=MESSAGE_RESULT_OK};
     s_mailbox_result_ready = true;
-    s_mailbox_result = (modem_sms_mailbox_result_t){
-        .request_id = 23u,
-        .kind = MODEM_SMS_REQUEST_MAILBOX,
-        .outcome = MODEM_SMS_OUTCOME_OK,
-        .complete = true,
-        .mailbox = MODEM_SMS_MAILBOX_INBOX,
-    };
-    check(poll_sms(&app, 2040u) &&
-              app.messages_open_request_id == 0u &&
-              app.route == APP_ROUTE_INCOMING_CALL && s_display_calls == 0u,
-          "the displaced deferred open drains its background terminal without reclaiming UI");
-
-    reset_fixture();
-    memset(&app, 0, sizeof(app));
-    app.sms_boot_status_sync_done = true;
-    app.route = APP_ROUTE_DISPLAY_MESSAGE;
-    app.display_record_id = 4u;
-    app.display_return_route = APP_ROUTE_SMS_COMPOSER;
-    app.sms_save_waiting = true;
-    app.sms_save_request_id = 31u;
-    s_save_result_ready = true;
-    s_save_result = (modem_sms_save_result_t){
-        .request_id = 31u,
-        .kind = MODEM_SMS_REQUEST_SAVE,
-        .outcome = MODEM_SMS_OUTCOME_UNCERTAIN,
-    };
-    check(poll_sms(&app, 3000u) && s_display_sid == 0x229u &&
-              app.sms_save_request_id == 0u,
-          "uncertain save uses the neutral Result unknown note");
-
-    reset_fixture();
-    memset(&app, 0, sizeof(app));
-    app.sms_boot_status_sync_done = true;
-    app.route = APP_ROUTE_DISPLAY_MESSAGE;
-    app.display_record_id = 4u;
-    app.display_return_route = APP_ROUTE_MESSAGES_LIST;
-    app.sms_delete_waiting = true;
-    app.sms_delete_request_id = 41u;
-    s_delete_result_ready = true;
-    s_delete_result = (modem_sms_delete_result_t){
-        .request_id = 41u,
-        .kind = MODEM_SMS_REQUEST_DELETE,
-        .outcome = MODEM_SMS_OUTCOME_UNCERTAIN,
-    };
-    check(poll_sms(&app, 4000u) && s_display_sid == 0x229u &&
-              app.sms_delete_request_id == 0u,
-          "uncertain delete uses the neutral Result unknown note");
-
-    reset_fixture();
-    memset(&app, 0, sizeof(app));
-    app.sms_read_waiting = true;
-    app.sms_read_request_id = 51u;
-    app.messages_open_pending = true;
-    app.messages_open_request_id = 52u;
-    app.sms_status_sync_silent = false;
-    messages_picture_open_list(&app);
-    check(!app.sms_read_waiting && app.sms_read_request_id == 51u &&
-              !app.messages_open_pending &&
-              app.messages_open_request_id == 52u,
-          "local picture navigation detaches modem UI without forgetting owners");
+    (void)poll_sms(&app, 2040u);
+    check(app.messages_open_request_id == 0u && app.route == APP_ROUTE_INCOMING_CALL,
+          "late local list never steals call UI");
 }
 
 static void test_modem_sms_counter_epoch_rebase(void) {
     reset_fixture();
-    app_t app;
-    memset(&app, 0, sizeof(app));
+    app_t app = {0};
     app.route = APP_ROUTE_STANDBY;
-    app.sms_boot_status_sync_done = true;
-    app.last_modem_sms_received_count = 7u;
-    app.last_modem_user_sms_received_count = 4u;
-    app.last_sms_storage_full_events = 3u;
-    app.sms_unread_count = 2u;
-
-    check(poll_sms(&app, 5000u),
-          "a lower modem counter is accepted as a new modem epoch");
-    check(app.last_modem_sms_received_count == 0u &&
-              app.last_modem_user_sms_received_count == 0u &&
-              app.last_sms_storage_full_events == 0u,
-          "all modem-owned SMS counters rebase without unsigned deltas");
-    check(!app.sms_received_pending && app.sms_received_pending_count == 0u &&
-              s_display_calls == 0u,
-          "counter reset does not synthesize a user message or memory-full alert");
-    check(s_mailbox_requests == 1u && app.messages_open_pending &&
-              app.sms_status_sync_silent &&
-              app.sms_mailbox_received_count_at_start == 0u,
-          "raw counter reset starts one authoritative silent mailbox scan");
-
-    s_mailbox_result_ready = true;
-    s_mailbox_result = (modem_sms_mailbox_result_t){
-        .request_id = app.messages_open_request_id,
-        .kind = MODEM_SMS_REQUEST_MAILBOX,
-        .outcome = MODEM_SMS_OUTCOME_OK,
-        .complete = true,
-        .mailbox = MODEM_SMS_MAILBOX_INBOX,
-    };
-    check(poll_sms(&app, 5010u) && !app.messages_open_pending &&
-              !app.sms_status_sync_pending && app.sms_boot_status_sync_done &&
-              app.sms_unread_count == 0u,
-          "a clean post-reset mailbox snapshot completes against the rebased epoch");
-    check(!poll_sms(&app, 5020u) && s_mailbox_requests == 1u,
-          "completed post-reset sync does not enter a mailbox retry loop");
-
+    s_mailbox_count = 2u;
+    s_modem_sms_received_count = 99u;
+    (void)poll_sms(&app, 5000u);
+    s_modem_sms_received_count = 0u; s_modem_sim_ready = false;
+    (void)poll_sms(&app, 5010u);
+    check(app.sms_unread_count == 2u && !app.sms_received_pending && s_mailbox_requests == 0u,
+          "modem reset and missing SIM cannot erase local unread state or trigger scans");
     s_modem_sms_storage_full_events = 1u;
-    check(poll_sms(&app, 5030u) && app.last_sms_storage_full_events == 1u &&
-              s_display_sid == 0x1c5u,
-          "the first real storage-full edge after reset remains observable");
+    (void)poll_sms(&app, 5020u);
+    check(s_display_sid == 0x1c5u, "local storage-full edge is visible");
 }
 
 static void test_message_alert_follows_v600_call_state(void) {
@@ -2122,7 +1806,6 @@ static void test_message_alert_follows_v600_call_state(void) {
     reset_fixture();
     memset(&app, 0, sizeof(app));
     app.route = APP_ROUTE_STANDBY;
-    app.sms_boot_status_sync_done = true;
     s_profile_message_alert = 4u;
     s_profile_ringing_volume = 3u;
     s_modem_sms_user_received_count = 1u;
@@ -2136,7 +1819,6 @@ static void test_message_alert_follows_v600_call_state(void) {
     reset_fixture();
     memset(&app, 0, sizeof(app));
     app.route = APP_ROUTE_CALL;
-    app.sms_boot_status_sync_done = true;
     s_modem_call_state = MODEM_CALL_ACTIVE;
     s_profile_message_alert = 0u;
     s_profile_ringing_volume = 0u;
@@ -2151,7 +1833,6 @@ static void test_message_alert_follows_v600_call_state(void) {
     reset_fixture();
     memset(&app, 0, sizeof(app));
     app.route = APP_ROUTE_INCOMING_CALL;
-    app.sms_boot_status_sync_done = true;
     s_modem_call_state = MODEM_CALL_RINGING;
     s_profile_message_alert = 4u;
     s_profile_ringing_volume = 3u;
@@ -2175,7 +1856,6 @@ int main(void) {
     test_picture_sparse_list_preview_and_options();
     test_picture_edit_save_preview_and_limit();
     test_picture_send_contract();
-    test_incoming_picture_save_and_replace();
     test_local_picture_receive_flow();
     test_mailbox_sort_and_lazy_read();
     test_outbox_send_uses_visible_draft();
@@ -2189,4 +1869,28 @@ int main(void) {
     }
     printf("messages app tests passed\n");
     return 0;
+}
+
+void message_service_get_status(message_status_t *out) {
+    memset(out, 0, sizeof(*out)); out->ready = true;
+    out->inbox = s_mailbox_count;
+    out->received = s_modem_sms_user_received_count;
+    out->full_events = s_modem_sms_storage_full_events;
+    for (uint16_t i = 0u; i < s_mailbox_count; i++) if (!s_mailbox[i].read) out->unread++;
+}
+bool message_service_pop_result(uint32_t token, message_result_t *out, message_content_t *content) {
+    message_result_t *results[] = {&s_mailbox_result, &s_read_result, &s_save_result, &s_delete_result};
+    bool *ready[] = {&s_mailbox_result_ready, &s_read_result_ready, &s_save_result_ready, &s_delete_result_ready};
+    for (unsigned i = 0u; i < 4u; i++) {
+        if (!*ready[i] || !token || results[i]->request_id != token) continue;
+        *out = *results[i]; *ready[i] = false;
+        if (i == 0u && out->outcome == MESSAGE_RESULT_OK && s_list_rows != NULL) {
+            check(s_mailbox_count <= s_list_capacity, "list destination capacity");
+            memcpy(s_list_rows, s_mailbox, s_mailbox_count * sizeof(*s_list_rows));
+            out->count = s_mailbox_count;
+        }
+        if (i == 1u && content != NULL) *content = s_read_content;
+        return true;
+    }
+    return false;
 }

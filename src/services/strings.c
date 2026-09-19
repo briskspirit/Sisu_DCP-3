@@ -41,6 +41,7 @@ const char *ts(uint16_t sid) {
     case SID_LOCAL_KIB_FREE: return "%lu KiB free";
     case SID_LOCAL_CONTACT_COUNT: return "%lu contacts";
     case SID_LOCAL_STORAGE_UNAVAILABLE: return "Unavailable";
+    case SID_DATA_MESSAGE: return "Data message";
     default: break;
     }
     if (sid < STRINGS_SID_BASE) {

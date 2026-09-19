@@ -15,8 +15,17 @@ typedef struct {
     message_result_t result;
     message_mailbox_t mailbox;
     bool done, attempted;
+    message_metadata_t *rows;
+    uint16_t capacity;
 } request_t;
-typedef struct { char pdu[MESSAGE_FILE_PDU_MAX * 2u + 1u]; uint32_t id; } receive_t;
+typedef struct {
+    union {
+        char pdu[MESSAGE_FILE_PDU_MAX * 2u + 1u];
+        struct { char address[MODEM_SMS_SENDER_MAX + 1u], text[MODEM_SMS_TEXT_MAX + 1u]; } sent;
+    };
+    uint32_t id;
+    bool outgoing;
+} receive_t;
 
 static index_t s_index[2][MESSAGE_MAILBOX_LIMIT], s_pending[PENDING_LIMIT];
 static uint16_t s_count[2], s_pending_count;
@@ -172,7 +181,13 @@ static bool request(message_op_t kind, message_mailbox_t mailbox, uint32_t id, u
     return true;
 }
 
-bool message_service_request_list(message_mailbox_t m, uint32_t *t) { return request(MESSAGE_OP_LIST, m, 0u, t); }
+bool message_service_request_list(message_mailbox_t m, message_metadata_t *rows,
+                                  uint16_t capacity, uint32_t *t) {
+    if (rows == NULL || capacity == 0u || !request(MESSAGE_OP_LIST, m, 0u, t)) return false;
+    s_requests[MESSAGE_OP_LIST].rows = rows;
+    s_requests[MESSAGE_OP_LIST].capacity = capacity;
+    return true;
+}
 bool message_service_request_read(message_mailbox_t m, uint32_t id, uint32_t *t) { return request(MESSAGE_OP_READ, m, id, t); }
 bool message_service_request_delete(message_mailbox_t m, uint32_t id, uint32_t *t) { return request(MESSAGE_OP_DELETE, m, id, t); }
 bool message_service_request_save(const char *address, const char *text, uint32_t *token) {
@@ -213,7 +228,14 @@ static storage_record_result_t perform(request_t *r) {
     storage_object_collection_t c = collection(m);
     int pos = find(s_index[m], s_count[m], id);
     storage_record_result_t rc;
-    if (r->result.kind == MESSAGE_OP_LIST) return STORAGE_RECORD_OK;
+    if (r->result.kind == MESSAGE_OP_LIST) {
+        if (s_count[m] > r->capacity) return STORAGE_RECORD_FULL;
+        for (uint16_t i = 0u; i < s_count[m]; i++)
+            if (!message_service_entry(m, i, &r->rows[i])) return STORAGE_RECORD_ERROR;
+        r->result.count = s_count[m];
+        r->result.revision = s_status.revision;
+        return STORAGE_RECORD_OK;
+    }
     if (r->result.kind == MESSAGE_OP_SAVE) {
         if (pos < 0 && s_count[m] == MESSAGE_MAILBOX_LIMIT) return STORAGE_RECORD_FULL;
         if (id == 0u) {
@@ -267,7 +289,19 @@ bool message_service_receive(const char *pdu) {
     /* Parsing uses shared scratch, but admission never writes the filesystem. */
     if (!message_file_receive(&s_file, pdu)) { s_status.receive_errors++; return false; }
     receive_t *r = &s_receive[(s_head + s_queued) % RECEIVE_LIMIT];
-    strcpy(r->pdu, pdu); r->id = 0u; s_queued++;
+    strcpy(r->pdu, pdu); r->id = 0u; r->outgoing = false; s_queued++;
+    s_status.queued = s_queued;
+    return true;
+}
+
+bool message_service_sent(const char *address, const char *text) {
+    if (address == NULL || text == NULL || strlen(address) > MODEM_SMS_SENDER_MAX ||
+        strlen(text) > MODEM_SMS_TEXT_MAX || s_queued == RECEIVE_LIMIT) {
+        s_status.receive_errors++; return false;
+    }
+    receive_t *r = &s_receive[(s_head + s_queued) % RECEIVE_LIMIT];
+    strcpy(r->sent.address, address); strcpy(r->sent.text, text);
+    r->id = 0u; r->outgoing = true; s_queued++;
     s_status.queued = s_queued;
     return true;
 }
@@ -275,6 +309,26 @@ bool message_service_receive(const char *pdu) {
 static storage_record_result_t receive_one(void) {
     receive_t *r = &s_receive[s_head];
     storage_record_result_t rc;
+    if (r->outgoing) {
+        int pos = find(s_index[MESSAGE_OUTBOX], s_count[MESSAGE_OUTBOX], r->id);
+        if (pos >= 0) return STORAGE_RECORD_OK;
+        if (s_count[MESSAGE_OUTBOX] == MESSAGE_MAILBOX_LIMIT) return STORAGE_RECORD_FULL;
+        if (r->id == 0u) {
+            rc = storage_object_allocate(&r->id);
+            if (rc != STORAGE_RECORD_OK) return rc;
+        }
+        if (!message_file_draft(&s_file, r->sent.address, r->sent.text)) return STORAGE_RECORD_ERROR;
+        s_file.flags |= MESSAGE_FILE_SENT;
+        rc = save(STORAGE_OBJECT_OUTBOX, r->id);
+        if (rc != STORAGE_RECORD_OK) return rc;
+        index_t entry;
+        rc = index_current(STORAGE_OBJECT_OUTBOX, r->id, &entry);
+        if (rc == STORAGE_RECORD_OK) {
+            insert(s_index[MESSAGE_OUTBOX], &s_count[MESSAGE_OUTBOX], &entry, false);
+            s_status.revision++;
+        }
+        return rc;
+    }
     /* Completed inbox messages only suppress byte-identical retransmissions.
      * A reused concatenation reference must not splice a new message into one
      * already shown to the user. */
@@ -314,6 +368,15 @@ static storage_record_result_t publish(unsigned pos) {
     int existing = find(s_index[MESSAGE_INBOX], s_count[MESSAGE_INBOX], id);
     storage_record_result_t rc = load(STORAGE_OBJECT_PENDING_SMS, id);
     if (rc != STORAGE_RECORD_OK) return rc;
+    if (existing < 0 && message_file_is_vvm_control(&s_file)) {
+        rc = storage_object_remove(STORAGE_OBJECT_PENDING_SMS, id);
+        if (rc == STORAGE_RECORD_OK || rc == STORAGE_RECORD_NOT_FOUND) {
+            erase_index(s_pending, &s_pending_count, pos);
+            s_status.filtered_controls++;
+            return STORAGE_RECORD_OK;
+        }
+        return rc;
+    }
     if (existing >= 0) {
         /* Both copies survived a cut after publication. Never delete the
          * staging copy unless the published body is exactly the same. */
@@ -370,7 +433,19 @@ void message_service_tick(uint32_t now) {
     }
     if (s_queued != 0u) {
         rc = receive_one();
-        if (rc != STORAGE_RECORD_OK) { failure(rc, now); return; }
+        if (rc != STORAGE_RECORD_OK) {
+            /* A full category must not block another category behind it. */
+            if (rc == STORAGE_RECORD_FULL && s_queued > 1u) {
+                uint8_t tail = (s_head + s_queued) % RECEIVE_LIMIT;
+                if (tail != s_head) {
+                    s_receive[tail] = s_receive[s_head];
+                    memset(&s_receive[s_head], 0, sizeof(s_receive[s_head]));
+                }
+                s_head = (s_head + 1u) % RECEIVE_LIMIT;
+            }
+            failure(rc, now);
+            return;
+        }
         memset(&s_receive[s_head], 0, sizeof(s_receive[s_head]));
         s_head = (s_head + 1u) % RECEIVE_LIMIT; s_queued--;
     }
@@ -383,4 +458,5 @@ bool message_service_idle(void) {
         if (s_requests[i].result.request_id != 0u && !s_requests[i].done) return false;
     return true;
 }
+void message_service_note_receive_loss(void) { s_status.receive_errors++; }
 void message_service_get_status(message_status_t *out) { if (out != NULL) *out = s_status; }

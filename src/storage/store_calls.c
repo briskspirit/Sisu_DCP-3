@@ -7,19 +7,14 @@
 
 #include <string.h>
 
-#include "services/log.h"
-
 #define CALLS_MAGIC 0x43414c31u
 #define CALLS_PAYLOAD_VERSION 2u
-#define CALLS_LEGACY_PAYLOAD_VERSION 1u
 #define CALLS_FIRST_YEAR 1999u
 #define CALLS_LAST_YEAR 2090u
 #define CALLS_YEAR_CODE_MAX (CALLS_LAST_YEAR - CALLS_FIRST_YEAR)
 
 _Static_assert(CALLS_YEAR_CODE_MAX <= UINT8_MAX,
                "call-log year code must fit its version-2 byte");
-_Static_assert(CALLS_LEGACY_PAYLOAD_VERSION == STORE_PAYLOAD_VERSION,
-               "version-1 call migration must match the original store schema");
 
 typedef struct {
     store_call_record_t records[STORE_CALL_LIST_LIMIT];
@@ -170,24 +165,6 @@ store_status_t store_life_timer_add_seconds(uint32_t seconds) {
     return store_setting_set_u32(STORE_SETTING_CALL_DURATION_LIFETIME, after);
 }
 
-void store_calls_migrate_life_timer(uint32_t warranty_donor) {
-    uint32_t lifetime = store_life_timer_seconds();
-    uint32_t all_calls = 0u;
-    (void)store_setting_get_u32(STORE_SETTING_CALL_DURATION_ALL, &all_calls);
-    uint32_t migrated = lifetime;
-    if (all_calls > migrated) {
-        migrated = all_calls;
-    }
-    if (warranty_donor > migrated) {
-        migrated = warranty_donor;
-    }
-    if (migrated != lifetime) {
-        (void)store_setting_set_u32(STORE_SETTING_CALL_DURATION_LIFETIME, migrated);
-        LOGI("store", "migrated Life timer: %lu seconds",
-             (unsigned long)migrated);
-    }
-}
-
 static store_unit_t unit_for_call_list(store_call_list_t list) {
     return (store_unit_t)((uint8_t)STORE_UNIT_CALLS_MISSED + (uint8_t)list);
 }
@@ -249,8 +226,7 @@ static bool apply_call_payload(store_call_list_t list, const uint8_t *payload, s
         return false;
     }
     uint16_t version = read_u16(&payload[4]);
-    if (version != CALLS_LEGACY_PAYLOAD_VERSION &&
-        version != CALLS_PAYLOAD_VERSION) {
+    if (version != CALLS_PAYLOAD_VERSION) {
         return false;
     }
     uint8_t count = payload[7];
@@ -283,12 +259,10 @@ static bool apply_call_payload(store_call_list_t list, const uint8_t *payload, s
         if (number_len > STORE_CALL_NUMBER_MAX || name_len > STORE_CALL_NAME_MAX) {
             return false;
         }
-        if (version == CALLS_PAYLOAD_VERSION) {
-            if (year_code > CALLS_YEAR_CODE_MAX) {
-                return false;
-            }
-            record->datetime.year = (uint16_t)(CALLS_FIRST_YEAR + year_code);
+        if (year_code > CALLS_YEAR_CODE_MAX) {
+            return false;
         }
+        record->datetime.year = (uint16_t)(CALLS_FIRST_YEAR + year_code);
         memcpy(record->number, &payload[pos], number_len);
         record->number[number_len] = '\0';
         pos += STORE_CALL_NUMBER_MAX + 1u;

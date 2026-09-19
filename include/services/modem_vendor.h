@@ -201,16 +201,6 @@ typedef struct {
     uint32_t sim_activation_window_ms;
 } modem_sms_wake_cfg_t;
 
-/* Some backends mutate REC UNREAD to REC READ merely by listing or reading a
- * stored message. The generic SMS service brackets metadata scans with the
- * preserve command and temporarily selects consume mode only for a body the
- * user explicitly opens. NULL commands retain the backend's native behavior. */
-typedef struct {
-    const char *preserve_unread_cmd;
-    const char *consume_unread_cmd;
-    uint32_t timeout_ms;
-} modem_sms_read_status_cfg_t;
-
 /* modem_call_event_kind_t / modem_call_event_t are the §16.12 normalized call-event
  * kinds — moved to the neutral services/call_types.h (included above) so the vendor
  * adapter shares them with the model without a vendor->model dependency. */
@@ -314,7 +304,6 @@ typedef struct modem_vendor {
     uint32_t provision_reboot_timeout_ms;
     modem_wake_cfg_t wake;
     modem_sms_wake_cfg_t sms_wake;
-    modem_sms_read_status_cfg_t sms_read_status;
     const char *call_urc_prefix;
     bool (*parse_call_urc)(const char *line, modem_call_event_t *out);
     bool (*parse_clcc_row)(const char *line, modem_clcc_row_t *out);

@@ -97,17 +97,13 @@ typedef struct {
     uint32_t tx_stall_drops;
     uint32_t urc_count;
     uint32_t command_errors;
-    uint32_t sms_received_count;      /* raw +CMTI storage revisions; drives reconciliation */
-    uint32_t sms_user_received_count; /* post-classification arrivals visible to the user */
+    uint32_t sms_received_count; /* normalized incoming transport segments */
     uint32_t sms_sent_count;
     uint32_t sms_filtered_type0;
     uint32_t sms_filtered_vvm;
     uint32_t sms_filtered_oma_dm;
     uint32_t picture_parts_received;
     uint32_t picture_receive_errors;
-    uint16_t sms_storage_used;      /* receive-store occupancy (CPMS mem3), for the memory-full notice */
-    uint16_t sms_storage_total;
-    uint32_t sms_storage_full_events; /* rising-edge count: store went full -> app shows "No space for new messages" (1:1 SID 453) */
     uint32_t last_update_ms;
     uint8_t debug_state;
     uint8_t debug_active_kind;
@@ -253,10 +249,8 @@ bool modem_service_request_send_binary_sms_mode(const char *number,
                                                 uint16_t source_port,
                                                 modem_binary_sms_mode_t mode,
                                                 uint32_t *request_id_out);
-bool modem_service_request_save_sms(const char *number, const char *text,
-                                    uint32_t *request_id_out);
 bool modem_service_request_debug_at(const char *command);
-/* RAM-only bench control. Disabling suppresses periodic radio/storage
+/* RAM-only bench control. Disabling suppresses periodic radio
  * backstops, but never event-driven work, RI wake, calls, or SMS handling. */
 bool modem_service_request_debug_background_polling(bool enabled);
 /* Opt-in RAM-only capture before AT line framing. Reading requires a stopped
@@ -293,32 +287,9 @@ bool modem_service_diag_select(modem_diag_group_t group, uint32_t generation,
                                bool request_now);
 void modem_service_diag_cancel(uint32_t generation);
 void modem_service_get_diag_snapshot(modem_diag_snapshot_t *out);
-bool modem_service_request_sms_mailbox(modem_sms_mailbox_t mailbox,
-                                       uint32_t *request_id_out);
-bool modem_service_request_sms_read(const uint16_t *indices,
-                                    uint8_t index_count,
-                                    bool quarantined,
-                                    uint32_t expected_identity_hash,
-                                    uint32_t *request_id_out);
-/* A terminal is removed only when request_id is its exact owner. Polling with
- * zero or a foreign id is non-destructive, so independent UI/debug consumers
- * cannot steal one another's completion. */
-bool modem_service_pop_sms_mailbox_result(uint32_t request_id,
-                                          modem_sms_mailbox_result_t *out);
-bool modem_service_pop_sms_read_result(uint32_t request_id,
-                                       modem_sms_read_result_t *out);
+/* Terminals are consumed only by their exact request token. */
 bool modem_service_pop_sms_send_result(uint32_t request_id,
                                        modem_sms_send_result_t *out);
 bool modem_service_pop_debug_result(modem_debug_result_t *out);
-bool modem_service_pop_sms_save_result(uint32_t request_id,
-                                       modem_sms_save_result_t *out);
-bool modem_service_request_delete_sms_indices(const uint16_t *indices,
-                                              uint8_t index_count,
-                                              uint32_t *request_id_out);
-bool modem_service_pop_sms_delete_result(uint32_t request_id,
-                                         modem_sms_delete_result_t *out);
-uint8_t modem_service_sms_mailbox_count(void);
-bool modem_service_sms_mailbox_entry(uint8_t position,
-                                     modem_sms_record_t *out);
 
 #endif

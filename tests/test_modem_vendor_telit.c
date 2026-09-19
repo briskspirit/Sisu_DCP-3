@@ -155,21 +155,13 @@ static void test_production_descriptor(void) {
               g_modem_vendor.sms_wake.qualified_by_sim_completion &&
               g_modem_vendor.sms_wake.sim_activation_window_ms == 10000u,
           "pre-CFUN SMS wake lifecycle stays in the Telit vendor contract");
-    check_string(g_modem_vendor.sms_read_status.preserve_unread_cmd,
-                 "AT#SMSUCS=1",
-                 "Telit mailbox scans preserve unread status");
-    check_string(g_modem_vendor.sms_read_status.consume_unread_cmd,
-                 "AT#SMSUCS=0",
-                 "Telit selected reads consume unread status");
-    check(g_modem_vendor.sms_read_status.timeout_ms == 2500u,
-          "Telit unread-status commands have a bounded deadline");
     check(g_modem_vendor.call.capabilities == MODEM_CALL_CAPABILITY_ALL &&
               g_modem_vendor.call.build_command != NULL &&
               g_modem_vendor.call.build_dtmf_command != NULL,
           "manual-supported call operations exposed at protocol layer");
     check(g_modem_vendor.call.progress_finals_may_complete_command,
           "usual Telit finals can complete call commands");
-    check(g_modem_vendor.provision_schema_version == 11u,
+    check(g_modem_vendor.provision_schema_version == 12u,
           "Telit provisioning contract has an explicit schema version");
     check(g_modem_vendor.supplementary.supported &&
               g_modem_vendor.supplementary.call_forward_step_count != NULL &&
@@ -353,7 +345,7 @@ static void test_production_descriptor(void) {
         find_provision_step_nth("AT+CFUN?", 1u);
     check(rxdiv != NULL && sled != NULL && gps_start != NULL &&
               gps_runtime != NULL && scan_timer != NULL && auto_profile != NULL &&
-              cpms != NULL && wkio != NULL && ring_profile != NULL &&
+              cpms == NULL && wkio != NULL && ring_profile != NULL &&
               e2smsri != NULL && psmri != NULL && ecamurc != NULL &&
               dviext != NULL && dvi != NULL &&
               stune != NULL && gpio2 != NULL && gpio3 != NULL && cfun != NULL &&
@@ -483,22 +475,6 @@ static void test_production_descriptor(void) {
                   dvi->parse_readback("#DVI: 1,x,1") ==
                       MODEM_PROVISION_LINE_INVALID,
               "DVI runtime mode is strictly verified as enabled module-master");
-    }
-    if (cpms != NULL) {
-        check(cpms->recoverable &&
-                  cpms->degrade == MODEM_DEGRADE_SMS_SETUP &&
-                  cpms->prerequisites == MODEM_INIT_PREREQ_SIM_READY &&
-                  cpms->persistence == MODEM_SETTING_NVM &&
-                  cpms->parse_readback(
-                      "+CPMS: \"ME\",0,255,\"ME\",1,255,\"ME\",2,255") ==
-                      MODEM_PROVISION_LINE_MATCH &&
-                  cpms->parse_readback(
-                      "+CPMS: \"SM\",0,20,\"ME\",0,255,\"ME\",0,255") ==
-                      MODEM_PROVISION_LINE_MISMATCH &&
-                  cpms->parse_readback(
-                      "+CPMS: \"ME\",x,255,\"ME\",0,255,\"ME\",0,255") ==
-                      MODEM_PROVISION_LINE_INVALID,
-              "auto-saved CPMS is queried, strictly parsed, and only then written");
     }
     if (wkio != NULL) {
         check(wkio->prerequisites ==

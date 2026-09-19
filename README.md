@@ -89,8 +89,9 @@ shutdown work and wake-source checks complete.
 Settings and phone-local records use CRC-protected atomic records on separate
 64 KiB system and 384 KiB user littlefs partitions. Previous layouts require an
 explicit erase; no journal import is performed. Contacts are local files with a
-boot-time RAM cache, independent of the SIM. SMS bodies remain modem-backed at
-this stage and are read lazily. See [Storage engine](docs/storage_engine.md) for the flash layout.
+boot-time RAM cache, independent of the SIM. Inbox, outbox and multipart staging
+also use local files; bodies are decoded lazily and complete multipart messages
+remain one atomic file. See [Storage engine](docs/storage_engine.md) for the flash layout.
 
 ## License
 

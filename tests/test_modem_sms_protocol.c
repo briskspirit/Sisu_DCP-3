@@ -30,13 +30,10 @@ typedef struct {
     bool complete;
     bool restore_after_settle;
     uint16_t index;
-    modem_sms_record_t record;
 } captured_action_t;
 
 static captured_action_t s_actions[CAPTURE_MAX];
 static size_t s_action_count;
-static bool s_sim_ready;
-static bool s_call_preempt;
 static bool s_auto_dispatch_commands;
 static int s_failures;
 
@@ -99,45 +96,10 @@ static bool capture_emit(const modem_sms_protocol_action_t *action) {
             action->data.abort_prompt.restore_after_settle;
         break;
     case MODEM_SMS_ACTION_PUBLISH_SEND:
-    case MODEM_SMS_ACTION_PUBLISH_SAVE:
-    case MODEM_SMS_ACTION_PUBLISH_DELETE:
         captured->request_id = action->data.result.request_id;
         captured->request_kind = action->data.result.kind;
         captured->outcome = action->data.result.outcome;
         captured->ok = action->data.result.outcome == MODEM_SMS_OUTCOME_OK;
-        captured->sim_not_ready = action->data.result.sim_not_ready;
-        break;
-    case MODEM_SMS_ACTION_PUBLISH_READ:
-        captured->request_id = action->data.read_result.request_id;
-        captured->request_kind = action->data.read_result.kind;
-        captured->outcome = action->data.read_result.outcome;
-        captured->ok =
-            action->data.read_result.outcome == MODEM_SMS_OUTCOME_OK;
-        captured->sim_not_ready = action->data.read_result.sim_not_ready;
-        break;
-    case MODEM_SMS_ACTION_PUBLISH_MAILBOX:
-        captured->request_id = action->data.mailbox_result.request_id;
-        captured->request_kind = action->data.mailbox_result.kind;
-        captured->outcome = action->data.mailbox_result.outcome;
-        captured->ok =
-            action->data.mailbox_result.outcome == MODEM_SMS_OUTCOME_OK;
-        captured->sim_not_ready = action->data.mailbox_result.sim_not_ready;
-        captured->complete = action->data.mailbox_result.complete;
-        break;
-    case MODEM_SMS_ACTION_APPEND_MAILBOX:
-        if (action->data.append_mailbox.record == NULL) {
-            return false;
-        }
-        captured->record = *action->data.append_mailbox.record;
-        return modem_sms_state_mailbox_append(
-            action->data.append_mailbox.record);
-    case MODEM_SMS_ACTION_ARRIVAL_SCAN_COMMIT:
-        captured->complete = action->data.arrival_commit.complete;
-        break;
-    case MODEM_SMS_ACTION_PUBLISH_DELIVERED:
-        captured->index = action->data.delivered.index;
-        captured->outcome = action->data.delivered.outcome;
-        captured->ok = action->data.delivered.outcome == MODEM_SMS_OUTCOME_OK;
         break;
     case MODEM_SMS_ACTION_COMPLETE:
         captured->request_id = action->data.complete.request_id;
@@ -145,39 +107,19 @@ static bool capture_emit(const modem_sms_protocol_action_t *action) {
         captured->outcome = action->data.complete.outcome;
         captured->ok = action->data.complete.command_ok;
         break;
-    case MODEM_SMS_ACTION_SELECTED_BEGIN:
-        /* Mirror the root host's synchronous state effect so later protocol
-         * calls exercise the real selected-read cursor. */
-        modem_sms_state_selected_begin(
-            action->data.selected_begin.first_index,
-            action->data.selected_begin.index_count,
-            action->data.selected_begin.quarantined);
-        break;
     default:
         break;
     }
     return true;
 }
 
-static bool capture_sim_ready(void) {
-    return s_sim_ready;
-}
-
-static bool capture_call_preempt(void) {
-    return s_call_preempt;
-}
-
 static const modem_sms_protocol_hooks_t s_hooks = {
     .emit = capture_emit,
-    .sim_ready = capture_sim_ready,
-    .call_preempt_pending = capture_call_preempt,
 };
 
 static void reset_fixture(void) {
     modem_sms_state_init();
     modem_sms_protocol_init();
-    s_sim_ready = true;
-    s_call_preempt = false;
     s_auto_dispatch_commands = true;
     clear_actions();
 }
@@ -192,38 +134,6 @@ static modem_sms_protocol_request_t text_request(void) {
     return request;
 }
 
-static modem_sms_protocol_request_t inbox_request(void) {
-    modem_sms_protocol_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.request_id = UINT32_C(0x1002);
-    request.operation = MODEM_SMS_PROTOCOL_MAILBOX;
-    request.mailbox = MODEM_SMS_MAILBOX_INBOX;
-    request.read_status.preserve_unread_cmd = "AT+PRESERVE";
-    request.read_status.consume_unread_cmd = "AT+CONSUME";
-    request.read_status.timeout_ms = 7000u;
-    return request;
-}
-
-static modem_sms_message_t orphan_segment(uint16_t index, uint8_t sequence) {
-    modem_sms_message_t message;
-    memset(&message, 0, sizeof(message));
-    message.index = index;
-    message.binary = true;
-    message.has_ports = true;
-    message.has_concat = true;
-    message.dest_port = SMS_CODEC_PICTURE_PORT;
-    message.concat_ref = 0x55u;
-    message.concat_total = 3u;
-    message.concat_seq = sequence;
-    message.binary_len = 1u;
-    message.binary_data[0] = sequence;
-    snprintf(message.status, sizeof(message.status), "REC UNREAD");
-    snprintf(message.sender, sizeof(message.sender), "+15551230000");
-    snprintf(message.timestamp, sizeof(message.timestamp),
-             "26/08/21,12:34:56-16");
-    return message;
-}
-
 static void check_command(size_t position, modem_sms_command_kind_t kind,
                           const char *command, uint32_t timeout_ms,
                           bool raw, bool append_cr, const char *message) {
@@ -236,95 +146,55 @@ static void check_command(size_t position, modem_sms_command_kind_t kind,
         s_actions[position].append_cr == append_cr;
     check(match, message);
 }
-
-static void test_text_send_and_sent_copy_failure(void) {
-    reset_fixture();
-    modem_sms_protocol_request_t request = text_request();
-    check(modem_sms_protocol_begin(&request, &s_hooks, 100u) &&
-              s_action_count == 1u,
-          "text send begins without mutating a prior result channel");
-    check_command(
-        0u, MODEM_SMS_COMMAND_CPMS,
-        "AT+CPMS=\"" MODEM_SMS_STORAGE "\",\"" MODEM_SMS_STORAGE
-        "\",\"" MODEM_SMS_STORAGE "\"",
-        5000u, false, false, "text send starts with exact CPMS command");
-
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 110u);
-    check(s_action_count == 1u &&
-              s_actions[0].type ==
-                  MODEM_SMS_ACTION_REQUEST_WAKE_CONTINUATION,
-          "CPMS success yields through the core wake qualifier");
-
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 120u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGS_PROMPT,
-                  "AT+CMGS=\"+15551234567\",145", 5000u, true, true,
-                  "qualified text send opens the exact CMGS prompt");
-
-    clear_actions();
-    check(modem_sms_protocol_on_prompt(
-              MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 130u) &&
-              s_action_count == 1u &&
-              s_actions[0].type == MODEM_SMS_ACTION_BODY &&
-              s_actions[0].body_len == 5u &&
-              memcmp(s_actions[0].body, "hello", 5u) == 0 &&
-              s_actions[0].final_kind == MODEM_SMS_COMMAND_CMGS_FINAL &&
-              s_actions[0].timeout_ms == 30000u &&
-              !s_actions[0].binary,
-          "CMGS prompt emits the borrowed text body and final contract");
-
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGS_FINAL, true, &request, &s_hooks, 140u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_INCREMENT_SENT,
-          "network acceptance increments the sent counter once");
-    check_command(1u, MODEM_SMS_COMMAND_CMGW_PROMPT,
-                  "AT+CMGW=\"+15551234567\",145,\"STO SENT\"",
-                  5000u, true, true,
-                  "network acceptance opens the exact sent-copy prompt");
-
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGW_FINAL, false, &request, &s_hooks, 150u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_SEND &&
-              s_actions[0].request_id == request.request_id &&
-              s_actions[0].request_kind == MODEM_SMS_REQUEST_SEND_TEXT &&
-              s_actions[0].outcome == MODEM_SMS_OUTCOME_OK &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[1].request_id == request.request_id &&
-              s_actions[1].outcome == MODEM_SMS_OUTCOME_OK &&
-              s_actions[1].ok,
-          "sent-copy failure cannot turn a delivered SMS into retryable failure");
-
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGW_PROMPT, false, &request, &s_hooks, 160u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_SEND &&
-              s_actions[0].outcome == MODEM_SMS_OUTCOME_OK &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[1].outcome == MODEM_SMS_OUTCOME_OK &&
-              s_actions[1].ok,
-          "sent-copy prompt error preserves network-send success");
-
-    clear_actions();
-    modem_sms_protocol_on_timeout(
-        MODEM_SMS_COMMAND_CMGW_PROMPT, &request, &s_hooks, 170u);
-    check(s_action_count == 3u &&
-              s_actions[0].type == MODEM_SMS_ACTION_ABORT_PROMPT &&
-              !s_actions[0].restore_after_settle &&
-              s_actions[1].type == MODEM_SMS_ACTION_PUBLISH_SEND &&
-              s_actions[1].outcome == MODEM_SMS_OUTCOME_OK &&
-              s_actions[2].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[2].outcome == MODEM_SMS_OUTCOME_OK &&
-              s_actions[2].ok,
-          "lost sent-copy prompt aborts transport without inviting SMS retry");
+static void advance_text_to_prompt(modem_sms_protocol_request_t *request, uint32_t now) {
+    check(modem_sms_protocol_begin(request, &s_hooks, now), "text begin");
+    check_command(0u, MODEM_SMS_COMMAND_CMGS_PROMPT, "AT+CMGS=\"+15551234567\",145",
+                  5000u, false, false, "CMGS uses wake-aware command dispatch, without ME selection");
 }
-
+static void test_text_transport(void) {
+    modem_sms_protocol_request_t r = text_request();
+    reset_fixture();
+    advance_text_to_prompt(&r, 1u);
+    check(!modem_sms_protocol_settings_restore_needed(), "text send does not change receive format");
+    clear_actions();
+    check(modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGS_PROMPT, &r, &s_hooks, 2u), "body accepted");
+    check(s_action_count == 1u && s_actions[0].body_len == 5u &&
+          memcmp(s_actions[0].body, "hello", 5u) == 0, "exact text body");
+    clear_actions();
+    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGS_FINAL, true, &r, &s_hooks, 3u);
+    check(s_action_count == 3u && s_actions[0].type == MODEM_SMS_ACTION_INCREMENT_SENT &&
+          s_actions[1].type == MODEM_SMS_ACTION_PUBLISH_SEND &&
+          s_actions[1].outcome == MODEM_SMS_OUTCOME_OK &&
+          s_actions[2].type == MODEM_SMS_ACTION_COMPLETE, "accepted send completes without CMGW");
+    reset_fixture();
+    advance_text_to_prompt(&r, 10u);
+    clear_actions();
+    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGS_PROMPT, &r, &s_hooks, 11u);
+    check(s_action_count == 3u && s_actions[0].type == MODEM_SMS_ACTION_ABORT_PROMPT &&
+          s_actions[1].outcome == MODEM_SMS_OUTCOME_TIMEOUT, "lost prompt is aborted and retry safe");
+    reset_fixture();
+    advance_text_to_prompt(&r, 20u);
+    (void)modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGS_PROMPT, &r, &s_hooks, 21u);
+    clear_actions();
+    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGS_FINAL, &r, &s_hooks, 22u);
+    check(s_action_count == 2u && s_actions[0].outcome == MODEM_SMS_OUTCOME_UNCERTAIN,
+          "lost final after body cannot authorize retry");
+}
+static void test_dispatch_evidence(void) {
+    uint8_t byte = 0u;
+    modem_sms_protocol_request_t r = {.request_id=3u, .operation=MODEM_SMS_PROTOCOL_SEND_BINARY,
+        .number="123", .binary=&byte, .binary_len=1u};
+    reset_fixture(); s_auto_dispatch_commands = false;
+    check(modem_sms_protocol_begin(&r, &s_hooks, 1u) && !modem_sms_protocol_pdu_mode_possible(),
+          "queued mode command is not dispatch evidence");
+    modem_sms_protocol_command_dispatched(MODEM_SMS_COMMAND_CMGF_PDU);
+    check(modem_sms_protocol_pdu_mode_possible(), "dispatch establishes possible PDU mode");
+    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGF_PDU, &r, &s_hooks, 2u);
+    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGF_TEXT, &r, &s_hooks, 3u);
+    check(modem_sms_protocol_pdu_mode_possible(), "lost restore final retains repair obligation");
+    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &r, &s_hooks, 4u);
+    check(!modem_sms_protocol_settings_restore_needed(), "confirmed restore clears obligation");
+}
 static void test_binary_prompt_timeout_restore(void) {
     reset_fixture();
     static const uint8_t payload[] = {0x10u, 0x20u, 0x30u};
@@ -478,134 +348,6 @@ static void test_binary_cleanup_duplicate_wedge(void) {
           "cleanup timeout without payload acceptance remains retry-safe");
 }
 
-static void advance_text_to_prompt(modem_sms_protocol_request_t *request,
-                                   uint32_t now_ms) {
-    check(modem_sms_protocol_begin(request, &s_hooks, now_ms),
-          "text evidence fixture begins");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CPMS, true, request, &s_hooks, now_ms + 1u);
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(
-        request, &s_hooks, now_ms + 2u);
-}
-
-static void test_send_evidence_boundaries(void) {
-    modem_sms_protocol_request_t request = text_request();
-
-    reset_fixture();
-    advance_text_to_prompt(&request, 280u);
-    clear_actions();
-    modem_sms_protocol_on_timeout(
-        MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 283u);
-    check(s_action_count == 3u &&
-              s_actions[0].type == MODEM_SMS_ACTION_ABORT_PROMPT &&
-              s_actions[1].type == MODEM_SMS_ACTION_PUBLISH_SEND &&
-              s_actions[1].request_id == request.request_id &&
-              s_actions[1].request_kind == MODEM_SMS_REQUEST_SEND_TEXT &&
-              s_actions[1].outcome == MODEM_SMS_OUTCOME_TIMEOUT &&
-              s_actions[2].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[2].outcome == MODEM_SMS_OUTCOME_TIMEOUT,
-          "a lost pre-body CMGS prompt remains safely retryable");
-
-    reset_fixture();
-    advance_text_to_prompt(&request, 290u);
-    clear_actions();
-    check(modem_sms_protocol_on_prompt(
-              MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 293u),
-          "text uncertainty fixture hands the body to the modem");
-    clear_actions();
-    modem_sms_protocol_on_timeout(
-        MODEM_SMS_COMMAND_CMGS_FINAL, &request, &s_hooks, 294u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_SEND &&
-              s_actions[0].request_id == request.request_id &&
-              s_actions[0].outcome == MODEM_SMS_OUTCOME_UNCERTAIN &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[1].outcome == MODEM_SMS_OUTCOME_UNCERTAIN &&
-              !s_actions[1].ok,
-          "a lost CMGS final is explicitly uncertain, never retryable error");
-
-    reset_fixture();
-    advance_text_to_prompt(&request, 300u);
-    clear_actions();
-    check(modem_sms_protocol_on_prompt(
-              MODEM_SMS_COMMAND_CMGS_PROMPT, &request, &s_hooks, 303u),
-          "sent-copy fixture hands the body to the modem");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGS_FINAL, true, &request, &s_hooks, 304u);
-    clear_actions();
-    modem_sms_protocol_on_timeout(
-        MODEM_SMS_COMMAND_CMGW_FINAL, &request, &s_hooks, 305u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_SEND &&
-              s_actions[0].outcome == MODEM_SMS_OUTCOME_OK &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[1].outcome == MODEM_SMS_OUTCOME_OK &&
-              s_actions[1].ok,
-          "a lost sent-copy final cannot erase confirmed network delivery");
-}
-
-static void test_mutating_timeout_boundaries(void) {
-    modem_sms_protocol_request_t save;
-    memset(&save, 0, sizeof(save));
-    save.request_id = UINT32_C(0x1010);
-    save.operation = MODEM_SMS_PROTOCOL_SAVE;
-    save.number = "+15550100";
-    save.text = "draft";
-
-    reset_fixture();
-    check(modem_sms_protocol_begin(&save, &s_hooks, 310u),
-          "save uncertainty fixture begins");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CPMS, true, &save, &s_hooks, 311u);
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&save, &s_hooks, 312u);
-    clear_actions();
-    check(modem_sms_protocol_on_prompt(
-              MODEM_SMS_COMMAND_CMGW_PROMPT, &save, &s_hooks, 313u),
-          "save uncertainty fixture hands the draft to the modem");
-    clear_actions();
-    modem_sms_protocol_on_timeout(
-        MODEM_SMS_COMMAND_CMGW_FINAL, &save, &s_hooks, 314u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_SAVE &&
-              s_actions[0].request_id == save.request_id &&
-              s_actions[0].request_kind == MODEM_SMS_REQUEST_SAVE &&
-              s_actions[0].outcome == MODEM_SMS_OUTCOME_UNCERTAIN &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[1].outcome == MODEM_SMS_OUTCOME_UNCERTAIN,
-          "a lost CMGW final reports uncertain draft persistence");
-
-    static const uint16_t delete_index = 7u;
-    modem_sms_protocol_request_t deletion;
-    memset(&deletion, 0, sizeof(deletion));
-    deletion.request_id = UINT32_C(0x1011);
-    deletion.operation = MODEM_SMS_PROTOCOL_DELETE;
-    deletion.indices = &delete_index;
-    deletion.index_count = 1u;
-    reset_fixture();
-    check(modem_sms_protocol_begin(&deletion, &s_hooks, 320u),
-          "delete uncertainty fixture begins");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CPMS, true, &deletion, &s_hooks, 321u);
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&deletion, &s_hooks, 322u);
-    clear_actions();
-    modem_sms_protocol_on_timeout(
-        MODEM_SMS_COMMAND_CMGD, &deletion, &s_hooks, 323u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_DELETE &&
-              s_actions[0].request_id == deletion.request_id &&
-              s_actions[0].outcome == MODEM_SMS_OUTCOME_UNCERTAIN &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[1].outcome == MODEM_SMS_OUTCOME_UNCERTAIN,
-          "a lost CMGD final reports uncertain deletion");
-}
-
 static void test_binary_uncertainty_boundaries(void) {
     static uint8_t payload[MODEM_SMS_BINARY_CHUNK_MAX + 1u];
     memset(payload, 0x5au, sizeof(payload));
@@ -711,832 +453,6 @@ static void test_cancel_evidence(void) {
     modem_sms_protocol_cancel();
 }
 
-static void test_delete_dispatch_evidence(void) {
-    static const uint16_t indices[] = {4u, 7u};
-    modem_sms_protocol_request_t deletion;
-    memset(&deletion, 0, sizeof(deletion));
-    deletion.request_id = UINT32_C(0x1013);
-    deletion.operation = MODEM_SMS_PROTOCOL_DELETE;
-    deletion.indices = indices;
-    deletion.index_count = 2u;
-
-    reset_fixture();
-    check(modem_sms_protocol_begin(&deletion, &s_hooks, 380u),
-          "pre-dispatch delete fixture begins");
-    clear_actions();
-    s_auto_dispatch_commands = false;
-    modem_sms_protocol_resume_after_wake(&deletion, &s_hooks, 381u);
-    check(s_action_count == 1u &&
-              s_actions[0].command_kind == MODEM_SMS_COMMAND_CMGD &&
-              modem_sms_protocol_cancel_outcome(&deletion) ==
-                  MODEM_SMS_OUTCOME_CANCELLED,
-          "an emitted but UART-deferred first delete remains retry-safe");
-
-    reset_fixture();
-    check(modem_sms_protocol_begin(&deletion, &s_hooks, 390u),
-          "dispatched delete fixture begins");
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&deletion, &s_hooks, 391u);
-    check(modem_sms_protocol_cancel_outcome(&deletion) ==
-              MODEM_SMS_OUTCOME_UNCERTAIN,
-          "a delete that crossed UART is uncertain on cancellation");
-
-    reset_fixture();
-    check(modem_sms_protocol_begin(&deletion, &s_hooks, 400u),
-          "partially applied delete fixture begins");
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&deletion, &s_hooks, 401u);
-    s_auto_dispatch_commands = false;
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGD, true, &deletion, &s_hooks, 402u);
-    check(s_action_count == 1u &&
-              s_actions[0].command_kind == MODEM_SMS_COMMAND_CMGD &&
-              modem_sms_protocol_cancel_outcome(&deletion) ==
-                  MODEM_SMS_OUTCOME_UNCERTAIN,
-          "one accepted delete keeps the batch uncertain while its next command is deferred");
-}
-
-/* A cancelled operation may leave the module in PDU mode: the root host
- * asks this before modem_sms_protocol_cancel() and restores text mode from
- * its idle scheduler. Evidence is the UART crossing of AT+CMGF=0 without a
- * completed AT+CMGF=1. */
-static void test_pdu_mode_evidence(void) {
-    modem_sms_protocol_request_t mailbox = inbox_request();
-    reset_fixture();
-    check(!modem_sms_protocol_pdu_mode_possible(),
-          "no PDU mode before any operation");
-    check(modem_sms_protocol_begin(&mailbox, &s_hooks, 500u) &&
-              !modem_sms_protocol_pdu_mode_possible(),
-          "mailbox begin (CPMS) has not entered PDU mode");
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&mailbox, &s_hooks, 501u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_STATUS_PRESERVE, true,
-                                &mailbox, &s_hooks, 502u);
-    check(s_action_count == 2u &&
-              s_actions[1].command_kind == MODEM_SMS_COMMAND_CMGF_PDU &&
-              modem_sms_protocol_pdu_mode_possible(),
-          "a dispatched AT+CMGF=0 makes PDU mode possible");
-    clear_actions();
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &mailbox,
-                                &s_hooks, 503u);
-    check(s_action_count == 1u &&
-              s_actions[0].command_kind == MODEM_SMS_COMMAND_CMGL &&
-              modem_sms_protocol_pdu_mode_possible(),
-          "PDU mode stays possible through the CMGL scan");
-    clear_actions();
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGL, true, &mailbox,
-                                &s_hooks, 504u);
-    check(s_action_count == 1u &&
-              s_actions[0].command_kind == MODEM_SMS_COMMAND_CMGF_TEXT &&
-              modem_sms_protocol_pdu_mode_possible(),
-          "an emitted AT+CMGF=1 is not yet a completed one");
-    clear_actions();
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &mailbox,
-                                &s_hooks, 505u);
-    check(!modem_sms_protocol_pdu_mode_possible(),
-          "a completed AT+CMGF=1 clears the evidence");
-    modem_sms_protocol_cancel();
-
-    /* AT+CMGF=0 rejected: the mode never changed. */
-    reset_fixture();
-    check(modem_sms_protocol_begin(&mailbox, &s_hooks, 510u), "rejected-PDU fixture begins");
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&mailbox, &s_hooks, 511u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_STATUS_PRESERVE, true,
-                                &mailbox, &s_hooks, 512u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, false, &mailbox,
-                                &s_hooks, 513u);
-    check(!modem_sms_protocol_pdu_mode_possible(),
-          "a rejected AT+CMGF=0 leaves no PDU-mode evidence");
-    modem_sms_protocol_cancel();
-
-    /* Emitted but never dispatched (DTR/CTS deferred): nothing crossed the
-     * UART, so there is nothing to restore; only the dispatch callback counts. */
-    reset_fixture();
-    s_auto_dispatch_commands = false;
-    check(modem_sms_protocol_begin(&mailbox, &s_hooks, 530u), "undispatched fixture begins");
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&mailbox, &s_hooks, 531u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_STATUS_PRESERVE, true,
-                                &mailbox, &s_hooks, 532u);
-    check(s_action_count == 2u &&
-              s_actions[1].command_kind == MODEM_SMS_COMMAND_CMGF_PDU &&
-              !modem_sms_protocol_pdu_mode_possible(),
-          "an emitted but undispatched AT+CMGF=0 is no evidence");
-    modem_sms_protocol_command_dispatched(MODEM_SMS_COMMAND_CMGF_PDU);
-    check(modem_sms_protocol_pdu_mode_possible(),
-          "the dispatch callback is the evidence");
-    modem_sms_protocol_cancel();
-    check(!modem_sms_protocol_pdu_mode_possible(),
-          "cancel resets the protocol state (the host reads the flag first)");
-
-    /* STORE_DELIVERED: a lost AT+CMGF=1 final keeps the evidence. */
-    reset_fixture();
-    modem_sms_protocol_request_t delivered;
-    memset(&delivered, 0, sizeof(delivered));
-    delivered.request_id = UINT32_C(0x1020);
-    delivered.operation = MODEM_SMS_PROTOCOL_STORE_DELIVERED;
-    delivered.pdu_hex = "0004";
-    delivered.tpdu_len = 1u;
-    check(modem_sms_protocol_begin(&delivered, &s_hooks, 540u), "delivered fixture begins");
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&delivered, &s_hooks, 541u);
-    check(s_action_count == 1u &&
-              s_actions[0].command_kind == MODEM_SMS_COMMAND_CMGF_PDU &&
-              modem_sms_protocol_pdu_mode_possible(),
-          "STORE_DELIVERED enters PDU mode");
-    clear_actions();
-    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGF_PDU, &delivered,
-                                  &s_hooks, 542u);
-    check(s_action_count == 1u &&
-              s_actions[0].command_kind == MODEM_SMS_COMMAND_CMGF_TEXT &&
-              modem_sms_protocol_pdu_mode_possible(),
-          "a lost AT+CMGF=0 final restores text mode but keeps the evidence");
-    clear_actions();
-    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGF_TEXT, &delivered,
-                                  &s_hooks, 543u);
-    check(modem_sms_protocol_pdu_mode_possible(),
-          "a lost AT+CMGF=1 final leaves PDU mode possible");
-    modem_sms_protocol_cancel();
-
-    /* A text send never enters PDU mode. */
-    reset_fixture();
-    modem_sms_protocol_request_t text = text_request();
-    advance_text_to_prompt(&text, 550u);
-    check(!modem_sms_protocol_pdu_mode_possible(),
-          "a text send has nothing to restore");
-    modem_sms_protocol_cancel();
-}
-
-static void test_cpms_failure_and_mailbox_policy(void) {
-    reset_fixture();
-    modem_sms_protocol_request_t save;
-    memset(&save, 0, sizeof(save));
-    save.request_id = UINT32_C(0x1005);
-    save.operation = MODEM_SMS_PROTOCOL_SAVE;
-    save.text = "draft";
-    check(modem_sms_protocol_begin(&save, &s_hooks, 300u),
-          "save begins with no destination number");
-    s_sim_ready = false;
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CPMS, false, &save, &s_hooks, 310u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_SAVE &&
-              !s_actions[0].ok && s_actions[0].sim_not_ready &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              !s_actions[1].ok,
-          "CPMS failure publishes the SIM-not-ready save result");
-
-    reset_fixture();
-    modem_sms_protocol_request_t mailbox;
-    memset(&mailbox, 0, sizeof(mailbox));
-    mailbox.request_id = UINT32_C(0x1006);
-    mailbox.operation = MODEM_SMS_PROTOCOL_MAILBOX;
-    mailbox.mailbox = MODEM_SMS_MAILBOX_INBOX;
-    mailbox.read_status.preserve_unread_cmd = "AT+PRESERVE";
-    mailbox.read_status.consume_unread_cmd = "AT+CONSUME";
-    mailbox.read_status.timeout_ms = 7000u;
-    check(modem_sms_protocol_begin(&mailbox, &s_hooks, 320u) &&
-              s_action_count == 3u &&
-              s_actions[0].type == MODEM_SMS_ACTION_CLEAR_MAILBOX &&
-              s_actions[1].type == MODEM_SMS_ACTION_ARRIVAL_SCAN_BEGIN,
-          "inbox begin clears cache and opens an arrival scan");
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&mailbox, &s_hooks, 330u);
-    check_command(0u, MODEM_SMS_COMMAND_STATUS_PRESERVE,
-                  "AT+PRESERVE", 7000u, false, false,
-                  "mailbox read uses the vendor-neutral preserve policy");
-}
-
-static void test_orphan_and_corrupt_mailbox_rows_settle(void) {
-    reset_fixture();
-    modem_sms_protocol_request_t mailbox = inbox_request();
-    check(modem_sms_protocol_begin(&mailbox, &s_hooks, 350u),
-          "orphan mailbox fixture begins");
-    modem_sms_message_t second = orphan_segment(11u, 2u);
-    modem_sms_message_t third = orphan_segment(12u, 3u);
-    modem_sms_record_t record;
-    check(!modem_sms_state_mailbox_prepare_record(&third, &record) &&
-              !modem_sms_state_mailbox_prepare_record(&second, &record),
-          "orphan fixture leaves one incomplete group before CMGL final");
-
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGL, true, &mailbox, &s_hooks, 351u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_APPEND_MAILBOX &&
-              s_actions[0].record.quarantined &&
-              s_actions[0].record.index_count == 2u &&
-              s_actions[0].record.indices[0] == 11u &&
-              s_actions[0].record.indices[1] == 12u &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMMAND &&
-              s_actions[1].command_kind == MODEM_SMS_COMMAND_CMGF_TEXT &&
-              modem_sms_state_mailbox_count() == 1u,
-          "CMGL final publishes one bounded orphan quarantine before restore");
-
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_TEXT, true, &mailbox, &s_hooks, 352u);
-    check(s_action_count == 3u &&
-              s_actions[0].type == MODEM_SMS_ACTION_ARRIVAL_SCAN_COMMIT &&
-              s_actions[0].complete &&
-              s_actions[1].type == MODEM_SMS_ACTION_PUBLISH_MAILBOX &&
-              s_actions[1].ok && s_actions[1].complete &&
-              s_actions[2].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[2].ok,
-          "orphan quarantine leaves the authoritative mailbox scan complete");
-
-    reset_fixture();
-    mailbox = inbox_request();
-    check(modem_sms_protocol_begin(&mailbox, &s_hooks, 360u),
-          "corrupt mailbox fixture begins");
-    clear_actions();
-    check(modem_sms_protocol_parse_line(
-              MODEM_SMS_COMMAND_CMGL, "+CMGL: 7,0,\"\",21",
-              false, false, &mailbox, &s_hooks) &&
-              modem_sms_protocol_parse_line(
-                  MODEM_SMS_COMMAND_CMGL, "NOT-A-PDU", false, false,
-                  &mailbox, &s_hooks) &&
-              s_action_count == 1u &&
-              s_actions[0].type == MODEM_SMS_ACTION_APPEND_MAILBOX &&
-              s_actions[0].record.quarantined &&
-              s_actions[0].record.indices[0] == 7u &&
-              !modem_sms_state_scan_incomplete(),
-          "corrupt stored PDU becomes one non-poisoning Data-message row");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGL, true, &mailbox, &s_hooks, 361u);
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_TEXT, true, &mailbox, &s_hooks, 362u);
-    check(s_action_count == 3u &&
-              s_actions[1].type == MODEM_SMS_ACTION_PUBLISH_MAILBOX &&
-              s_actions[1].complete,
-          "corrupt-row snapshot settles instead of requesting an immediate retry");
-}
-
-static void test_multipart_arrival_protocol_integration(void) {
-    reset_fixture();
-    check(modem_sms_protocol_track_pending_arrival(10u) &&
-              modem_sms_protocol_track_pending_arrival(11u),
-          "protocol fixture tracks both multipart storage indications");
-    modem_sms_protocol_request_t mailbox = inbox_request();
-    check(modem_sms_protocol_begin(&mailbox, &s_hooks, 370u),
-          "multipart arrival mailbox scan begins");
-    modem_sms_state_arrival_scan_begin(0u);
-    clear_actions();
-
-    uint8_t payload[MODEM_SMS_BINARY_CHUNK_MAX + 1u];
-    memset(payload, 0x5au, sizeof(payload));
-    sms_submit_pdu_t submit = {
-        .number = "1234",
-        .payload = payload,
-        .payload_len = sizeof(payload),
-        .dest_port = SMS_CODEC_PICTURE_PORT,
-        .source_port = 0u,
-        .mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
-        .segment = 1u,
-        .segment_total = 2u,
-        .reference = 0x66u,
-    };
-    for (uint8_t sequence = 0u; sequence < 2u; sequence++) {
-        char pdu[SMS_SUBMIT_PDU_HEX_MAX + 1u];
-        uint8_t tpdu_len = 0u;
-        char header[40];
-        check(sms_submit_pdu_build(
-                  &submit, pdu, sizeof(pdu), &tpdu_len),
-              "multipart arrival fixture builds a valid picture PDU");
-        (void)snprintf(header, sizeof(header), "+CMGL: %u,0,\"\",%u",
-                       (unsigned)(10u + sequence), (unsigned)tpdu_len);
-        check(modem_sms_protocol_parse_line(
-                  MODEM_SMS_COMMAND_CMGL, header, false, false,
-                  &mailbox, &s_hooks) &&
-                  modem_sms_protocol_parse_line(
-                      MODEM_SMS_COMMAND_CMGL, pdu, false, false,
-                      &mailbox, &s_hooks),
-              "protocol streams one complete multipart mailbox row");
-    }
-    check(s_action_count == 1u &&
-              s_actions[0].type == MODEM_SMS_ACTION_APPEND_MAILBOX &&
-              s_actions[0].record.picture &&
-              s_actions[0].record.index_count == 2u &&
-              s_actions[0].record.indices[0] == 10u &&
-              s_actions[0].record.indices[1] == 11u,
-          "protocol publishes one logical record for both picture segments");
-    uint32_t arrivals = 99u;
-    check(modem_sms_state_arrival_scan_commit(
-              true, true, 0u, &arrivals) && arrivals == 1u,
-          "protocol integration contributes one user notification per picture");
-}
-
-static void test_multipart_text_protocol_integration(void) {
-    /* Independent GSM 7-bit DELIVER fixtures with UDH 05 00 03 AC 02 01/02.
-     * They model the two physical rows observed on the Telit bench without
-     * embedding any captured number, timestamp, or message body. */
-    static const char first_pdu[] =
-        "00400A9151551000000000000000000000001D050003AC0201"
-        "A0B56695494D0A8BC7A4131693CD6835DB0D9703";
-    static const char second_pdu[] =
-        "00400A9151551000000000000000000000002B050003AC0202"
-        "C2E231B96C3EA3D3EA35BBED7EC3E3F239BD6EBFE3F37A68AD59655293452711";
-
-    reset_fixture();
-    check(modem_sms_protocol_track_pending_arrival(65u) &&
-              modem_sms_protocol_track_pending_arrival(66u),
-          "text multipart fixture tracks both physical indications");
-    modem_sms_protocol_request_t mailbox = inbox_request();
-    check(modem_sms_protocol_begin(&mailbox, &s_hooks, 380u),
-          "text multipart mailbox scan begins");
-    modem_sms_state_arrival_scan_begin(0u);
-    clear_actions();
-
-    check(modem_sms_protocol_parse_line(
-              MODEM_SMS_COMMAND_CMGL, "+CMGL: 65,0,\"\",44",
-              false, false, &mailbox, &s_hooks) &&
-              modem_sms_protocol_parse_line(
-                  MODEM_SMS_COMMAND_CMGL, first_pdu, false, false,
-                  &mailbox, &s_hooks) &&
-              modem_sms_protocol_parse_line(
-                  MODEM_SMS_COMMAND_CMGL, "+CMGL: 66,0,\"\",56",
-                  false, false, &mailbox, &s_hooks) &&
-              modem_sms_protocol_parse_line(
-                  MODEM_SMS_COMMAND_CMGL, second_pdu, false, false,
-                  &mailbox, &s_hooks),
-          "protocol decodes both concatenated GSM7 rows");
-    check(s_action_count == 1u &&
-              s_actions[0].type == MODEM_SMS_ACTION_APPEND_MAILBOX &&
-              !s_actions[0].record.picture &&
-              !s_actions[0].record.quarantined &&
-              s_actions[0].record.index_count == 2u &&
-              s_actions[0].record.indices[0] == 65u &&
-              s_actions[0].record.indices[1] == 66u,
-          "CMGL publishes one logical text row for two physical segments");
-    modem_sms_record_t record = s_actions[0].record;
-    uint32_t arrivals = 99u;
-    check(modem_sms_state_arrival_scan_commit(
-              true, true, 0u, &arrivals) && arrivals == 1u,
-          "complete text multipart contributes one user notification");
-
-    reset_fixture();
-    uint32_t read_id = 0u;
-    check(modem_sms_state_reserve_request(
-              MODEM_SMS_REQUEST_READ, &read_id),
-          "protocol text read reserves its real result channel");
-    modem_sms_protocol_request_t read;
-    memset(&read, 0, sizeof(read));
-    read.request_id = read_id;
-    read.operation = MODEM_SMS_PROTOCOL_READ;
-    read.indices = record.indices;
-    read.index_count = record.index_count;
-    read.expected_identity_hash = record.identity_hash;
-    read.read_status = mailbox.read_status;
-    check(modem_sms_protocol_begin(&read, &s_hooks, 390u),
-          "selected multipart text read begins");
-
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CPMS, true, &read, &s_hooks, 391u);
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&read, &s_hooks, 392u);
-    check_command(0u, MODEM_SMS_COMMAND_STATUS_CONSUME,
-                  "AT+CONSUME", 7000u, false, false,
-                  "selected read enters consume-unread policy");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_STATUS_CONSUME, true, &read, &s_hooks, 393u);
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_PDU, true, &read, &s_hooks, 394u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGR, "AT+CMGR=65", 5000u,
-                  false, false, "selected read requests segment one");
-    clear_actions();
-    check(modem_sms_protocol_parse_line(
-              MODEM_SMS_COMMAND_CMGR, "+CMGR: 0,\"\",44",
-              false, false, &read, &s_hooks) &&
-              modem_sms_protocol_parse_line(
-                  MODEM_SMS_COMMAND_CMGR, first_pdu, false, false,
-                  &read, &s_hooks),
-          "selected read decodes segment one");
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGR, true, &read, &s_hooks, 395u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGR, "AT+CMGR=66", 5000u,
-                  false, false, "selected read advances to segment two");
-    clear_actions();
-    check(modem_sms_protocol_parse_line(
-              MODEM_SMS_COMMAND_CMGR, "+CMGR: 0,\"\",56",
-              false, false, &read, &s_hooks) &&
-              modem_sms_protocol_parse_line(
-                  MODEM_SMS_COMMAND_CMGR, second_pdu, false, false,
-                  &read, &s_hooks),
-          "selected read decodes segment two");
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGR, true, &read, &s_hooks, 396u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1", 5000u,
-                  false, false, "selected read restores text mode");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_TEXT, true, &read, &s_hooks, 397u);
-    check_command(0u, MODEM_SMS_COMMAND_STATUS_PRESERVE,
-                  "AT+PRESERVE", 7000u, false, false,
-                  "selected read restores preserve-unread policy");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_STATUS_PRESERVE, true, &read, &s_hooks, 398u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_READ &&
-              s_actions[0].ok &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              s_actions[1].ok,
-          "selected multipart text reaches one successful terminal");
-
-    bool mismatch = true;
-    modem_sms_read_result_t result;
-    check(modem_sms_state_selected_publish_result(
-              read_id, MODEM_SMS_REQUEST_READ, MODEM_SMS_OUTCOME_OK,
-              false, record.identity_hash, &mismatch) && !mismatch &&
-              modem_sms_state_pop_read_result(read_id, &result) &&
-              strcmp(result.message.text,
-                     "P5MULTIBEGIN0123456789"
-                     "abcdefghijklmnopqrstuvwxyzP5MULTIEND") == 0,
-          "CMGR reassembles and publishes the exact complete text body");
-}
-
-static void test_read_preemption_and_delete_sequence(void) {
-    reset_fixture();
-    static const uint16_t read_indices[] = {8u, 9u};
-    modem_sms_protocol_request_t read;
-    memset(&read, 0, sizeof(read));
-    read.request_id = UINT32_C(0x1007);
-    read.operation = MODEM_SMS_PROTOCOL_READ;
-    read.indices = read_indices;
-    read.index_count = 2u;
-    read.expected_identity_hash = UINT32_C(0x12345678);
-    check(modem_sms_protocol_begin(&read, &s_hooks, 400u),
-          "selected read begins");
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&read, &s_hooks, 410u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGF_PDU, "AT+CMGF=0", 5000u,
-                  false, false, "selected read enters PDU mode");
-    s_call_preempt = true;
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_PDU, true, &read, &s_hooks, 420u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1", 5000u,
-                  false, false,
-                  "pending call preempts before the first CMGR command");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGF_TEXT, true, &read, &s_hooks, 430u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_READ &&
-              !s_actions[0].ok &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              !s_actions[1].ok,
-          "preempted read publishes one failed terminal result");
-
-    reset_fixture();
-    static const uint16_t delete_indices[] = {4u, 7u};
-    modem_sms_protocol_request_t deletion;
-    memset(&deletion, 0, sizeof(deletion));
-    deletion.request_id = UINT32_C(0x1008);
-    deletion.operation = MODEM_SMS_PROTOCOL_DELETE;
-    deletion.indices = delete_indices;
-    deletion.index_count = 2u;
-    check(modem_sms_protocol_begin(&deletion, &s_hooks, 500u),
-          "delete begins");
-    clear_actions();
-    modem_sms_protocol_resume_after_wake(&deletion, &s_hooks, 510u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGD, "AT+CMGD=4", 5000u,
-                  false, false, "delete starts at the first requested index");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGD, true, &deletion, &s_hooks, 520u);
-    check_command(0u, MODEM_SMS_COMMAND_CMGD, "AT+CMGD=7", 5000u,
-                  false, false, "delete advances in request order");
-    clear_actions();
-    modem_sms_protocol_on_final(
-        MODEM_SMS_COMMAND_CMGD, false, &deletion, &s_hooks, 530u);
-    check(s_action_count == 2u &&
-              s_actions[0].type == MODEM_SMS_ACTION_PUBLISH_DELETE &&
-              !s_actions[0].ok && !s_actions[0].sim_not_ready &&
-              s_actions[1].type == MODEM_SMS_ACTION_COMPLETE &&
-              !s_actions[1].ok,
-          "multi-delete accumulates failure without misclassifying the SIM");
-}
-
-static const captured_action_t *last_action_of(modem_sms_action_type_t type) {
-    for (size_t i = s_action_count; i > 0u; i--) {
-        if (s_actions[i - 1u].type == type) {
-            return &s_actions[i - 1u];
-        }
-    }
-    return NULL;
-}
-
-static bool last_command_is(modem_sms_command_kind_t kind, const char *text) {
-    const captured_action_t *action = last_action_of(MODEM_SMS_ACTION_COMMAND);
-    return action != NULL && action->command_kind == kind &&
-           strcmp(action->command, text) == 0;
-}
-
-static bool last_action_type_is(modem_sms_action_type_t type) {
-    return s_action_count != 0u && s_actions[s_action_count - 1u].type == type;
-}
-
-static bool action_seen(modem_sms_action_type_t type) {
-    return last_action_of(type) != NULL;
-}
-
-static bool last_body_is(const char *text) {
-    const captured_action_t *action = last_action_of(MODEM_SMS_ACTION_BODY);
-    return action != NULL && action->body_len == strlen(text) &&
-           memcmp(action->body, text, action->body_len) == 0;
-}
-
-static bool last_complete_ok(void) {
-    const captured_action_t *action = last_action_of(MODEM_SMS_ACTION_COMPLETE);
-    return action != NULL && action->ok;
-}
-
-static uint16_t delivered_action_index(void) {
-    const captured_action_t *action =
-        last_action_of(MODEM_SMS_ACTION_PUBLISH_DELIVERED);
-    return action != NULL ? action->index : UINT16_MAX;
-}
-
-static modem_sms_outcome_t delivered_action_outcome(void) {
-    const captured_action_t *action =
-        last_action_of(MODEM_SMS_ACTION_PUBLISH_DELIVERED);
-    return action != NULL ? action->outcome : MODEM_SMS_OUTCOME_NONE;
-}
-
-static size_t action_count_of(modem_sms_action_type_t type) {
-    size_t count = 0u;
-    for (size_t i = 0u; i < s_action_count; i++) {
-        if (s_actions[i].type == type) {
-            count++;
-        }
-    }
-    return count;
-}
-
-static void test_store_delivered_sequence(void) {
-    clear_actions();
-    s_sim_ready = true;
-    modem_sms_protocol_init();
-    modem_sms_protocol_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.request_id = 77u;
-    request.operation = MODEM_SMS_PROTOCOL_STORE_DELIVERED;
-    request.pdu_hex = "00040A8187661940880000629061019582000744F57CAE56CF01";
-    request.tpdu_len = 25u;
-
-    check(modem_sms_protocol_begin(&request, &s_hooks, 1000u), "begin queues CPMS");
-    check(last_command_is(MODEM_SMS_COMMAND_CPMS, "AT+CPMS=\"ME\",\"ME\",\"ME\""), "CPMS first");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 1010u);
-    check(last_action_type_is(MODEM_SMS_ACTION_REQUEST_WAKE_CONTINUATION), "wake continuation");
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 1020u);
-    check(last_command_is(MODEM_SMS_COMMAND_CMGF_PDU, "AT+CMGF=0"), "PDU mode before CMGW");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 1030u);
-    check(last_command_is(MODEM_SMS_COMMAND_CMGW_PROMPT, "AT+CMGW=25,0"),
-          "CMGW with the TPDU length and REC UNREAD status");
-    check(modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGW_PROMPT, &request, &s_hooks, 1040u),
-          "prompt accepted");
-    check(last_body_is(request.pdu_hex), "body is the PDU hex");
-    check(modem_sms_protocol_parse_line(MODEM_SMS_COMMAND_CMGW_FINAL, "+CMGW: 7", false, false,
-                                        &request, &s_hooks),
-          "+CMGW index line consumed");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGW_FINAL, true, &request, &s_hooks, 1050u);
-    check(last_command_is(MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1"), "text mode restored");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 1060u);
-    check(action_seen(MODEM_SMS_ACTION_PUBLISH_DELIVERED) &&
-              delivered_action_index() == 7u &&
-              delivered_action_outcome() == MODEM_SMS_OUTCOME_OK,
-          "delivered index published");
-    check(last_action_type_is(MODEM_SMS_ACTION_COMPLETE) && last_complete_ok(),
-          "operation completes ok");
-    check(action_count_of(MODEM_SMS_ACTION_PUBLISH_DELIVERED) == 1u &&
-              action_count_of(MODEM_SMS_ACTION_COMPLETE) == 1u,
-          "exactly one publish and one complete");
-}
-
-static void test_store_delivered_failures(void) {
-    modem_sms_protocol_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.request_id = 78u;
-    request.operation = MODEM_SMS_PROTOCOL_STORE_DELIVERED;
-    request.pdu_hex = "00040A8187661940880000629061019582000744F57CAE56CF01";
-    request.tpdu_len = 25u;
-
-    /* CMGW rejected: restore text mode, publish error, complete. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 1000u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 1010u);
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 1020u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 1030u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGW_PROMPT, false, &request, &s_hooks, 1040u);
-    check(last_command_is(MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1"), "text restored after CMGW error");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 1050u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_ERROR, "error published");
-    check(last_action_type_is(MODEM_SMS_ACTION_COMPLETE), "completes");
-
-    /* CMGW final says the store is full: STORAGE_FULL, not ERROR, so the
-     * host keeps the entry without burning an attempt. */
-    static const char *const full_finals[] = {
-        "+CMS ERROR: memory full", "+CMS ERROR: 322", "+CMS ERROR: Memory failure",
-    };
-    for (size_t i = 0u; i < sizeof(full_finals) / sizeof(full_finals[0]); i++) {
-        clear_actions();
-        modem_sms_protocol_init();
-        (void)modem_sms_protocol_begin(&request, &s_hooks, 1100u);
-        modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 1110u);
-        modem_sms_protocol_resume_after_wake(&request, &s_hooks, 1120u);
-        modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 1130u);
-        (void)modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGW_PROMPT, &request, &s_hooks, 1140u);
-        modem_sms_protocol_note_final_line(full_finals[i]);
-        modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGW_FINAL, false, &request, &s_hooks, 1150u);
-        check(last_command_is(MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1"),
-              "text restored after a memory-full CMGW final");
-        modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 1160u);
-        check(delivered_action_outcome() == MODEM_SMS_OUTCOME_STORAGE_FULL &&
-                  last_action_type_is(MODEM_SMS_ACTION_COMPLETE),
-              "a memory-full CMGW final publishes STORAGE_FULL");
-    }
-    /* Refused at the prompt stage (no prompt ever issued) with a memory-full
-     * final: the same classification, so the host holds the slot. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 1300u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 1310u);
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 1320u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 1330u);
-    modem_sms_protocol_note_final_line("+CMS ERROR: 322");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGW_PROMPT, false, &request, &s_hooks, 1340u);
-    check(last_command_is(MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1"),
-          "text restored after a memory-full prompt-stage refusal");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 1350u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_STORAGE_FULL &&
-              last_action_type_is(MODEM_SMS_ACTION_COMPLETE),
-          "a memory-full CMGW prompt-stage refusal publishes STORAGE_FULL");
-
-    /* A plain ERROR final after the body stays ERROR. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 1200u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 1210u);
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 1220u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 1230u);
-    (void)modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGW_PROMPT, &request, &s_hooks, 1240u);
-    modem_sms_protocol_note_final_line("ERROR");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGW_FINAL, false, &request, &s_hooks, 1250u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 1260u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_ERROR,
-          "a plain ERROR CMGW final still publishes ERROR");
-
-    /* Prompt timeout: ESC abort, then restore text mode. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 2000u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 2010u);
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 2020u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 2030u);
-    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGW_PROMPT, &request, &s_hooks, 7040u);
-    check(action_seen(MODEM_SMS_ACTION_ABORT_PROMPT), "prompt timeout aborts the prompt");
-    check(last_action_of(MODEM_SMS_ACTION_ABORT_PROMPT)->restore_after_settle &&
-              !action_seen(MODEM_SMS_ACTION_COMPLETE),
-          "prompt abort defers the text restore past the ESC settle");
-    modem_sms_protocol_resume_after_prompt_abort(&request, &s_hooks, 7100u);
-    check(last_command_is(MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1"), "text restored after abort");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 7110u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_TIMEOUT, "timeout published");
-    check(last_action_type_is(MODEM_SMS_ACTION_COMPLETE) && !last_complete_ok(),
-          "timeout completes not ok");
-
-    /* CPMS failure: error without touching CMGF. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 3000u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, false, &request, &s_hooks, 3010u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_ERROR &&
-              last_action_type_is(MODEM_SMS_ACTION_COMPLETE),
-          "CPMS failure publishes error and completes");
-    check(action_count_of(MODEM_SMS_ACTION_COMMAND) == 1u,
-          "CPMS failure sends no CMGF command");
-}
-
-static void test_store_delivered_timeouts(void) {
-    modem_sms_protocol_request_t request;
-    memset(&request, 0, sizeof(request));
-    request.request_id = 79u;
-    request.operation = MODEM_SMS_PROTOCOL_STORE_DELIVERED;
-    request.pdu_hex = "00040A8187661940880000629061019582000744F57CAE56CF01";
-    request.tpdu_len = 25u;
-
-    /* CMGF_PDU timeout: the switch may have landed, so text mode is
-     * restored first (as the binary send does), then timeout is published. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 1000u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 1010u);
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 1020u);
-    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGF_PDU, &request, &s_hooks, 6030u);
-    check(last_command_is(MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1") &&
-              !action_seen(MODEM_SMS_ACTION_PUBLISH_DELIVERED),
-          "CMGF_PDU timeout restores text mode before publishing");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 6040u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_TIMEOUT &&
-              last_action_type_is(MODEM_SMS_ACTION_COMPLETE) && !last_complete_ok(),
-          "CMGF_PDU timeout publishes timeout and completes");
-
-    /* CMGF_PDU error: same, no restore needed. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 1100u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 1110u);
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 1120u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, false, &request, &s_hooks, 1130u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_ERROR &&
-              last_action_type_is(MODEM_SMS_ACTION_COMPLETE) &&
-              action_count_of(MODEM_SMS_ACTION_COMMAND) == 2u,
-          "CMGF_PDU error publishes error and completes without a restore");
-
-    /* CMGW_FINAL timeout after the body: uncertain, text restored. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 2000u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 2010u);
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 2020u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 2030u);
-    (void)modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGW_PROMPT, &request, &s_hooks, 2040u);
-    check(modem_sms_protocol_cancel_outcome(&request) == MODEM_SMS_OUTCOME_UNCERTAIN,
-          "cancel after the body is handed over is uncertain");
-    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGW_FINAL, &request, &s_hooks, 32050u);
-    check(last_command_is(MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1"),
-          "text restored after CMGW_FINAL timeout");
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 32060u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_UNCERTAIN &&
-              last_action_type_is(MODEM_SMS_ACTION_COMPLETE) && !last_complete_ok(),
-          "CMGW_FINAL timeout publishes uncertain");
-
-    /* CMGW_FINAL ok, then CMGF_TEXT error: the index is still published. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 3000u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 3010u);
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 3020u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 3030u);
-    (void)modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGW_PROMPT, &request, &s_hooks, 3040u);
-    (void)modem_sms_protocol_parse_line(MODEM_SMS_COMMAND_CMGW_FINAL, "+CMGW: 12", false, false,
-                                        &request, &s_hooks);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGW_FINAL, true, &request, &s_hooks, 3050u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, false, &request, &s_hooks, 3060u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_OK &&
-              delivered_action_index() == 12u &&
-              last_action_type_is(MODEM_SMS_ACTION_COMPLETE) && !last_complete_ok(),
-          "stored row is published even when the text restore errors");
-
-    /* CMGW_FINAL ok, then CMGF_TEXT timeout: published, complete not ok. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 4000u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CPMS, true, &request, &s_hooks, 4010u);
-    modem_sms_protocol_resume_after_wake(&request, &s_hooks, 4020u);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_PDU, true, &request, &s_hooks, 4030u);
-    (void)modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGW_PROMPT, &request, &s_hooks, 4040u);
-    (void)modem_sms_protocol_parse_line(MODEM_SMS_COMMAND_CMGW_FINAL, "+CMGW: 3", false, false,
-                                        &request, &s_hooks);
-    modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGW_FINAL, true, &request, &s_hooks, 4050u);
-    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CMGF_TEXT, &request, &s_hooks, 9060u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_OK &&
-              delivered_action_index() == 3u &&
-              last_action_type_is(MODEM_SMS_ACTION_COMPLETE) && !last_complete_ok() &&
-              action_count_of(MODEM_SMS_ACTION_PUBLISH_DELIVERED) == 1u,
-          "CMGF_TEXT timeout still publishes the stored row once");
-
-    /* CPMS timeout: publish timeout, complete, no CMGF. */
-    clear_actions();
-    modem_sms_protocol_init();
-    (void)modem_sms_protocol_begin(&request, &s_hooks, 5000u);
-    modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_CPMS, &request, &s_hooks, 10010u);
-    check(delivered_action_outcome() == MODEM_SMS_OUTCOME_TIMEOUT &&
-              last_action_type_is(MODEM_SMS_ACTION_COMPLETE) &&
-              action_count_of(MODEM_SMS_ACTION_COMMAND) == 1u,
-          "CPMS timeout publishes timeout and completes");
-
-    /* Invalid requests are rejected up front. */
-    modem_sms_protocol_request_t invalid = request;
-    invalid.tpdu_len = 0u;
-    check(!modem_sms_protocol_begin(&invalid, &s_hooks, 6000u),
-          "zero tpdu_len is rejected");
-    invalid = request;
-    invalid.pdu_hex = "";
-    check(!modem_sms_protocol_begin(&invalid, &s_hooks, 6000u),
-          "empty pdu_hex is rejected");
-}
-
 static void test_picture_text_send(void) {
     reset_fixture();
     static const uint8_t payload[] = {0x10u, 0x20u, 0x30u};
@@ -1578,31 +494,13 @@ static void test_picture_text_send(void) {
     modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, true, &request, &s_hooks, 220u);
     check(!modem_sms_protocol_settings_restore_needed(), "confirmed cleanup clears repair obligation");
 }
-
 int main(void) {
-    test_picture_text_send();
-    test_text_send_and_sent_copy_failure();
+    test_text_transport();
+    test_dispatch_evidence();
     test_binary_prompt_timeout_restore();
     test_binary_cleanup_duplicate_wedge();
-    test_send_evidence_boundaries();
-    test_mutating_timeout_boundaries();
     test_binary_uncertainty_boundaries();
     test_cancel_evidence();
-    test_delete_dispatch_evidence();
-    test_cpms_failure_and_mailbox_policy();
-    test_pdu_mode_evidence();
-    test_orphan_and_corrupt_mailbox_rows_settle();
-    test_multipart_arrival_protocol_integration();
-    test_multipart_text_protocol_integration();
-    test_read_preemption_and_delete_sequence();
-    test_store_delivered_sequence();
-    test_store_delivered_failures();
-    test_store_delivered_timeouts();
-    if (s_failures != 0) {
-        fprintf(stderr, "test_modem_sms_protocol: %d failure(s)\n",
-                s_failures);
-        return 1;
-    }
-    puts("test_modem_sms_protocol: OK");
-    return 0;
+    test_picture_text_send();
+    return s_failures != 0;
 }

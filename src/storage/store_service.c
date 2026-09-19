@@ -122,7 +122,6 @@ store_status_t store_service_init(void) {
         }
     }
     store_warranty_post_load();
-    store_calls_migrate_life_timer(store_warranty_legacy_life_timer());
 
     s_ready = true;
     s_diag.ready = true;

@@ -5,13 +5,7 @@
 
 #include <string.h>
 
-#define CHARGE_SUPERVISOR_MAGIC_V1 UINT32_C(0x31534743) /* "CGS1" */
-#define CHARGE_SUPERVISOR_MAGIC_V2 UINT32_C(0x32534743) /* "CGS2" */
-#define CHARGE_SUPERVISOR_MAGIC_V3 UINT32_C(0x33534743) /* "CGS3" */
 #define CHARGE_SUPERVISOR_MAGIC_V4 UINT32_C(0x34534743) /* "CGS4" */
-#define CHARGE_SUPERVISOR_PAYLOAD_LEN_V1 96u
-#define CHARGE_SUPERVISOR_PAYLOAD_LEN_V2 128u
-#define CHARGE_SUPERVISOR_PAYLOAD_LEN_V3 128u
 #define CHARGE_SUPERVISOR_PAYLOAD_LEN_V4 128u
 #define CHARGE_SUPERVISOR_FLAG_ACTIVE (1u << 0)
 #define CHARGE_SUPERVISOR_FLAG_CAPACITY (1u << 1)
@@ -28,9 +22,6 @@
 #define CHARGE_SUPERVISOR_FLAG_INHIBIT_LATCHED (1u << 12)
 #define CHARGE_SUPERVISOR_FLAG_MAINTENANCE_REARM (1u << 13)
 #define CHARGE_SUPERVISOR_FLAG_LAST_FULL_QUALIFIED (1u << 14)
-#define CHARGE_SUPERVISOR_FLAGS_VALID_V1 UINT16_C(0x07ff)
-#define CHARGE_SUPERVISOR_FLAGS_VALID_V2 UINT16_C(0x1fff)
-#define CHARGE_SUPERVISOR_FLAGS_VALID_V3 UINT16_C(0x7fff)
 #define CHARGE_SUPERVISOR_FLAGS_VALID_V4 UINT16_C(0x7fff)
 
 static battery_charge_supervisor_persisted_t s_charge_supervisor;
@@ -318,152 +309,6 @@ static void decode_common_fields(
            sizeof(slope_raw));
 }
 
-static bool apply_charge_supervisor_v1(
-    const uint8_t *payload, size_t len,
-    battery_charge_supervisor_persisted_t *loaded) {
-    if (payload == NULL || loaded == NULL ||
-        len != CHARGE_SUPERVISOR_PAYLOAD_LEN_V1 ||
-        read_u32(&payload[0]) != CHARGE_SUPERVISOR_MAGIC_V1 ||
-        read_u16(&payload[4]) != STORE_PAYLOAD_VERSION ||
-        (read_u16(&payload[6]) &
-         (uint16_t)~CHARGE_SUPERVISOR_FLAGS_VALID_V1) != 0u ||
-        read_u16(&payload[46]) != 0u ||
-        read_u32(&payload[80]) != 0u ||
-        read_u32(&payload[84]) != 0u ||
-        read_u32(&payload[88]) != 0u ||
-        read_u32(&payload[92]) != 0u) {
-        return false;
-    }
-    uint16_t flags = read_u16(&payload[6]);
-    battery_charge_supervisor_persisted_defaults(loaded);
-    decode_common_fields(payload, loaded);
-    apply_common_flags(loaded, flags);
-
-    /* CGS1 rounded these fields to whole mAh and predates explicit SOC
-     * provenance. Its only remaining-capacity source was an anchored learner,
-     * while a full-capacity deficit without a remaining value came from the
-     * persisted natural-EMPTY marker. Preserve exactly that evidence strength. */
-    if (loaded->frozen_remaining_valid) {
-        loaded->frozen_remaining_nah =
-            (uint64_t)loaded->frozen_remaining_mah * UINT64_C(1000000);
-        loaded->frozen_soc_provenance = BATTERY_SOC_PROVENANCE_TRACKED;
-        loaded->frozen_soc_confidence = BATTERY_SOC_CONFIDENCE_ANCHORED;
-    } else if (loaded->deficit_valid && loaded->frozen_capacity_valid &&
-               loaded->deficit_mah == loaded->frozen_capacity_mah) {
-        loaded->frozen_soc_provenance =
-            BATTERY_SOC_PROVENANCE_ANCHORED_EMPTY;
-        loaded->frozen_soc_confidence = BATTERY_SOC_CONFIDENCE_ANCHORED;
-    }
-    if (loaded->deficit_valid) {
-        loaded->deficit_nah =
-            (uint64_t)loaded->deficit_mah * UINT64_C(1000000);
-    }
-    if (loaded->frozen_capacity_valid) {
-        loaded->safety_input_nah =
-            (uint64_t)loaded->frozen_capacity_mah * UINT64_C(1000000) *
-            BATTERY_CHARGE_REVB2_SAFETY_INPUT_FACTOR_PERMILLE / 1000u;
-    }
-    return battery_charge_supervisor_persisted_valid(loaded);
-}
-
-static bool legacy_terminal_intrinsically_qualified_full(
-    battery_charge_supervisor_terminal_t terminal) {
-    return terminal == BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_FULL ||
-        terminal == BATTERY_CHARGE_TERMINAL_SOFTWARE_CURVE_FULL ||
-        terminal ==
-            BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_AND_CURVE_FULL ||
-        terminal ==
-            BATTERY_CHARGE_TERMINAL_BQ_FAULT_AFTER_COULOMB_FULL;
-}
-
-static bool apply_charge_supervisor_v2(
-    const uint8_t *payload, size_t len,
-    battery_charge_supervisor_persisted_t *loaded) {
-    if (payload == NULL || loaded == NULL ||
-        len != CHARGE_SUPERVISOR_PAYLOAD_LEN_V2 ||
-        read_u32(&payload[0]) != CHARGE_SUPERVISOR_MAGIC_V2 ||
-        read_u16(&payload[4]) != STORE_PAYLOAD_VERSION ||
-        (read_u16(&payload[6]) &
-         (uint16_t)~CHARGE_SUPERVISOR_FLAGS_VALID_V2) != 0u) {
-        return false;
-    }
-    for (size_t i = 108u; i < CHARGE_SUPERVISOR_PAYLOAD_LEN_V2; i++) {
-        if (payload[i] != 0u) {
-            return false;
-        }
-    }
-
-    uint16_t flags = read_u16(&payload[6]);
-    battery_charge_supervisor_persisted_defaults(loaded);
-    decode_common_fields(payload, loaded);
-    apply_common_flags(loaded, flags);
-    loaded->configured_charge_factor_permille = read_u16(&payload[46]);
-    loaded->configured_policy =
-        (battery_charge_supervisor_policy_t)payload[80];
-    loaded->frozen_soc_provenance =
-        (battery_soc_provenance_t)payload[81];
-    loaded->frozen_soc_confidence =
-        (battery_soc_confidence_t)payload[82];
-    loaded->latched_stop_reason =
-        (battery_charge_supervisor_terminal_t)payload[83];
-    loaded->frozen_remaining_nah = read_u64(&payload[84]);
-    loaded->deficit_nah = read_u64(&payload[92]);
-    loaded->safety_input_nah = read_u64(&payload[100]);
-    loaded->configured_charge_factor_confident =
-        (flags & CHARGE_SUPERVISOR_FLAG_CONFIG_FACTOR_CONFIDENT) != 0u;
-    loaded->supervisor_inhibit_latched =
-        (flags & CHARGE_SUPERVISOR_FLAG_INHIBIT_LATCHED) != 0u;
-    loaded->last_terminal_full_qualified = loaded->last_terminal_valid &&
-        legacy_terminal_intrinsically_qualified_full(
-            loaded->last_terminal_reason);
-    return battery_charge_supervisor_persisted_valid(loaded);
-}
-
-static bool apply_charge_supervisor_v3(
-    const uint8_t *payload, size_t len,
-    battery_charge_supervisor_persisted_t *loaded) {
-    if (payload == NULL || loaded == NULL ||
-        len != CHARGE_SUPERVISOR_PAYLOAD_LEN_V3 ||
-        read_u32(&payload[0]) != CHARGE_SUPERVISOR_MAGIC_V3 ||
-        read_u16(&payload[4]) != STORE_PAYLOAD_VERSION ||
-        (read_u16(&payload[6]) &
-         (uint16_t)~CHARGE_SUPERVISOR_FLAGS_VALID_V3) != 0u) {
-        return false;
-    }
-    for (size_t i = 108u; i < CHARGE_SUPERVISOR_PAYLOAD_LEN_V3; i++) {
-        if (payload[i] != 0u) {
-            return false;
-        }
-    }
-
-    uint16_t flags = read_u16(&payload[6]);
-    battery_charge_supervisor_persisted_defaults(loaded);
-    decode_common_fields(payload, loaded);
-    apply_common_flags(loaded, flags);
-    loaded->configured_charge_factor_permille = read_u16(&payload[46]);
-    loaded->configured_policy =
-        (battery_charge_supervisor_policy_t)payload[80];
-    loaded->frozen_soc_provenance =
-        (battery_soc_provenance_t)payload[81];
-    loaded->frozen_soc_confidence =
-        (battery_soc_confidence_t)payload[82];
-    loaded->latched_stop_reason =
-        (battery_charge_supervisor_terminal_t)payload[83];
-    loaded->frozen_remaining_nah = read_u64(&payload[84]);
-    loaded->deficit_nah = read_u64(&payload[92]);
-    loaded->safety_input_nah = read_u64(&payload[100]);
-    loaded->configured_charge_factor_confident =
-        (flags & CHARGE_SUPERVISOR_FLAG_CONFIG_FACTOR_CONFIDENT) != 0u;
-    loaded->supervisor_inhibit_latched =
-        (flags & CHARGE_SUPERVISOR_FLAG_INHIBIT_LATCHED) != 0u;
-    loaded->maintenance_rearm_pending =
-        (flags & CHARGE_SUPERVISOR_FLAG_MAINTENANCE_REARM) != 0u;
-    loaded->completion_rearm_used = loaded->maintenance_rearm_pending;
-    loaded->last_terminal_full_qualified =
-        (flags & CHARGE_SUPERVISOR_FLAG_LAST_FULL_QUALIFIED) != 0u;
-    return battery_charge_supervisor_persisted_valid(loaded);
-}
-
 static bool apply_charge_supervisor_v4(
     const uint8_t *payload, size_t len,
     battery_charge_supervisor_persisted_t *loaded) {
@@ -512,10 +357,7 @@ static bool apply_charge_supervisor_v4(
 
 static bool apply_charge_supervisor(const uint8_t *payload, size_t len) {
     battery_charge_supervisor_persisted_t loaded;
-    bool valid = apply_charge_supervisor_v4(payload, len, &loaded) ||
-                 apply_charge_supervisor_v3(payload, len, &loaded) ||
-                 apply_charge_supervisor_v2(payload, len, &loaded) ||
-                 apply_charge_supervisor_v1(payload, len, &loaded);
+    bool valid = apply_charge_supervisor_v4(payload, len, &loaded);
     if (!valid) {
         return false;
     }

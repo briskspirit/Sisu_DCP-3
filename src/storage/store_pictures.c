@@ -8,7 +8,7 @@
 
 #define PICTURE_MAGIC 0x50494331u
 #define PICTURE_VERSION 2u
-#define PICTURE_LEGACY_SLOTS 4u
+#define PICTURE_TEMPLATE_COUNT 4u
 #define PICTURE_RECEIVE_TTL_MS (30u * 60u * 1000u)
 #define PICTURE_SLOT_BYTES (6u + STORE_PICTURE_BITMAP_BYTES + STORE_PICTURE_TEXT_MAX + 1u)
 #define PICTURE_PENDING_BYTES (22u + MODEM_SMS_SENDER_MAX + 1u + MODEM_SMS_TIMESTAMP_MAX + 1u + MODEM_SMS_BINARY_MAX)
@@ -406,7 +406,7 @@ store_status_t store_picture_pending_discard(uint32_t id) {
 
 static void seed_default_picture_messages(void) {
     memset(&s_picture_messages, 0, sizeof(s_picture_messages));
-    for (uint8_t i = 0u; i < PICTURE_LEGACY_SLOTS; i++) {
+    for (uint8_t i = 0u; i < PICTURE_TEMPLATE_COUNT; i++) {
         store_picture_message_t *slot = &s_picture_messages.slots[i];
         slot->used = true;
         slot->width = STORE_PICTURE_WIDTH;
@@ -488,19 +488,17 @@ static bool apply_picture_payload(const uint8_t *payload, size_t len) {
         return false;
     }
     uint16_t version = read_u16(&payload[4]);
-    bool legacy = version == 1u;
-    if ((!legacy && version != PICTURE_VERSION) ||
-        len != (legacy ? 8u + PICTURE_LEGACY_SLOTS * PICTURE_SLOT_BYTES : PICTURE_PAYLOAD_BYTES) ||
-        (!legacy && payload[7] != STORE_PICTURE_SLOT_COUNT)) {
+    if (version != PICTURE_VERSION || len != PICTURE_PAYLOAD_BYTES ||
+        payload[7] != STORE_PICTURE_SLOT_COUNT) {
         return false;
     }
-    /* Journal load runs on the small core0 stack. Validate off-stack before
+    /* Record load runs on the small core0 stack. Validate off-stack before
      * publishing, so a corrupt record never half-replaces the live state. */
     static picture_message_state_t loaded;
     memset(&loaded, 0, sizeof(loaded));
-    size_t pos = legacy ? 8u : 12u;
-    loaded.next_id = legacy ? 0u : read_u32(&payload[8]);
-    for (uint8_t i = 0u; i < (legacy ? PICTURE_LEGACY_SLOTS : STORE_PICTURE_SLOT_COUNT); i++) {
+    size_t pos = 12u;
+    loaded.next_id = read_u32(&payload[8]);
+    for (uint8_t i = 0u; i < STORE_PICTURE_SLOT_COUNT; i++) {
         if (pos + 6u + STORE_PICTURE_BITMAP_BYTES + STORE_PICTURE_TEXT_MAX + 1u > len) {
             return false;
         }
@@ -519,49 +517,45 @@ static bool apply_picture_payload(const uint8_t *payload, size_t len) {
         memcpy(slot->text, &payload[pos], text_len);
         slot->text[text_len] = '\0';
         pos += STORE_PICTURE_TEXT_MAX + 1u;
-        if (!legacy) {
-            memcpy(loaded.senders[i], &payload[pos], MODEM_SMS_SENDER_MAX + 1u);
-            loaded.senders[i][MODEM_SMS_SENDER_MAX] = '\0';
-            pos += MODEM_SMS_SENDER_MAX + 1u;
-        }
+        memcpy(loaded.senders[i], &payload[pos], MODEM_SMS_SENDER_MAX + 1u);
+        loaded.senders[i][MODEM_SMS_SENDER_MAX] = '\0';
+        pos += MODEM_SMS_SENDER_MAX + 1u;
         if (slot->used && (slot->width == 0u || slot->height == 0u)) {
             slot->width = STORE_PICTURE_WIDTH;
             slot->height = STORE_PICTURE_HEIGHT;
         }
     }
-    if (!legacy) {
-        for (uint8_t i = 0u; i < STORE_PICTURE_PENDING_COUNT; i++) {
-            picture_pending_t *p = &loaded.pending[i];
-            p->state = payload[pos++];
-            p->id = read_u32(&payload[pos]); pos += 4u;
-            p->reference = read_u16(&payload[pos]); pos += 2u;
-            p->source_port = read_u16(&payload[pos]); pos += 2u;
-            p->total = payload[pos++];
-            p->ref16 = payload[pos++];
-            p->concat = payload[pos++];
-            p->dcs = payload[pos++];
-            p->seen = payload[pos++];
-            memcpy(p->lengths, &payload[pos], sizeof(p->lengths)); pos += sizeof(p->lengths);
-            memcpy(p->sender, &payload[pos], sizeof(p->sender)); pos += sizeof(p->sender);
-            memcpy(p->timestamp, &payload[pos], sizeof(p->timestamp)); pos += sizeof(p->timestamp);
-            memcpy(p->data, &payload[pos], sizeof(p->data)); pos += sizeof(p->data);
-            unsigned bytes = 0u;
-            for (uint8_t j = 0u; j < MODEM_SMS_SEGMENT_MAX; j++) {
-                if (p->lengths[j] > 140u ||
-                    (((p->seen >> j) & 1u) != (p->lengths[j] != 0u))) return false;
-                bytes += p->lengths[j];
-            }
-            if (p->state > 4u || p->ref16 > 1u || p->concat > 1u ||
-                bytes > MODEM_SMS_BINARY_MAX ||
-                p->sender[MODEM_SMS_SENDER_MAX] != '\0' ||
-                p->timestamp[MODEM_SMS_TIMESTAMP_MAX] != '\0') return false;
-            if (p->state != 0u && (p->id == 0u || p->total == 0u ||
-                p->total > MODEM_SMS_SEGMENT_MAX || (p->seen >> p->total) != 0u)) return false;
-            if ((p->state == 2u || p->state == 3u) &&
-                (p->seen != (uint8_t)((1u << p->total) - 1u) ||
-                 !sms_picture_payload_decode(p->data, (uint16_t)bytes, &s_receive_decoded))) return false;
-            s_pending_touched[i] = time_ms();
+    for (uint8_t i = 0u; i < STORE_PICTURE_PENDING_COUNT; i++) {
+        picture_pending_t *p = &loaded.pending[i];
+        p->state = payload[pos++];
+        p->id = read_u32(&payload[pos]); pos += 4u;
+        p->reference = read_u16(&payload[pos]); pos += 2u;
+        p->source_port = read_u16(&payload[pos]); pos += 2u;
+        p->total = payload[pos++];
+        p->ref16 = payload[pos++];
+        p->concat = payload[pos++];
+        p->dcs = payload[pos++];
+        p->seen = payload[pos++];
+        memcpy(p->lengths, &payload[pos], sizeof(p->lengths)); pos += sizeof(p->lengths);
+        memcpy(p->sender, &payload[pos], sizeof(p->sender)); pos += sizeof(p->sender);
+        memcpy(p->timestamp, &payload[pos], sizeof(p->timestamp)); pos += sizeof(p->timestamp);
+        memcpy(p->data, &payload[pos], sizeof(p->data)); pos += sizeof(p->data);
+        unsigned bytes = 0u;
+        for (uint8_t j = 0u; j < MODEM_SMS_SEGMENT_MAX; j++) {
+            if (p->lengths[j] > 140u ||
+                (((p->seen >> j) & 1u) != (p->lengths[j] != 0u))) return false;
+            bytes += p->lengths[j];
         }
+        if (p->state > 4u || p->ref16 > 1u || p->concat > 1u ||
+            bytes > MODEM_SMS_BINARY_MAX ||
+            p->sender[MODEM_SMS_SENDER_MAX] != '\0' ||
+            p->timestamp[MODEM_SMS_TIMESTAMP_MAX] != '\0') return false;
+        if (p->state != 0u && (p->id == 0u || p->total == 0u ||
+            p->total > MODEM_SMS_SEGMENT_MAX || (p->seen >> p->total) != 0u)) return false;
+        if ((p->state == 2u || p->state == 3u) &&
+            (p->seen != (uint8_t)((1u << p->total) - 1u) ||
+             !sms_picture_payload_decode(p->data, (uint16_t)bytes, &s_receive_decoded))) return false;
+        s_pending_touched[i] = time_ms();
     }
     s_picture_messages = loaded;
     return true;

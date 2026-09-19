@@ -931,7 +931,7 @@ static void test_call_datetime_full_rtc_range_persists(void) {
     }
 }
 
-static void test_call_datetime_v1_payload_migrates(void) {
+static void test_call_datetime_payload_validation(void) {
     enum {
         CALL_RECORD_OFFSET = 12u,
         CALL_RECORD_YEAR_CODE_OFFSET = CALL_RECORD_OFFSET + 15u,
@@ -973,23 +973,12 @@ static void test_call_datetime_v1_payload_migrates(void) {
 
     payload[CALL_RECORD_YEAR_CODE_OFFSET] = valid_year_code;
     payload[4] = 1u;
-    payload[5] = 0u;
-    payload[CALL_RECORD_YEAR_CODE_OFFSET] = 0u;
-    assert_true(write_unit_fixture(STORE_UNIT_CALLS_RECEIVED,
-                                   payload, payload_len),
-                "write legacy version-1 call fixture");
-    assert_true(store_service_init() == STORE_STATUS_OK,
-                "load legacy version-1 call fixture");
-
-    store_call_record_t loaded;
-    assert_true(store_call_get(STORE_CALL_LIST_RECEIVED, 0u, &loaded) ==
-                    STORE_STATUS_OK,
-                "read migrated version-1 call");
-    assert_true(loaded.datetime.year == 2063u &&
-                    loaded.datetime.month == 7u && loaded.datetime.day == 8u &&
-                    loaded.datetime.hour == 9u && loaded.datetime.minute == 10u &&
-                    loaded.datetime.second == 11u,
-                "version-1 packed timestamp remains readable");
+    assert_true(!g_store_calls_unit_ops.apply(
+                    STORE_CALL_LIST_RECEIVED, payload, payload_len),
+                "obsolete call format is rejected without migration");
+    assert_true(store_call_get(STORE_CALL_LIST_RECEIVED, 0u, &unchanged) ==
+                    STORE_STATUS_OK && unchanged.datetime.year == 2063u,
+                "obsolete call format leaves current state unchanged");
 }
 
 /* --------------------------------------------------------------------------
@@ -1257,21 +1246,17 @@ static void test_call_divert(void) {
     assert_true(strcmp(got.numbers[0], "+49111") == 0, "divert number persisted");
 }
 
-static void write_legacy_warranty_fixture(void) {
+static void write_invalid_imei_fixture(void) {
     uint8_t payload[47];
     memset(payload, 0, sizeof(payload));
 
-    /* Warranty v1 payload from the pre-provisioning firmware carrying an
-     * invalid serial: retain its non-identity fields while migrating the
-     * serial to blank (re-arming first-run provisioning). */
+    /* A bad identity must not discard unrelated warranty fields. */
     payload[0] = 0x31u; /* WARRANTY_MAGIC 0x57525431, little-endian */
     payload[1] = 0x54u;
     payload[2] = 0x52u;
     payload[3] = 0x57u;
     payload[4] = 1u;    /* STORE_PAYLOAD_VERSION */
     payload[6] = 0x80u;
-    payload[8] = 0x41u; /* life timer = 321 seconds */
-    payload[9] = 0x01u;
     payload[12] = 15u;
     memcpy(&payload[13], "490154203237519", 15u); /* bad Luhn check digit */
     payload[29] = 4u;
@@ -1282,7 +1267,7 @@ static void write_legacy_warranty_fixture(void) {
     memcpy(&payload[42], "0626", 4u);
 
     assert_true(write_unit_fixture(STORE_UNIT_SERVICE_WARRANTY, payload, sizeof(payload)),
-                "legacy warranty fixture writes v1 payload");
+                "invalid-IMEI fixture writes current payload");
 }
 
 static void put_u32_le(uint8_t *dst, uint32_t value) {
@@ -1297,19 +1282,11 @@ static void put_u16_le(uint8_t *dst, uint16_t value) {
     dst[1] = (uint8_t)(value >> 8);
 }
 
-static void put_u64_le(uint8_t *dst, uint64_t value) {
-    for (uint8_t i = 0u; i < 8u; i++) {
-        dst[i] = (uint8_t)(value >> (i * 8u));
-    }
-}
-
 static void assert_warranty_snapshot(const store_warranty_state_t *expected,
-                                     uint32_t expected_legacy_timer,
                                      const char *message) {
     store_warranty_state_t actual;
     bool unchanged = store_warranty_get(&actual) == STORE_STATUS_OK &&
-                     memcmp(&actual, expected, sizeof(actual)) == 0 &&
-                     store_warranty_legacy_life_timer() == expected_legacy_timer;
+                     memcmp(&actual, expected, sizeof(actual)) == 0;
     assert_true(unchanged, message);
 }
 
@@ -1348,25 +1325,19 @@ static void test_warranty_payload_apply_is_atomic(void) {
                   (uint32_t)payload_len,
                   "warranty payload layout matches field boundaries");
 
-    put_u32_le(&payload[8], 0x11223344u);
-    assert_true(g_store_warranty_unit_ops.apply(0u, payload, payload_len),
-                "seed warranty migration donor");
     store_warranty_state_t baseline;
     assert_true(store_warranty_get(&baseline) == STORE_STATUS_OK,
                 "capture atomic warranty baseline");
-    assert_eq_u32(0x11223344u, store_warranty_legacy_life_timer(),
-                  "baseline migration donor seeded");
 
     uint8_t candidate[sizeof(payload)];
     memcpy(candidate, payload, payload_len);
     candidate[6] ^= 0x5au;
-    put_u32_le(&candidate[8], 0xa1b2c3d4u);
 
     for (size_t truncated_len = 0u; truncated_len < payload_len; truncated_len++) {
         assert_true(!g_store_warranty_unit_ops.apply(
                         0u, candidate, truncated_len),
                     "truncated warranty payload rejected");
-        assert_warranty_snapshot(&baseline, 0x11223344u,
+        assert_warranty_snapshot(&baseline,
                                  "truncated warranty payload is atomic");
     }
 
@@ -1376,7 +1347,7 @@ static void test_warranty_payload_apply_is_atomic(void) {
         malformed[length_offsets[i]] = invalid_lengths[i];
         assert_true(!g_store_warranty_unit_ops.apply(0u, malformed, payload_len),
                     "overlength warranty field rejected");
-        assert_warranty_snapshot(&baseline, 0x11223344u,
+        assert_warranty_snapshot(&baseline,
                                  "overlength warranty field is atomic");
     }
 
@@ -1386,8 +1357,10 @@ static void test_warranty_payload_apply_is_atomic(void) {
     assert_true(store_warranty_get(&updated) == STORE_STATUS_OK &&
                     updated.flags == candidate[6],
                 "complete warranty payload publishes state");
-    assert_eq_u32(0xa1b2c3d4u, store_warranty_legacy_life_timer(),
-                  "complete warranty payload publishes donor atomically");
+    candidate[8] = 1u;
+    assert_true(!g_store_warranty_unit_ops.apply(0u, candidate, payload_len),
+                "obsolete warranty timer slot is rejected");
+    assert_warranty_snapshot(&updated, "reserved-field rejection is atomic");
 }
 
 static void test_warranty(void) {
@@ -1479,39 +1452,39 @@ static void test_warranty(void) {
                 "null IMEI provision rejected");
 
     fresh_store();
-    write_legacy_warranty_fixture();
+    write_invalid_imei_fixture();
     assert_true(store_service_init() == STORE_STATUS_OK,
-                "load pre-provisioning warranty payload");
+                "load invalid-IMEI warranty payload");
     assert_true(store_board_imei_get(imei, sizeof(imei)) == STORE_STATUS_NOT_FOUND,
-                "legacy invalid serial migrates to unprovisioned");
+                "invalid serial becomes unprovisioned");
     assert_true(store_warranty_get(&w) == STORE_STATUS_OK &&
                     strcmp(w.made, "0899") == 0 &&
                     strcmp(w.repaired, "0000") == 0 &&
                     strcmp(w.purchase_date, "0626") == 0 &&
                     w.flags == 0x80u,
-                "IMEI migration preserves all warranty fields");
-    assert_eq_u32(321u, store_life_timer_seconds(),
-                  "legacy warranty Life timer migrates to call accounting");
+                "identity repair preserves all warranty fields");
+    assert_eq_u32(0u, store_life_timer_seconds(),
+                  "warranty fields cannot create call accounting");
     flush_commits();
     assert_true(store_service_init() == STORE_STATUS_OK,
-                "re-init migrated warranty payload");
+                "re-init repaired warranty payload");
     assert_true(store_board_imei_get(imei, sizeof(imei)) == STORE_STATUS_NOT_FOUND,
-                "cleared legacy identity persists");
-    assert_eq_u32(321u, store_life_timer_seconds(),
-                  "migrated legacy Life timer persists");
+                "cleared invalid identity persists");
+    assert_eq_u32(0u, store_life_timer_seconds(),
+                  "identity repair leaves Life timer unchanged");
 
-    /* Existing installations may have lost the batched warranty value while
-     * their resettable All-calls counter survived. Recover the larger total,
-     * then prove a user Clear-timers equivalent cannot erase the odometer. */
+    /* Clearing resettable timers must not erase the independent odometer. */
     fresh_store();
+    assert_true(store_life_timer_add_seconds(600u) == STORE_STATUS_OK,
+                "seed independent Life timer");
     assert_true(store_setting_set_u32(STORE_SETTING_CALL_DURATION_ALL, 600u) ==
                     STORE_STATUS_OK,
                 "seed surviving All-calls total");
     flush_commits();
     assert_true(store_service_init() == STORE_STATUS_OK,
-                "re-init for All-calls migration");
+                "re-init call timers");
     assert_eq_u32(600u, store_life_timer_seconds(),
-                  "All-calls total repairs missing Life timer");
+                  "Life timer remains independent of All-calls total");
     assert_true(store_setting_set_u32(STORE_SETTING_CALL_DURATION_ALL, 0u) ==
                     STORE_STATUS_OK,
                 "simulate Clear timers");
@@ -1718,47 +1691,14 @@ static void test_battery_learning_payload_and_persistence(void) {
                     memcmp(&actual, &empty_endpoint, sizeof(actual)) == 0,
                 "battery learning natural-empty marker round-trips");
 
-    /* A deployed BTL1 journal must remain readable. The storage layer imports
-     * only evidence that existed in v1; battery_learning_init then promotes
-     * the exact FULL anchor into the general SOC ledger. */
-    uint8_t legacy[64] = {0};
-    put_u32_le(&legacy[0], UINT32_C(0x314c5442));
-    put_u16_le(&legacy[4], STORE_PAYLOAD_VERSION);
-    legacy[6] = 0x03u;
-    legacy[7] = BATTERY_LEARNING_PROFILE_NIMH_2S;
-    put_u16_le(&legacy[8], 1225u);
-    put_u16_le(&legacy[10], 1000u);
-    legacy[16] = 1u;
-    legacy[17] = 1u;
-    put_u16_le(&legacy[18], 1u);
-    put_u16_le(&legacy[22], 1000u);
-    put_u32_le(&legacy[36], 4u);
-    put_u32_le(&legacy[40], UINT32_C(0x81234567));
-    put_u64_le(&legacy[44], (uint64_t)-INT64_C(222000000));
-    put_u32_le(&legacy[52], (uint32_t)12000);
-    put_u32_le(&legacy[56], (uint32_t)33000);
-    assert_true(g_store_battery_learning_unit_ops.apply(
-                    0u, legacy, sizeof(legacy)),
-                "battery learning parser accepts deployed BTL1 record");
+    uint8_t obsolete[64] = {0};
+    put_u32_le(obsolete, UINT32_C(0x314c5442));
+    put_u16_le(obsolete + 4u, 1u);
+    assert_true(!g_store_battery_learning_unit_ops.apply(0u, obsolete, sizeof(obsolete)),
+                "obsolete learner format is rejected without migration");
     assert_true(store_battery_learning_get(&actual) == STORE_STATUS_OK &&
-                    actual.full_anchor_valid &&
-                    actual.capacity_cycle_qualified &&
-                    actual.capacity_history_count == 1u &&
-                    actual.capacity_history_mah[0] == 1000u &&
-                    !actual.soc_valid,
-                "BTL1 import preserves old evidence without inventing wire fields");
-    battery_learning_state_t migrated;
-    battery_learning_init(&migrated, NULL, &actual);
-    battery_learning_snapshot_t migrated_snapshot;
-    battery_learning_get_snapshot(&migrated, &migrated_snapshot);
-    assert_true(migrated_snapshot.soc_confidence ==
-                    BATTERY_SOC_CONFIDENCE_ANCHORED &&
-                    migrated.persisted.soc_valid &&
-                    migrated.persisted.soc_anchor_provenance ==
-                        BATTERY_SOC_PROVENANCE_ANCHORED_FULL &&
-                    migrated.persisted.soc_anchor_remaining_nah ==
-                        INT64_C(1000000000),
-                "BTL1 FULL anchor migrates exactly into anchored SOC");
+                    memcmp(&actual, &empty_endpoint, sizeof(actual)) == 0,
+                "obsolete learner format leaves current state unchanged");
 
     battery_learning_persisted_t invalid = expected;
     invalid.capacity_history_next = 2u;
@@ -1907,136 +1847,16 @@ static void test_charge_supervisor_payload_and_persistence(void) {
                     memcmp(&actual, &expected, sizeof(actual)) == 0,
                 "failed charge payload apply is atomic");
 
-    /* Deployed CGS3 records remain readable. A pending maintenance transaction
-     * migrates as having consumed its one reset; other records default clear. */
-    uint8_t legacy_v3[sizeof(payload)];
-    memcpy(legacy_v3, payload, sizeof(legacy_v3));
-    put_u32_le(&legacy_v3[0], UINT32_C(0x33534743));
-    memset(&legacy_v3[108], 0, sizeof(legacy_v3) - 108u);
-    assert_true(g_store_battery_charge_supervisor_unit_ops.apply(
-                    0u, legacy_v3, sizeof(legacy_v3)),
-                "charge supervisor parser accepts deployed CGS3 record");
-    battery_charge_supervisor_persisted_t expected_v3 = expected;
-    expected_v3.completion_rearm_used = false;
-    assert_true(store_battery_charge_supervisor_get(&actual) ==
-                    STORE_STATUS_OK &&
-                    memcmp(&actual, &expected_v3, sizeof(actual)) == 0,
-                "CGS3 migration defaults the completion rearm guard clear");
-
-    uint8_t legacy_v3_pending[sizeof(payload)];
-    memcpy(legacy_v3_pending, legacy_v3, sizeof(legacy_v3_pending));
-    uint16_t v3_pending_flags = (uint16_t)(
-        ((uint16_t)legacy_v3_pending[6] |
-         ((uint16_t)legacy_v3_pending[7] << 8)) &
-        (uint16_t)~((1u << 0) | (1u << 14)));
-    v3_pending_flags |= (1u << 13);
-    put_u16_le(&legacy_v3_pending[6], v3_pending_flags);
-    legacy_v3_pending[83] = BATTERY_CHARGE_TERMINAL_MAINTENANCE_REARM;
-    assert_true(g_store_battery_charge_supervisor_unit_ops.apply(
-                    0u, legacy_v3_pending, sizeof(legacy_v3_pending)),
-                "charge supervisor parser accepts pending CGS3 maintenance");
-    assert_true(store_battery_charge_supervisor_get(&actual) ==
-                    STORE_STATUS_OK && actual.maintenance_rearm_pending &&
-                    actual.completion_rearm_used,
-                "CGS3 pending maintenance migrates with loop guard consumed");
-
-    /* Deployed CGS2 records remain readable. Pending maintenance defaults
-     * false, while intrinsic terminal provenance recovers FULL authority. */
-    uint8_t legacy_v2[sizeof(payload)];
-    memcpy(legacy_v2, payload, sizeof(legacy_v2));
-    put_u32_le(&legacy_v2[0], UINT32_C(0x32534743));
-    uint16_t v2_flags = (uint16_t)(
-        ((uint16_t)legacy_v2[6] | ((uint16_t)legacy_v2[7] << 8)) &
-        UINT16_C(0x1fff));
-    put_u16_le(&legacy_v2[6], v2_flags);
-    memset(&legacy_v2[108], 0, sizeof(legacy_v2) - 108u);
-    assert_true(g_store_battery_charge_supervisor_unit_ops.apply(
-                    0u, legacy_v2, sizeof(legacy_v2)),
-                "charge supervisor parser accepts deployed CGS2 record");
-    battery_charge_supervisor_persisted_t expected_v2 = expected;
-    expected_v2.maintenance_rearm_pending = false;
-    expected_v2.completion_rearm_used = false;
-    assert_true(store_battery_charge_supervisor_get(&actual) ==
-                    STORE_STATUS_OK &&
-                    memcmp(&actual, &expected_v2, sizeof(actual)) == 0,
-                "CGS2 migration recovers intrinsic qualified FULL evidence");
-
-    legacy_v2[11] = BATTERY_CHARGE_TERMINAL_BQ_ALREADY_FULL_AT_ATTACH;
-    assert_true(g_store_battery_charge_supervisor_unit_ops.apply(
-                    0u, legacy_v2, sizeof(legacy_v2)),
-                "CGS2 migration accepts unqualified terminal provenance");
-    battery_charge_supervisor_persisted_t expected_unqualified_v2 =
-        expected_v2;
-    expected_unqualified_v2.last_terminal_reason =
-        BATTERY_CHARGE_TERMINAL_BQ_ALREADY_FULL_AT_ATTACH;
-    expected_unqualified_v2.last_terminal_full_qualified = false;
-    assert_true(store_battery_charge_supervisor_get(&actual) ==
-                    STORE_STATUS_OK &&
-                    memcmp(&actual, &expected_unqualified_v2,
-                           sizeof(actual)) == 0,
-                "CGS2 migration does not invent unqualified FULL evidence");
-
-    legacy_v2[11] = BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE;
-    assert_true(g_store_battery_charge_supervisor_unit_ops.apply(
-                    0u, legacy_v2, sizeof(legacy_v2)),
-                "CGS2 migration accepts legacy BQ completion provenance");
-    expected_unqualified_v2.last_terminal_reason =
-        BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE;
-    assert_true(store_battery_charge_supervisor_get(&actual) ==
-                    STORE_STATUS_OK &&
-                    memcmp(&actual, &expected_unqualified_v2,
-                           sizeof(actual)) == 0,
-                "CGS2 BQ completion cannot invent coulomb corroboration");
-
-    /* Deployed CGS1 records remain readable. V1 had only rounded-mAh
-     * capacity/deficit fields and no policy, exact SOC, safety ceiling, or
-     * durable inhibit latch. Migration must preserve that evidence strength
-     * without silently enabling enforcement. */
-    uint8_t legacy[96] = {0};
-    put_u32_le(&legacy[0], UINT32_C(0x31534743));
-    put_u16_le(&legacy[4], STORE_PAYLOAD_VERSION);
-    put_u16_le(&legacy[6], UINT16_C(0x07ff));
-    legacy[8] = 3u;
-    legacy[9] = BATTERY_CHARGE_CHEMISTRY_NIMH_2S;
-    legacy[10] = BATTERY_CAPACITY_CONFIDENCE_OBSERVED;
-    legacy[11] = BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE;
-    put_u32_le(&legacy[12], 7u);
-    put_u32_le(&legacy[16], 4u);
-    put_u32_le(&legacy[20], 9u);
-    put_u32_le(&legacy[24], UINT32_C(0x81234567));
-    put_u64_le(&legacy[28], (uint64_t)-INT64_C(100000000));
-    put_u16_le(&legacy[36], 1000u);
-    put_u16_le(&legacy[38], 200u);
-    put_u16_le(&legacy[40], 180u);
-    put_u16_le(&legacy[42], 800u);
-    put_u16_le(&legacy[44], 1400u);
-    put_u64_le(&legacy[48], UINT64_C(1120000000));
-    put_u32_le(&legacy[56], 6u);
-    put_u32_le(&legacy[60], 123000u);
-    put_u64_le(&legacy[64], UINT64_C(1110000000));
-    put_u16_le(&legacy[72], 2840u);
-    put_u16_le(&legacy[74], 2830u);
-    put_u16_le(&legacy[76], 8u);
-    put_u16_le(&legacy[78], (uint16_t)-2);
-    assert_true(g_store_battery_charge_supervisor_unit_ops.apply(
-                    0u, legacy, sizeof(legacy)),
-                "charge supervisor parser accepts deployed CGS1 record");
-    assert_true(store_battery_charge_supervisor_get(&actual) ==
-                    STORE_STATUS_OK &&
-                    actual.active_session_valid &&
-                    actual.frozen_remaining_nah == UINT64_C(200000000) &&
-                    actual.deficit_nah == UINT64_C(800000000) &&
-                    actual.safety_input_nah == UINT64_C(1750000000) &&
-                    actual.frozen_soc_provenance ==
-                        BATTERY_SOC_PROVENANCE_TRACKED &&
-                    actual.frozen_soc_confidence ==
-                        BATTERY_SOC_CONFIDENCE_ANCHORED &&
-                    actual.configured_policy ==
-                        BATTERY_CHARGE_POLICY_OBSERVE &&
-                    actual.configured_charge_factor_permille == 0u &&
-                    !actual.supervisor_inhibit_latched &&
-                    !actual.completion_rearm_used,
-                "CGS1 migration preserves evidence without enabling control");
+    for (uint8_t version = 1u; version <= 3u; version++) {
+        memcpy(malformed, payload, sizeof(malformed));
+        malformed[3] = (uint8_t)('0' + version);
+        assert_true(!g_store_battery_charge_supervisor_unit_ops.apply(
+                        0u, malformed, version == 1u ? 96u : sizeof(malformed)),
+                    "obsolete charge format is rejected without migration");
+        assert_true(store_battery_charge_supervisor_get(&actual) == STORE_STATUS_OK &&
+                        memcmp(&actual, &expected, sizeof(actual)) == 0,
+                    "obsolete charge format leaves current state unchanged");
+    }
 
     battery_charge_supervisor_persisted_t invalid = expected;
     invalid.target_valid = true;
@@ -2708,31 +2528,16 @@ static void test_picture_reference_reuse_after_reboot(void) {
                 "later identical picture is a new durable reception, not a day-wide duplicate");
 }
 
-static void test_picture_legacy_migration(void) {
-    uint8_t legacy[1524] = {0};
-    put_u32_le(legacy, 0x50494331u);
-    put_u16_le(legacy + 4u, 1u);
-    legacy[6] = 1u;
-    legacy[8] = 1u; legacy[9] = 72u; legacy[10] = 28u;
-    put_u16_le(legacy + 11u, 252u);
-    legacy[13] = 6u;
-    legacy[14] = 0xa5u;
-    memcpy(legacy + 266u, "Legacy", 6u);
+static void test_picture_obsolete_format_rejected(void) {
     fresh_store();
-    assert_true(write_unit_fixture(STORE_UNIT_PICTURE_MESSAGES, legacy, sizeof(legacy)), "write legacy four-slot fixture");
-    assert_true(store_service_init() == STORE_STATUS_OK, "load old picture schema");
-    store_picture_message_t picture;
-    assert_true(store_picture_message_get(0u, &picture) == STORE_STATUS_OK &&
-                picture.bitmap[0] == 0xa5u && strcmp(picture.text, "Legacy") == 0,
-                "migration preserves old bitmap and caption");
-    assert_eq_u32(1u, store_picture_message_count(), "migration does not reseed erased slots");
-    assert_true(store_picture_message_get(6u, &picture) == STORE_STATUS_NOT_FOUND,
-                "expanded slots start empty");
-    assert_true(store_picture_message_set(6u, &picture) == STORE_STATUS_OK, "new schema mutation");
-    flush_commits();
-    assert_true(store_service_init() == STORE_STATUS_OK &&
-                store_picture_message_get(0u, &picture) == STORE_STATUS_OK && strcmp(picture.text, "Legacy") == 0,
-                "migration remains readable after new-format commit");
+    uint8_t obsolete[1524] = {0};
+    put_u32_le(obsolete, 0x50494331u);
+    put_u16_le(obsolete + 4u, 1u);
+    uint8_t before = store_picture_message_count();
+    assert_true(!g_store_pictures_unit_ops.apply(0u, obsolete, sizeof(obsolete)),
+                "obsolete four-slot picture format is rejected");
+    assert_eq_u32(before, store_picture_message_count(),
+                  "obsolete picture format leaves current state unchanged");
 }
 
 int main(void) {
@@ -2763,7 +2568,7 @@ int main(void) {
     test_call_record_truncation();
     test_call_list_persistence();
     test_call_datetime_full_rtc_range_persists();
-    test_call_datetime_v1_payload_migrates();
+    test_call_datetime_payload_validation();
     test_speed_dial();
     test_contact_tone();
     test_contact_tone_persistence();
@@ -2771,7 +2576,7 @@ int main(void) {
     test_picture_messages();
     test_picture_receive_journal();
     test_picture_reference_reuse_after_reboot();
-    test_picture_legacy_migration();
+    test_picture_obsolete_format_rejected();
     test_own_tones();
     test_call_divert();
     test_warranty_payload_apply_is_atomic();

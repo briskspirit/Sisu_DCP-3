@@ -75,8 +75,6 @@ store_commit_result_t store_engine_commit_binding(
     uint8_t *payload,
     size_t payload_cap);
 store_status_t store_engine_mark_dirty(store_unit_t unit);
-void store_calls_migrate_life_timer(uint32_t warranty_donor);
 void store_warranty_post_load(void);
-uint32_t store_warranty_legacy_life_timer(void);
 
 #endif

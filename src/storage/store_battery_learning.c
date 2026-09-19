@@ -5,10 +5,8 @@
 
 #include <string.h>
 
-#define BATTERY_LEARNING_MAGIC_V1 UINT32_C(0x314c5442) /* "BTL1" */
 #define BATTERY_LEARNING_MAGIC_V2 UINT32_C(0x324c5442) /* "BTL2" */
 #define BATTERY_LEARNING_PAYLOAD_VERSION_V2 2u
-#define BATTERY_LEARNING_PAYLOAD_LEN_V1 64u
 #define BATTERY_LEARNING_PAYLOAD_LEN_V2 96u
 #define BATTERY_LEARNING_FLAG_FULL_ANCHOR (1u << 0)
 #define BATTERY_LEARNING_FLAG_CYCLE_QUALIFIED (1u << 1)
@@ -192,50 +190,6 @@ static bool serialize_battery_learning(
     return true;
 }
 
-static bool decode_battery_learning_v1(
-    const uint8_t *payload, size_t len,
-    battery_learning_persisted_t *loaded) {
-    if (len != BATTERY_LEARNING_PAYLOAD_LEN_V1 ||
-        read_u32(&payload[0]) != BATTERY_LEARNING_MAGIC_V1 ||
-        read_u16(&payload[4]) != STORE_PAYLOAD_VERSION ||
-        (payload[6] & (uint8_t)~UINT8_C(0x07)) != 0u ||
-        read_u32(&payload[60]) != 0u) {
-        return false;
-    }
-    battery_learning_persisted_defaults(loaded, NULL);
-    loaded->full_anchor_valid =
-        (payload[6] & BATTERY_LEARNING_FLAG_FULL_ANCHOR) != 0u;
-    loaded->capacity_cycle_qualified =
-        (payload[6] & BATTERY_LEARNING_FLAG_CYCLE_QUALIFIED) != 0u;
-    loaded->natural_empty_valid =
-        (payload[6] & BATTERY_LEARNING_FLAG_NATURAL_EMPTY) != 0u;
-    loaded->profile_id = payload[7];
-    loaded->nominal_capacity_mah = read_u16(&payload[8]);
-    for (uint8_t i = 0u;
-         i < BATTERY_LEARNING_CAPACITY_HISTORY_COUNT; i++) {
-        loaded->capacity_history_mah[i] =
-            read_u16(&payload[10u + (size_t)i * 2u]);
-    }
-    loaded->capacity_history_count = payload[16];
-    loaded->capacity_history_next = payload[17];
-    loaded->accepted_capacity_cycles = read_u16(&payload[18]);
-    loaded->rejected_capacity_cycles = read_u16(&payload[20]);
-    loaded->last_capacity_mah = read_u16(&payload[22]);
-    for (uint8_t i = 0u;
-         i < BATTERY_LEARNING_RESISTANCE_BIN_COUNT; i++) {
-        loaded->resistance_mohm[i] =
-            read_u16(&payload[24u + (size_t)i * 2u]);
-        loaded->resistance_sample_count[i] =
-            read_u16(&payload[30u + (size_t)i * 2u]);
-    }
-    loaded->pack_generation = read_u32(&payload[36]);
-    loaded->full_anchor_acr_raw = read_u32(&payload[40]);
-    loaded->full_anchor_nah = read_i64(&payload[44]);
-    loaded->cycle_min_temperature_mdegc = read_i32(&payload[52]);
-    loaded->cycle_max_temperature_mdegc = read_i32(&payload[56]);
-    return true;
-}
-
 static bool decode_battery_learning_v2(
     const uint8_t *payload, size_t len,
     battery_learning_persisted_t *loaded) {
@@ -302,8 +256,7 @@ static bool apply_battery_learning(
         return false;
     }
     battery_learning_persisted_t loaded;
-    bool decoded = decode_battery_learning_v2(payload, len, &loaded) ||
-                   decode_battery_learning_v1(payload, len, &loaded);
+    bool decoded = decode_battery_learning_v2(payload, len, &loaded);
     if (!decoded || !battery_learning_persisted_valid(&loaded, NULL)) {
         return false;
     }

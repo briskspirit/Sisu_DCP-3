@@ -38,29 +38,8 @@ static void check_admissions_rejected(void) {
                                                   1u, 2u, &sms_request_id) &&
               sms_request_id == 0u,
           "binary SMS rejected without an orphan token");
-    sms_request_id = 99u;
-    check(!modem_service_request_save_sms(
-              "123", "test", &sms_request_id) && sms_request_id == 0u,
-          "save SMS rejected without an orphan token");
     check(!modem_service_request_debug_at("AT"), "raw AT rejected");
-    sms_request_id = 99u;
-    check(!modem_service_request_sms_mailbox(
-              MODEM_SMS_MAILBOX_INBOX, &sms_request_id) &&
-              sms_request_id == 0u,
-          "mailbox rejected without an orphan token");
-    uint16_t sms_indices[2] = {0u, 7u};
-    sms_request_id = 99u;
-    check(!modem_service_request_sms_read(
-              sms_indices, 2u, false, 0x1234u, &sms_request_id) &&
-              sms_request_id == 0u,
-          "SMS on-demand read rejected without an orphan token");
-    sms_request_id = 99u;
-    check(!modem_service_request_delete_sms_indices(
-              sms_indices, 2u, &sms_request_id) && sms_request_id == 0u,
-          "multipart SMS delete rejected without an orphan token");
-    check(!modem_service_request_send_sms("123", "test", NULL) &&
-              !modem_service_request_sms_mailbox(
-                  MODEM_SMS_MAILBOX_INBOX, NULL),
+    check(!modem_service_request_send_sms("123", "test", NULL),
           "SMS admission requires an explicit request owner");
     modem_service_test_snapshot_t snapshot;
     modem_service_test_get_snapshot(&snapshot);

@@ -33,6 +33,8 @@
 #include "hardware/structs/powman.h"
 #include "hardware/structs/sysinfo.h"
 #include "services/sms_picture_codec.h"
+#include "services/message_service.h"
+#include "services/phonebook_service.h"
 #include "services/board_diag_service.h"
 #include "storage/store_service.h"
 #include "storage/storage_lfs.h"
@@ -227,6 +229,15 @@ void debug_console_tick(app_t *app) {
 }
 
 static void command_storeinfo(void) {
+    message_status_t messages;
+    message_service_get_status(&messages);
+    printf("[store] contacts ready=%u count=%u messages ready=%u error=%u full=%u inbox=%u outbox=%u unread=%u pending=%u queued=%u lost=%lu filtered=%lu\n",
+           phonebook_service_cache_valid(), (unsigned)phonebook_service_count(),
+           messages.ready, messages.storage_error, messages.full,
+           (unsigned)messages.inbox, (unsigned)messages.outbox, (unsigned)messages.unread,
+           (unsigned)messages.pending, (unsigned)messages.queued,
+           (unsigned long)messages.receive_errors,
+           (unsigned long)messages.filtered_controls);
     storage_partition_diag_t info;
     storage_partitions_get_diag(&info);
     printf("[store] ready=%u system=%ld/%ld user=%ld/%ld blocks (4096 bytes each)\n",

@@ -37,6 +37,7 @@
 #include "services/stack_monitor.h"
 #include "storage/store_service.h"
 #include "services/phonebook_service.h"
+#include "services/message_service.h"
 #include "services/strings.h"
 #include "services/timebase.h"
 #include "services/usb_service.h"
@@ -178,6 +179,7 @@ int main(void) {
 #endif
     store_service_init();
     phonebook_service_init();
+    message_service_init();
     if (!backlight_calibration_service_init()) {
         LOGW("boot", "backlight calibration apply failed; using 100%%");
     }
@@ -393,7 +395,10 @@ int main(void) {
             store_service_defer_commits_until(now + STORE_AUDIO_GUARD_MS);
         }
         store_service_tick(now);
-        if (store_service_write_window_open(now)) phonebook_service_tick();
+        if (store_service_write_window_open(now)) {
+            phonebook_service_tick();
+            message_service_tick(now);
+        }
         debug_console_tick(&s_app);
         core1_services_audio_gate_tick(now); /* A2+R2: park idle audio plumbing */
         if (s_app.route != APP_ROUTE_POWER_OFF) {

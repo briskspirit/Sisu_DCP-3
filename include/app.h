@@ -2,6 +2,7 @@
 #define APP_H
 
 #include "services/phonebook_types.h"
+#include "services/message_types.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,28 +16,14 @@
 #include "services/t9_service.h"
 #include "ui/signal_bars.h"
 
-#define APP_SMS_RECORD_LIMIT MODEM_SMS_RECORD_MAX
+#define APP_SMS_RECORD_LIMIT MESSAGE_MAILBOX_LIMIT
 #define APP_SMS_T9_USER_WORD_LIMIT 16u
 
-typedef struct {
-    uint16_t modem_indices[MODEM_SMS_SEGMENT_MAX];
-    uint32_t identity_hash;
-    uint8_t modem_index_count;
-    bool from_storage;
-    bool picture;
-    bool quarantined;
-    char status[MODEM_SMS_STATUS_MAX + 1u];
-    char address[MODEM_SMS_SENDER_MAX + 1u];
-    char timestamp[MODEM_SMS_TIMESTAMP_MAX + 1u];
-} app_sms_record_t;
+typedef message_metadata_t app_sms_record_t;
 
 typedef struct {
     bool valid;
-    bool picture;
-    union {
-        char text[MODEM_SMS_DECODED_TEXT_MAX + 1u];
-        store_picture_message_t picture_message;
-    };
+    char text[MESSAGE_TEXT_MAX + 1u];
 } app_sms_content_t;
 
 typedef enum {
@@ -264,7 +251,7 @@ typedef struct {
     uint8_t messages_menu_selected;
     uint8_t messages_kind;
     uint8_t messages_mode;
-    uint8_t messages_selected;
+    uint16_t messages_selected;
     uint8_t messages_read_page;
     uint8_t messages_read_scroll;
     uint8_t messages_option_selected;
@@ -303,28 +290,27 @@ typedef struct {
     bool sms_delete_waiting;
     uint32_t sms_delete_started_ms;
     uint32_t sms_delete_request_id;
-    uint32_t last_modem_sms_received_count;
-    uint32_t last_modem_user_sms_received_count;
-    uint32_t last_sms_storage_full_events; /* edge-tracks the modem's "receive store full" notice */
-    bool sms_status_sync_silent;  /* the in-flight mailbox load only refreshes unread status (no UI) */
-    bool sms_status_sync_pending; /* a boot/arrival sync still needs a complete, current mailbox view */
-    bool sms_boot_status_sync_done;
-    bool sms_open_deferred;       /* a user mailbox open is queued behind the in-flight silent reconcile */
-    uint8_t sms_open_deferred_kind;
-    uint32_t sms_mailbox_received_count_at_start; /* rejects a scan crossed by a newer +CMTI */
-    /* Only one modem mailbox is open at a time and every open reloads it, so
+    uint32_t sms_delete_object_id;
+    uint32_t last_local_sms_received_count;
+    uint32_t last_sms_storage_full_events;
+    uint32_t sms_receive_errors_seen;
+    uint32_t sms_cache_revision;
+    uint32_t sms_list_selected_id;
+    bool sms_storage_error_seen;
+    bool sms_storage_warning;
+    /* Only one local mailbox is open at a time and every open reloads it, so
      * Inbox and Outbox deliberately share the same full-domain view buffer. */
     union {
         app_sms_record_t sms_inbox[APP_SMS_RECORD_LIMIT];
         app_sms_record_t sms_outbox[APP_SMS_RECORD_LIMIT];
     };
-    uint8_t sms_inbox_count;
-    uint8_t sms_outbox_count;
+    uint16_t sms_inbox_count;
+    uint16_t sms_outbox_count;
     app_sms_content_t sms_selected_content;
     bool sms_read_waiting;
     uint32_t sms_read_started_ms;
     uint32_t sms_read_request_id;
-    uint32_t sms_read_identity_hash;
+    uint32_t sms_read_object_id;
     char sms_composer_text[MODEM_SMS_TEXT_MAX + 1u];
     uint16_t sms_composer_cursor; /* insertion point (DF3_CURSOR_MOVABLE) */
     bool sms_composer_cursor_visible;
@@ -368,7 +354,7 @@ typedef struct {
     uint8_t sms_received_pending_count;
     /* STBY.1: unread-records counter driving the persistent slot-0x03
      * envelope, independent of the "N messages received" prompt. */
-    uint8_t sms_unread_count;
+    uint16_t sms_unread_count;
     /* Battery/charger runtime (board diagnostics service backed). */
     uint8_t battery_bars;
     bool battery_charger_connected;

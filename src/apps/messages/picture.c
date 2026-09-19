@@ -126,9 +126,7 @@ void messages_picture_open_list(app_t *app) {
     app->messages_read_scroll = 0u;
     memset(&app->sms_selected_content, 0, sizeof(app->sms_selected_content));
     app->sms_read_waiting = false;
-    if (!app->sms_status_sync_silent) {
-        app->messages_open_pending = false;
-    }
+    app->messages_open_pending = false;
     app->route = APP_ROUTE_MESSAGES_LIST;
     app->dirty = true;
 }

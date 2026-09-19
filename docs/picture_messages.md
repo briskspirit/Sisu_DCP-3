@@ -1,9 +1,9 @@
 # Picture Messages
 
 Picture messages use Nokia Smart Messaging on destination port `0x158A`, not
-MMS. Ordinary text SMS still use the modem's ME store. Recognized picture parts
-go directly to the phone's flash-backed picture journal and do not become Inbox
-rows or consume ME slots. Existing ME messages are not automatically deleted.
+MMS. Ordinary SMS and pictures both use local littlefs storage. Recognized
+picture parts go to the dedicated picture record and do not become Inbox rows.
+The firmware does not import or delete messages left in the modem's ME store.
 
 ## Original Behavior
 
@@ -58,7 +58,7 @@ overlay incorrectly joined "message sent" on the second row, through the icon.
 
 ## Flash Layout And Durability
 
-The existing picture journal contains:
+The atomic littlefs picture record contains:
 
 - Seven shared saved-picture slots, including the four existing pictures.
 - Two pending receptions, each with room for up to eight fragments and 384
@@ -67,12 +67,9 @@ The existing picture journal contains:
 - Sender metadata, concatenation identity, per-fragment lengths, and a local
   reception ID. Supported pictures fit the 72x28 display and 120-byte caption.
 
-Version 2 occupies 3824 bytes of the existing 4064-byte journal payload. It
-still uses the same pair of 4-KiB sectors; no other persistent unit moves.
-Version-1 records migrate in memory with all four slots, including erased
-slots, preserved. The three extra saved slots start empty. Migration is written
-with the next normal picture mutation. Older firmware cannot read version 2;
-downgrading after a commit requires restoring a compatible picture backup.
+Version 2 occupies 3824 bytes of a semantic record (4064-byte payload ceiling)
+in the user filesystem's shared pool. Save, discard and reassembly replace the
+complete record atomically. Older four-slot payloads are not imported.
 
 Fragments may arrive out of order. The receiver matches sender, source port,
 concatenation reference and width, and same-date SMSC timestamps within 30
@@ -89,14 +86,14 @@ across an SMSC date change is not supported yet.
 
 This pending queue is intentionally more durable than Nokia's observed RAM UI
 queue: committed fragments survive a reboot. Receipt initially changes RAM;
-the normal paced journal writer makes it durable. A power loss before that
+the normal paced record writer makes it durable. A power loss before that
 commit can still lose the newest fragment. The modem acknowledges the network
 independently, so this is not an end-to-end exactly-once delivery guarantee.
 
 The notification appears only after the complete picture is committed. Save
 updates the selected gallery slot and consumes the pending reception in one
-journal record. Save/Discard success is shown only after that commit succeeds.
-A failed write preserves the prior journal, including the pending picture.
+littlefs record. Save/Discard success is shown only after that commit succeeds.
+A failed write preserves the prior record, including the pending picture.
 The existing preview or confirmation stays visible while the commit is pending;
 there is no additional Saving/Discarding dialog. Calls and alarms can displace
 that flow without being replaced by a late completion. Storage and receive
@@ -124,12 +121,10 @@ existing PDU path.
 
 **Known transport limitation:** the same modem image strips UDH from native
 3GPP2 PDU-form delivery. Buffering with CNMI does not repair this: buffered
-messages retain their arrival-time format. Keeping picture sends in text mode
-removes the observed self-send failure window, but existing ME writes, scans,
-and reads still use short PDU windows. A picture arriving during one can lose
-its addressing/concatenation header before the host receives it. The host does
-not guess missing headers. Eliminating those remaining windows is not claimed
-by this implementation.
+messages retain their arrival-time format. Normal sending, local inbox reads,
+outbox saves and reception now stay in text mode: there are no ME read/write
+PDU windows. The diagnostic binary-send modes can still enter PDU mode and
+must not be treated as lossless receive tests.
 
 Text-mode octet/UDH sending and reception were verified on the modem. Repeated
 three-part self-addressed pictures completed through the production DUT firmware:
@@ -142,7 +137,7 @@ ME usage or ordinary Inbox counters; a subsequent plain text SMS was received
 and stored normally. These are Verizon self-send results, not cross-carrier or
 original-handset interoperability results.
 Host tests cover reordered parts, duplicate/conflicting parts, full queues,
-reset during assembly/save, legacy migration, durable UI outcomes, cleanup
+reset during assembly/save, obsolete-format rejection, durable UI outcomes, cleanup
 failure, and ordinary SMS/call regressions. AT&T binary-send failure reporting
 remains separate work.
 

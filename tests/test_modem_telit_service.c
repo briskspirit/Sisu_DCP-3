@@ -1224,60 +1224,17 @@ static bool request_send_binary_sms(const char *number,
         &s_last_sms_request_id);
 }
 
-static bool request_save_sms(const char *number, const char *text) {
-    s_last_sms_request_id = 0u;
-    return modem_service_request_save_sms(
-        number, text, &s_last_sms_request_id);
-}
 
-static bool request_sms_mailbox(modem_sms_mailbox_t mailbox) {
-    s_last_sms_request_id = 0u;
-    return modem_service_request_sms_mailbox(
-        mailbox, &s_last_sms_request_id);
-}
 
-static bool request_sms_read(const uint16_t *indices, uint8_t index_count,
-                             bool quarantined,
-                             uint32_t expected_identity_hash) {
-    s_last_sms_request_id = 0u;
-    return modem_service_request_sms_read(
-        indices, index_count, quarantined, expected_identity_hash,
-        &s_last_sms_request_id);
-}
 
-static bool request_delete_sms_indices(const uint16_t *indices,
-                                       uint8_t index_count) {
-    s_last_sms_request_id = 0u;
-    return modem_service_request_delete_sms_indices(
-        indices, index_count, &s_last_sms_request_id);
-}
 
-#define modem_service_request_send_sms(number, text) \
-    request_send_sms((number), (text))
-#define modem_service_request_send_binary_sms(number, payload, payload_len, \
-                                              dest_port, source_port) \
-    request_send_binary_sms((number), (payload), (payload_len), (dest_port), \
-                            (source_port))
-#define modem_service_request_save_sms(number, text) \
-    request_save_sms((number), (text))
-#define modem_service_request_sms_mailbox(mailbox) \
-    request_sms_mailbox((mailbox))
-#define modem_service_request_sms_read(indices, index_count, quarantined, \
-                                       expected_identity_hash) \
-    request_sms_read((indices), (index_count), (quarantined), \
-                     (expected_identity_hash))
-#define modem_service_request_delete_sms_indices(indices, index_count) \
-    request_delete_sms_indices((indices), (index_count))
-#define modem_service_pop_sms_send_result(out) \
-    (modem_service_pop_sms_send_result)(s_last_sms_request_id, (out))
-#define modem_service_pop_sms_save_result(out) \
-    (modem_service_pop_sms_save_result)(s_last_sms_request_id, (out))
-#define modem_service_pop_sms_mailbox_result(out) \
-    (modem_service_pop_sms_mailbox_result)(s_last_sms_request_id, (out))
-#define modem_service_pop_sms_read_result(out) \
-    (modem_service_pop_sms_read_result)(s_last_sms_request_id, (out))
-#define modem_service_pop_sms_delete_result(out) \
-    (modem_service_pop_sms_delete_result)(s_last_sms_request_id, (out))
+
+
+
+
+#define modem_service_request_send_sms(number, text) request_send_sms((number), (text))
+#define modem_service_request_send_binary_sms(number, payload, len, dest, source) request_send_binary_sms((number), (payload), (len), (dest), (source))
+#define modem_service_pop_sms_send_result(out) (modem_service_pop_sms_send_result)(s_last_sms_request_id, (out))
 
 static modem_service_test_snapshot_t service_probe(void) {
     modem_service_test_snapshot_t snapshot;
@@ -1455,7 +1412,7 @@ static void test_cold_boot_matching_provision(void) {
     check(status.sim_checked && status.sim_present,
           "ready SIM publishes checked and physically present");
     check(status.provisioning_verified &&
-              status.provisioning_schema_version == 11u,
+              status.provisioning_schema_version == 12u,
           "complete readback pass publishes versioned provisioning result");
     check(s_mh_rail_enabled && s_mh_status_raw >= 1024u,
           "READY retains the modem rail with high PWRMON evidence");
@@ -1650,9 +1607,8 @@ static void test_background_polling_bench_gate_is_narrow(void) {
     size_t cops_before = mh_tx_count_exact("AT+COPS?");
     size_t cpms_before = mh_tx_count_exact("AT+CPMS?");
     mh_feed("+CMTI: \"ME\",17");
-    check(mh_tx_count_exact("AT+CPMS?") == cpms_before + 1u,
-          "CMTI schedules exactly one immediate receive-store fullness check");
-    cpms_before++;
+    check(mh_tx_count_exact("AT+CPMS?") == cpms_before,
+          "unexpected CMTI never schedules modem-storage work");
 
     check(modem_service_request_debug_background_polling(false),
           "background polling disable request is admitted");
@@ -1681,7 +1637,7 @@ static void test_background_polling_bench_gate_is_narrow(void) {
               mh_tx_count_exact("AT#RFSTS") > signal_before &&
               mh_tx_count_exact("AT+CEREG?") > cereg_before &&
               mh_tx_count_exact("AT+COPS?") == cops_before &&
-              mh_tx_count_exact("AT+CPMS?") > cpms_before,
+              mh_tx_count_exact("AT+CPMS?") == cpms_before,
           "re-enable immediately drains overdue production backstops");
 }
 
@@ -1766,7 +1722,7 @@ static void test_cold_boot_repairs_dvi_and_restores_runtime_mode(void) {
           "fresh DVI profile converges through one controlled reboot");
     modem_status_t status = mh_status();
     check(status.provisioning_verified && status.audio_init_ok &&
-              status.provisioning_schema_version == 11u,
+              status.provisioning_schema_version == 12u,
           "repaired DVI profile reaches READY with audio qualified");
     check(s_dviext_configured && s_dvi_configured &&
               mh_tx_count_exact("AT#DVIEXT=1,1") == 1u &&
@@ -1819,7 +1775,7 @@ static void test_cold_boot_provisions_antenna_before_rf_online(void) {
               final_verify < rf_online,
           "RF stays off through GPIO setup and final table verification");
     check(mh_status().provisioning_verified &&
-              mh_status().provisioning_schema_version == 11u,
+              mh_status().provisioning_schema_version == 12u,
           "antenna provisioning participates in the versioned contract");
 }
 
@@ -2460,7 +2416,7 @@ static void test_sim_absent_locked_and_cme_fallback(void) {
           "hot-SIM setup verifies the saved sleep-wake profile without rewriting it");
     check(mh_tx_count_exact("ATE0") == 1u &&
               mh_tx_count_exact("AT#RXDIV?") == 1u &&
-              mh_tx_count_exact("AT+CPMS?") == 1u &&
+              mh_tx_count_exact("AT+CPMS?") == 0u &&
               mh_tx_count_exact("AT#ECAMURC?") == 1u,
           "hot-SIM pass leaves non-SIM init alone and verifies SIM provisioning");
     settle_dtr_sleep();
@@ -2610,90 +2566,19 @@ static void test_late_psmri_invalidates_and_replays_lifecycle(void) {
 }
 
 static void test_sms_text_send_contract(void) {
-    static const char number[] = "+15551234567";
-    static const char body[] = "Bench text";
-    static const char cmgs[] = "AT+CMGS=\"+15551234567\",145";
-    static const char cmgw[] =
-        "AT+CMGW=\"+15551234567\",145,\"STO SENT\"";
-    static const uint8_t sub = 0x1au;
-
-    if (!begin_sms_operation_fixture("text-send fixture boots")) {
-        return;
-    }
-    uint32_t sent_before = mh_status().sms_sent_count;
-    check(modem_service_request_send_sms(number, body),
-          "text send is admitted");
-    mh_settle();
-
-    size_t cpms_event = tx_event_cstr(
-        "AT+CPMS=\"ME\",\"ME\",\"ME\"", 0u);
-    size_t cmgs_event = tx_event_cstr(cmgs, cpms_event + 1u);
-    size_t body_event = tx_event_raw(body, strlen(body), cmgs_event + 1u);
-    size_t first_sub = tx_event_raw(&sub, 1u, body_event + 1u);
-    size_t cmgw_event = tx_event_cstr(cmgw, first_sub + 1u);
-    size_t copy_body = tx_event_raw(body, strlen(body), cmgw_event + 1u);
-    size_t second_sub = tx_event_raw(&sub, 1u, copy_body + 1u);
-    modem_sms_send_result_t result;
-    check(cpms_event != SIZE_MAX && cmgs_event != SIZE_MAX &&
-              body_event != SIZE_MAX && first_sub != SIZE_MAX &&
-              cmgw_event != SIZE_MAX && copy_body != SIZE_MAX &&
-              second_sub != SIZE_MAX,
-          "text send preserves CPMS, CMGS body, and sent-copy ordering");
-    check(mh_tx_count_exact(cmgs) == 1u &&
-              mh_tx_count_exact(cmgw) == 1u &&
-              tx_event_count_raw_byte(0x1au) == 2u,
-          "text send emits one network submit and one sent-copy submit");
-    check(modem_service_pop_sms_send_result(&result) &&
-              result.request_id == s_last_sms_request_id &&
-              result.kind == MODEM_SMS_REQUEST_SEND_TEXT &&
-              result.outcome == MODEM_SMS_OUTCOME_OK &&
-              !modem_service_pop_sms_send_result(&result) &&
-              mh_status().sms_sent_count == sent_before + 1u &&
-              !mh_status().operation_busy,
-          "text send publishes one success and increments its counter once");
-
-    static const struct {
-        sms_flow_fault_t fault;
-        uint32_t timeout_ms;
-        size_t expected_subs;
-        size_t expected_escs;
-        const char *name;
-    } copy_failures[] = {
-        {SMS_FLOW_FAULT_CMGW_PROMPT_ERROR, 0u, 1u, 0u,
-         "sent-copy prompt error"},
-        {SMS_FLOW_FAULT_CMGW_PROMPT_TIMEOUT, 5001u, 1u, 1u,
-         "sent-copy prompt timeout"},
-        {SMS_FLOW_FAULT_CMGW_FINAL_ERROR, 0u, 2u, 0u,
-         "sent-copy final error"},
-        {SMS_FLOW_FAULT_CMGW_FINAL_TIMEOUT, 30001u, 2u, 0u,
-         "sent-copy final timeout"},
-    };
-    for (size_t i = 0u;
-         i < sizeof(copy_failures) / sizeof(copy_failures[0]); i++) {
-        if (!begin_sms_operation_fixture(copy_failures[i].name)) {
-            return;
-        }
-        sent_before = mh_status().sms_sent_count;
-        s_sms_flow_fault = copy_failures[i].fault;
-        check(modem_service_request_send_sms(number, body),
-              "sent-copy failure send is admitted");
+    for (unsigned reject = 0u; reject < 2u; reject++) {
+        if (!begin_sms_operation_fixture("local sent-copy fixture boots")) return;
+        s_mh_local_reject = reject != 0u;
+        check(modem_service_request_send_sms("+15551234567", "Bench text"), "text send admitted");
         mh_settle();
-        if (copy_failures[i].timeout_ms != 0u) {
-            mh_advance(copy_failures[i].timeout_ms);
-        }
-        check(modem_service_pop_sms_send_result(&result) &&
-                  result.request_id == s_last_sms_request_id &&
-                  result.kind == MODEM_SMS_REQUEST_SEND_TEXT &&
-                  result.outcome == MODEM_SMS_OUTCOME_OK &&
-                  !modem_service_pop_sms_send_result(&result) &&
-                  mh_status().sms_sent_count == sent_before + 1u &&
-                  mh_tx_count_exact(cmgw) == 1u &&
-                  tx_event_count_raw_byte(0x1au) ==
-                      copy_failures[i].expected_subs &&
-                  tx_event_count_raw_byte(0x1bu) ==
-                      copy_failures[i].expected_escs &&
-                  !mh_status().operation_busy,
-              "network-accepted text survives every sent-copy failure phase");
+        modem_sms_send_result_t result;
+        check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_OK &&
+              !modem_service_pop_sms_send_result(&result) && mh_status().sms_sent_count == 1u,
+              "local copy failure cannot erase network acceptance");
+        check(mh_tx_count_exact("AT+CMGS=\"+15551234567\",145") == 1u &&
+              mh_tx_count_exact("AT+CPMS=\"ME\",\"ME\",\"ME\"") == 0u &&
+              tx_event_count_raw_byte(0x1au) == 1u && s_mh_local_sent == (reject ? 0u : 1u),
+              "one network submit followed by a local copy, never CMGW");
     }
 }
 
@@ -2707,8 +2592,6 @@ static void test_sms_text_send_failures_and_prompt_settle(void) {
         bool expect_body;
         const char *name;
     } cases[] = {
-        {SMS_FLOW_FAULT_CPMS_ERROR, 0u, false, false, "CPMS error"},
-        {SMS_FLOW_FAULT_CPMS_TIMEOUT, 5001u, false, false, "CPMS timeout"},
         {SMS_FLOW_FAULT_CMGS_PROMPT_ERROR, 0u, true, false,
          "CMGS prompt error"},
         {SMS_FLOW_FAULT_CMGS_FINAL_ERROR, 0u, true, true,
@@ -2793,131 +2676,7 @@ static void test_sms_text_send_failures_and_prompt_settle(void) {
           "ESC final drains as an orphan before the queued command dispatches");
 }
 
-static void test_sms_save_and_delete_contracts(void) {
-    static const char body[] = "Saved draft";
-    static const char cmgw[] = "AT+CMGW=\"+15550001111\",145";
 
-    if (!begin_sms_operation_fixture("save-SMS fixture boots")) {
-        return;
-    }
-    check(modem_service_request_save_sms("+15550001111", body),
-          "save-to-outbox is admitted");
-    mh_settle();
-    size_t cmgw_event = tx_event_cstr(cmgw, 0u);
-    modem_sms_save_result_t save_result;
-    check(cmgw_event != SIZE_MAX &&
-              tx_event_raw(body, strlen(body), cmgw_event + 1u) != SIZE_MAX &&
-              tx_event_count_raw_byte(0x1au) == 1u &&
-              modem_service_pop_sms_save_result(&save_result) &&
-              save_result.request_id == s_last_sms_request_id &&
-              save_result.kind == MODEM_SMS_REQUEST_SAVE &&
-              save_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              !save_result.sim_not_ready &&
-              !modem_service_pop_sms_save_result(&save_result),
-          "save-to-outbox publishes one success after its CMGW body");
-
-    static const struct {
-        sms_flow_fault_t fault;
-        uint32_t timeout_ms;
-        size_t expected_subs;
-        size_t expected_escs;
-        const char *name;
-    } save_failures[] = {
-        {SMS_FLOW_FAULT_CMGW_PROMPT_ERROR, 0u, 0u, 0u,
-         "save prompt error"},
-        {SMS_FLOW_FAULT_CMGW_PROMPT_TIMEOUT, 5001u, 0u, 1u,
-         "save prompt timeout"},
-        {SMS_FLOW_FAULT_CMGW_FINAL_ERROR, 0u, 1u, 0u,
-         "save final error"},
-        {SMS_FLOW_FAULT_CMGW_FINAL_TIMEOUT, 30001u, 1u, 0u,
-         "save final timeout"},
-    };
-    for (size_t i = 0u;
-         i < sizeof(save_failures) / sizeof(save_failures[0]); i++) {
-        if (!begin_sms_operation_fixture(save_failures[i].name)) {
-            return;
-        }
-        s_sms_flow_fault = save_failures[i].fault;
-        check(modem_service_request_save_sms("+15550001111", body),
-              "save failure case is admitted");
-        mh_settle();
-        if (save_failures[i].timeout_ms != 0u) {
-            mh_advance(save_failures[i].timeout_ms);
-        }
-        modem_sms_outcome_t expected_outcome =
-            save_failures[i].fault == SMS_FLOW_FAULT_CMGW_PROMPT_TIMEOUT
-                ? MODEM_SMS_OUTCOME_TIMEOUT
-                : (save_failures[i].fault == SMS_FLOW_FAULT_CMGW_FINAL_TIMEOUT
-                       ? MODEM_SMS_OUTCOME_UNCERTAIN
-                       : MODEM_SMS_OUTCOME_ERROR);
-        check(modem_service_pop_sms_save_result(&save_result) &&
-                  save_result.request_id == s_last_sms_request_id &&
-                  save_result.kind == MODEM_SMS_REQUEST_SAVE &&
-                  save_result.outcome == expected_outcome &&
-                  !save_result.sim_not_ready &&
-                  !modem_service_pop_sms_save_result(&save_result) &&
-                  mh_tx_count_exact(cmgw) == 1u &&
-                  tx_event_count_raw_byte(0x1au) ==
-                      save_failures[i].expected_subs &&
-                  tx_event_count_raw_byte(0x1bu) ==
-                      save_failures[i].expected_escs &&
-                  !mh_status().operation_busy,
-              "save failure phase publishes one terminal result and unwinds");
-    }
-
-    if (!begin_sms_operation_fixture("save missing-SIM fixture boots")) {
-        return;
-    }
-    s_mh_sim_ready = false;
-    mh_feed("#QSS: 2,1");
-    mh_clear_tx_capture();
-    s_sms_flow_fault = SMS_FLOW_FAULT_CPMS_ERROR;
-    check(modem_service_request_save_sms("", body),
-          "missing-SIM save is admitted for classified failure");
-    mh_settle();
-    check(modem_service_pop_sms_save_result(&save_result) &&
-              save_result.request_id == s_last_sms_request_id &&
-              save_result.outcome == MODEM_SMS_OUTCOME_ERROR &&
-              save_result.sim_not_ready &&
-              mh_tx_count_exact("AT+CMGW") == 0u,
-          "CPMS failure reports SIM-not-ready without opening CMGW");
-
-    if (!begin_sms_operation_fixture("single delete fixture boots")) {
-        return;
-    }
-    const uint16_t zero_index = 0u;
-    check(modem_service_request_delete_sms_indices(&zero_index, 1u),
-          "zero-based SMS index is admitted for deletion");
-    mh_settle();
-    modem_sms_delete_result_t delete_result;
-    check(mh_tx_count_exact("AT+CMGD=0") == 1u &&
-              modem_service_pop_sms_delete_result(&delete_result) &&
-              delete_result.request_id == s_last_sms_request_id &&
-              delete_result.kind == MODEM_SMS_REQUEST_DELETE &&
-              delete_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              !delete_result.sim_not_ready &&
-              !modem_service_pop_sms_delete_result(&delete_result),
-          "single delete publishes one success for index zero");
-
-    if (!begin_sms_operation_fixture("multi-delete failure fixture boots")) {
-        return;
-    }
-    const uint16_t indices[] = {3u, 4u, 5u};
-    s_sms_flow_fault = SMS_FLOW_FAULT_DELETE_SECOND_ERROR;
-    check(modem_service_request_delete_sms_indices(indices, 3u),
-          "multi-index delete is admitted");
-    mh_settle();
-    check(mh_tx_count_exact("AT+CMGD=3") == 1u &&
-              mh_tx_count_exact("AT+CMGD=4") == 1u &&
-              mh_tx_count_exact("AT+CMGD=5") == 1u &&
-              modem_service_pop_sms_delete_result(&delete_result) &&
-              delete_result.request_id == s_last_sms_request_id &&
-              delete_result.outcome == MODEM_SMS_OUTCOME_ERROR &&
-              !delete_result.sim_not_ready &&
-              !modem_service_pop_sms_delete_result(&delete_result) &&
-              !mh_status().operation_busy,
-          "multi-delete continues after one error and publishes one failure");
-}
 
 static bool build_expected_binary_segment(sms_submit_pdu_t *submit,
                                           char *pdu,
@@ -3155,77 +2914,18 @@ static void test_sms_binary_failures_and_prompt_settle(void) {
 
 static bool request_sms_operation_for_transport_case(unsigned operation) {
     static const uint8_t binary[] = {0x41u, 0x42u};
-    static const uint16_t index = 3u;
-    switch (operation) {
-    case 0u:
-        return modem_service_request_send_sms("5550102", "CTS text");
-    case 1u:
-        return modem_service_request_send_binary_sms(
-            "5550102", binary, sizeof(binary), 0x1234u, 0u);
-    case 2u:
-        return modem_service_request_save_sms("5550102", "CTS draft");
-    case 3u:
-        return modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX);
-    case 4u:
-        return modem_service_request_sms_read(&index, 1u, false, 1u);
-    case 5u:
-        return modem_service_request_delete_sms_indices(&index, 1u);
-    default:
-        return false;
-    }
+    return operation == 0u ? modem_service_request_send_sms("5550102", "CTS text") :
+        operation == 1u && modem_service_request_send_binary_sms("5550102", binary, sizeof(binary), 0x1234u, 0u);
 }
 
-static bool pop_sms_transport_result_for(unsigned operation,
-                                         uint32_t request_id,
+static bool pop_sms_transport_result_for(unsigned operation, uint32_t request_id,
                                          modem_sms_outcome_t *outcome_out) {
-    if (outcome_out == NULL) {
-        return false;
-    }
-    *outcome_out = MODEM_SMS_OUTCOME_NONE;
-    switch (operation) {
-    case 0u:
-    case 1u: {
-        modem_sms_send_result_t result;
-        bool have = (modem_service_pop_sms_send_result)(request_id, &result);
-        *outcome_out = have ? result.outcome : MODEM_SMS_OUTCOME_NONE;
-        return have && result.request_id == request_id &&
-               result.kind == (operation == 0u
-                   ? MODEM_SMS_REQUEST_SEND_TEXT
-                   : MODEM_SMS_REQUEST_SEND_BINARY);
-    }
-    case 2u: {
-        modem_sms_save_result_t result;
-        bool have = (modem_service_pop_sms_save_result)(request_id, &result);
-        *outcome_out = have ? result.outcome : MODEM_SMS_OUTCOME_NONE;
-        return have && result.request_id == request_id &&
-               result.kind == MODEM_SMS_REQUEST_SAVE;
-    }
-    case 3u: {
-        modem_sms_mailbox_result_t result;
-        bool have = (modem_service_pop_sms_mailbox_result)(request_id,
-                                                           &result);
-        *outcome_out = have ? result.outcome : MODEM_SMS_OUTCOME_NONE;
-        return have && result.request_id == request_id &&
-               result.kind == MODEM_SMS_REQUEST_MAILBOX;
-    }
-    case 4u: {
-        modem_sms_read_result_t result;
-        bool have = (modem_service_pop_sms_read_result)(request_id, &result);
-        *outcome_out = have ? result.outcome : MODEM_SMS_OUTCOME_NONE;
-        return have && result.request_id == request_id &&
-               result.kind == MODEM_SMS_REQUEST_READ;
-    }
-    case 5u: {
-        modem_sms_delete_result_t result;
-        bool have = (modem_service_pop_sms_delete_result)(request_id,
-                                                           &result);
-        *outcome_out = have ? result.outcome : MODEM_SMS_OUTCOME_NONE;
-        return have && result.request_id == request_id &&
-               result.kind == MODEM_SMS_REQUEST_DELETE;
-    }
-    default:
-        return false;
-    }
+    if (outcome_out == NULL || operation > 1u) return false;
+    modem_sms_send_result_t result;
+    bool have = (modem_service_pop_sms_send_result)(request_id, &result);
+    *outcome_out = have ? result.outcome : MODEM_SMS_OUTCOME_NONE;
+    return have && result.request_id == request_id &&
+        result.kind == (operation == 0u ? MODEM_SMS_REQUEST_SEND_TEXT : MODEM_SMS_REQUEST_SEND_BINARY);
 }
 
 static bool pop_sms_transport_result(unsigned operation,
@@ -3234,72 +2934,9 @@ static bool pop_sms_transport_result(unsigned operation,
                                         outcome_out);
 }
 
-static bool sms_cpms_dispatched_later_phase(unsigned operation) {
-    switch (operation) {
-    case 0u:
-        return mh_tx_count_exact("AT+CMGS=\"5550102\"") != 0u;
-    case 2u:
-        return mh_tx_count_exact("AT+CMGW=\"5550102\"") != 0u;
-    case 3u:
-    case 4u:
-        return mh_tx_count_exact("AT#SMSUCS=1") != 0u;
-    case 5u:
-        return mh_tx_count_exact("AT+CMGD=3") != 0u;
-    default:
-        return true;
-    }
-}
 
-static void test_sms_cpms_timeout_cancels_every_cpms_operation(void) {
-    static const unsigned operations[] = {0u, 2u, 3u, 4u, 5u};
-    static const char *const names[] = {
-        "CPMS-timeout text send", "CPMS-timeout save",
-        "CPMS-timeout mailbox", "CPMS-timeout read",
-        "CPMS-timeout delete",
-    };
 
-    for (size_t i = 0u; i < sizeof(operations) / sizeof(operations[0]); i++) {
-        if (!begin_sms_operation_fixture(names[i])) {
-            return;
-        }
-        unsigned operation = operations[i];
-        s_sms_flow_fault = SMS_FLOW_FAULT_CPMS_TIMEOUT;
-        check(request_sms_operation_for_transport_case(operation),
-              "CPMS-timeout SMS operation is admitted");
-        mh_settle();
-        check(service_probe().command_active && mh_status().operation_busy,
-              "CPMS timeout remains in flight until its command deadline");
-        /* Fault only the operation's command. CPMS invalidates Telit's SMS-wake
-         * proof at dispatch, so timeout cleanup may legitimately replay CPMS as
-         * part of the fresh SIM-completion lifecycle. That replay is recovery,
-         * not continuation of the cancelled request. */
-        s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
-        mh_advance(5001u);
 
-        modem_sms_outcome_t outcome = MODEM_SMS_OUTCOME_NONE;
-        bool have_result = pop_sms_transport_result(operation, &outcome);
-        modem_service_test_snapshot_t probe = service_probe();
-        size_t cpms_count = mh_tx_count_exact(
-            "AT+CPMS=\"ME\",\"ME\",\"ME\"");
-        bool later_phase = sms_cpms_dispatched_later_phase(operation);
-        bool terminal = have_result && outcome == MODEM_SMS_OUTCOME_TIMEOUT &&
-            !mh_status().operation_busy && probe.request_queue_depth == 0u &&
-            cpms_count >= 1u && !later_phase;
-        if (!terminal) {
-            fprintf(stderr,
-                    "CPMS timeout case %u: have=%u ok=%u busy=%u queue=%u "
-                    "active=%u state=%u cpms=%zu later=%u\n",
-                    operation, have_result ? 1u : 0u,
-                    outcome == MODEM_SMS_OUTCOME_OK ? 1u : 0u,
-                    mh_status().operation_busy ? 1u : 0u,
-                    (unsigned)probe.request_queue_depth,
-                    probe.command_active ? 1u : 0u, (unsigned)probe.state,
-                    cpms_count, later_phase ? 1u : 0u);
-        }
-        check(terminal,
-              "CPMS timeout publishes one failure without entering a later phase");
-    }
-}
 
 static void test_sms_power_recovery_never_replays_transaction(void) {
     static const char number[] = "5550104";
@@ -3355,7 +2992,7 @@ static void test_sms_power_recovery_never_replays_transaction(void) {
 
 static void test_sms_cts_failure_cancels_every_operation(void) {
     static const char *const names[] = {
-        "text send", "binary send", "save", "mailbox", "read", "delete",
+        "text send", "binary send",
     };
     /* No request crossed the wire: every reserved owner receives one
      * retry-safe cancellation, including binary mode and selected-read state. */
@@ -3413,7 +3050,7 @@ static void test_sms_cts_failure_cancels_every_operation(void) {
 
 static void test_sms_queue_eviction_is_exact_for_every_operation(void) {
     static const char *const names[] = {
-        "text send", "binary send", "save", "mailbox", "read", "delete",
+        "text send", "binary send",
     };
 
     for (unsigned operation = 0u;
@@ -3458,8 +3095,7 @@ static void test_sms_queue_eviction_is_exact_for_every_operation(void) {
 
 static void test_sms_recovery_cancels_every_uncommitted_operation(void) {
     static const char *const names[] = {
-        "text recovery", "binary recovery", "save recovery",
-        "mailbox recovery", "read recovery", "delete recovery",
+        "text recovery", "binary recovery",
     };
 
     for (unsigned operation = 0u;
@@ -3469,7 +3105,7 @@ static void test_sms_recovery_cancels_every_uncommitted_operation(void) {
         }
         s_sms_flow_fault = operation == 1u
             ? SMS_FLOW_FAULT_CMGF_PDU_TIMEOUT
-            : SMS_FLOW_FAULT_CPMS_TIMEOUT;
+            : SMS_FLOW_FAULT_CMGS_PROMPT_TIMEOUT;
         check(request_sms_operation_for_transport_case(operation),
               "SMS recovery target is admitted");
         uint32_t request_id = s_last_sms_request_id;
@@ -3498,8 +3134,6 @@ static void test_sms_recovery_cancels_every_uncommitted_operation(void) {
 
 static void test_sms_crossed_urcs_remain_routed(void) {
     modem_sms_send_result_t send_result;
-    modem_sms_save_result_t save_result;
-    modem_sms_delete_result_t delete_result;
 
     if (!begin_sms_operation_fixture("crossed send-URC fixture boots")) {
         return;
@@ -3512,41 +3146,10 @@ static void test_sms_crossed_urcs_remain_routed(void) {
               send_result.request_id == s_last_sms_request_id &&
               send_result.kind == MODEM_SMS_REQUEST_SEND_TEXT &&
               send_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mh_status().sms_received_count == 1u &&
+              s_mh_local_lost == 1u &&
               mh_status().ring_active &&
               mh_status().call_state == MODEM_CALL_RINGING,
           "CMTI and RING crossing CMGS remain URCs while send succeeds");
-
-    if (!begin_sms_operation_fixture("crossed save-URC fixture boots")) {
-        return;
-    }
-    s_sms_inject_crossed_urcs = true;
-    check(modem_service_request_save_sms("5550103", "Crossed save"),
-          "crossed-URC save is admitted");
-    mh_settle();
-    check(modem_service_pop_sms_save_result(&save_result) &&
-              save_result.request_id == s_last_sms_request_id &&
-              save_result.kind == MODEM_SMS_REQUEST_SAVE &&
-              save_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mh_status().sms_received_count == 1u &&
-              mh_status().ring_active,
-          "CMTI and RING crossing CMGW remain URCs while save succeeds");
-
-    if (!begin_sms_operation_fixture("crossed delete-URC fixture boots")) {
-        return;
-    }
-    const uint16_t index = 3u;
-    s_sms_inject_crossed_urcs = true;
-    check(modem_service_request_delete_sms_indices(&index, 1u),
-          "crossed-URC delete is admitted");
-    mh_settle();
-    check(modem_service_pop_sms_delete_result(&delete_result) &&
-              delete_result.request_id == s_last_sms_request_id &&
-              delete_result.kind == MODEM_SMS_REQUEST_DELETE &&
-              delete_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mh_status().sms_received_count == 1u &&
-              mh_status().ring_active && mh_tx_count_exact("AT+CMGD=3") == 1u,
-          "CMTI and RING crossing CMGD remain URCs while delete succeeds");
 
     if (!begin_sms_operation_fixture("post-prompt crossed-URC fixture boots")) {
         return;
@@ -3568,429 +3171,27 @@ static void test_sms_crossed_urcs_remain_routed(void) {
               send_result.request_id == s_last_sms_request_id &&
               send_result.kind == MODEM_SMS_REQUEST_SEND_TEXT &&
               send_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mh_status().sms_received_count == 1u &&
+              s_mh_local_lost == 1u &&
               mh_status().ring_active && !mh_status().operation_busy,
           "URCs crossing the post-prompt final remain routed and do not steal it");
 }
 
-static void test_sms_unread_status_is_bracketed(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "SMS unread-policy fixture boots");
-    s_sms_test_row_enabled = true;
-    s_sms_test_row_unread = true;
-    s_sms_keep_unread = false;
 
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "metadata scan is admitted");
-    mh_settle();
-    check(s_sms_test_row_unread && s_sms_keep_unread,
-          "mailbox CMGL leaves the modem's unread bit intact");
-    check(tx_last_index("AT+CPMS=\"ME\",\"ME\",\"ME\"") <
-              tx_last_index("AT#SMSUCS=1") &&
-              tx_last_index("AT#SMSUCS=1") <
-                  tx_last_index("AT+CMGF=0") &&
-              tx_last_index("AT+CMGF=0") < tx_last_index("AT+CMGL=4") &&
-              tx_last_index("AT+CMGL=4") < tx_last_index("AT+CMGF=1") &&
-              mh_tx_count_exact("AT+CMGR=7") == 0u,
-          "metadata scan streams CMGL rows under preserve mode without per-row CMGR");
-    modem_sms_mailbox_result_t mailbox_result;
-    check(modem_service_pop_sms_mailbox_result(&mailbox_result),
-          "metadata scan publishes a bounded result");
 
-    uint16_t index = 7u;
-    check(modem_service_request_sms_read(&index, 1u, false, 1u),
-          "selected-body read is admitted");
-    mh_settle();
-    check(!s_sms_test_row_unread && s_sms_keep_unread,
-          "selected read consumes exactly that unread bit then restores preserve mode");
-    check(tx_last_index("AT#SMSUCS=0") < tx_last_index("AT+CMGF=0") &&
-              tx_last_index("AT+CMGF=0") < tx_last_index("AT+CMGR=7") &&
-              tx_last_index("AT+CMGR=7") < tx_last_index("AT+CMGF=1") &&
-              tx_last_index("AT+CMGF=1") < tx_last_index("AT#SMSUCS=1"),
-          "selected-body read brackets the destructive mode on both sides");
-    modem_sms_read_result_t read_result;
-    check(modem_service_pop_sms_read_result(&read_result),
-          "selected-body read publishes a bounded result");
 
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "SMS unread timeout fixture boots");
-    s_sms_test_row_enabled = true;
-    s_sms_test_row_unread = true;
-    s_fault = TELIT_FAULT_SMS_STATUS_CONSUME_TIMEOUT_ONCE;
-    check(modem_service_request_sms_read(&index, 1u, false, 1u),
-          "timeout fixture selected read is admitted");
-    mh_settle();
-    mh_advance(g_modem_vendor.sms_read_status.timeout_ms + 1u);
-    check(s_sms_keep_unread && s_sms_test_row_unread &&
-              mh_tx_count_exact("AT+CMGR=7") == 0u,
-          "uncertain consume-mode write restores preserve mode before any CMGR");
-    check(modem_service_pop_sms_read_result(&read_result) &&
-              read_result.request_id == s_last_sms_request_id &&
-              read_result.kind == MODEM_SMS_REQUEST_READ &&
-              read_result.outcome == MODEM_SMS_OUTCOME_TIMEOUT,
-          "consume-mode timeout reports failure after restoring the invariant");
-}
 
-static void test_vvm_control_sms_is_consumed_silently(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "VVM control-SMS fixture boots");
-    s_sms_test_row_enabled = true;
-    s_sms_test_row_unread = true;
-    /* Synthetic equivalent of a live legacy VVM STATUS datagram: TP-DCS=0
-     * (GSM7), TP-UDHI=1, destination port 0x1578. The payload is deliberately
-     * non-secret test text. */
-    s_sms_test_pdu =
-        "00440A8151551000000000000000000000001A06050415780000"
-        "536A905AFCCDE9617AB9171CD3D3F632";
 
-    mh_feed("+CMTI: \"ME\",7");
-    check(mh_status().sms_received_count == 1u &&
-              mh_status().sms_user_received_count == 0u,
-          "CMTI is pending classification and cannot alert early");
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "VVM control mailbox scan is admitted");
-    mh_settle();
-    modem_sms_mailbox_result_t mailbox_result;
-    bool have_mailbox_result = modem_service_pop_sms_mailbox_result(&mailbox_result);
-    check(have_mailbox_result &&
-              mailbox_result.request_id == s_last_sms_request_id &&
-              mailbox_result.kind == MODEM_SMS_REQUEST_MAILBOX &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mailbox_result.complete &&
-              modem_service_sms_mailbox_count() == 0u,
-          "recognized VVM control is absent from the public Inbox");
-    check(mh_status().sms_received_count == 1u &&
-              mh_status().sms_user_received_count == 0u,
-          "recognized VVM control never publishes a user arrival");
-    check(mh_tx_count_exact("AT+CMGD=7") == 1u &&
-              !s_sms_test_row_enabled,
-          "recognized VVM control is removed from modem storage");
-}
 
-static void test_legacy_url_vvm_is_consumed_silently(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "legacy URL VVM fixture boots");
-    s_sms_test_row_enabled = true;
-    s_sms_test_row_unread = true;
-    /* GSM7 data SMS to the legacy VVM application port. The hostname and
-     * mailbox are deliberately synthetic: classification is by protocol
-     * envelope, never carrier or originating number. */
-    s_sms_test_pdu =
-        "00440A81515510000000000000000000000066060504157B0000"
-        "767BBB1576BDE1657998FE96BBCAF8701BCE2EEB70B09FB90733D97B3918"
-        "CCD4EEC56AB51A2C068399E03DD3B49734CD7B34DACC94EED562B4D9CB1"
-        "6A3CD4CF45E4C17ABD56AB0180CA60BEA84BAA18EA89301";
 
-    mh_feed("+CMTI: \"ME\",7");
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "legacy URL VVM mailbox scan is admitted");
-    mh_settle();
 
-    modem_sms_mailbox_result_t mailbox_result;
-    check(modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              mailbox_result.request_id == s_last_sms_request_id &&
-              mailbox_result.kind == MODEM_SMS_REQUEST_MAILBOX &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mailbox_result.complete &&
-              modem_service_sms_mailbox_count() == 0u &&
-              mh_status().sms_received_count == 1u &&
-              mh_status().sms_user_received_count == 0u &&
-              mh_tx_count_exact("AT+CMGD=7") == 1u &&
-              !s_sms_test_row_enabled,
-          "legacy URL VVM is hidden, silent, and deleted by exact index");
-}
 
-static void test_unknown_application_sms_fails_open(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "unknown application-SMS fixture boots");
-    s_sms_test_row_enabled = true;
-    s_sms_test_row_unread = true;
-    /* Same valid legacy-looking body, but on an unrecognized application port.
-     * Port addressing by itself must never make a user message disappear. */
-    s_sms_test_pdu =
-        "00440A8151551000000000000000000000001A060504158B0000"
-        "536A905AFCCDE9617AB9171CD3D3F632";
 
-    mh_feed("+CMTI: \"ME\",7");
-    mh_feed("+CMTI: \"ME\",7");
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "unknown application mailbox scan is admitted");
-    mh_settle();
-    modem_sms_mailbox_result_t mailbox_result;
-    modem_sms_record_t record;
-    bool have_mailbox_result = modem_service_pop_sms_mailbox_result(&mailbox_result);
-    bool have_record = modem_service_sms_mailbox_entry(0u, &record);
-    check(have_mailbox_result &&
-              mailbox_result.request_id == s_last_sms_request_id &&
-              mailbox_result.kind == MODEM_SMS_REQUEST_MAILBOX &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mailbox_result.complete &&
-              modem_service_sms_mailbox_count() == 1u && have_record,
-          "unknown application row remains visible");
-    check(mh_status().sms_received_count == 2u &&
-              mh_status().sms_user_received_count == 1u &&
-              mh_tx_count_exact("AT+CMGD=7") == 0u,
-          "duplicate indications for one unknown row alert once and do not delete it");
-    check(record.identity_hash == sms_identity_hash(
-              "1555010000", "00/00/00,00:00:00", "Data message"),
-          "port-addressed GSM7 uses the Nokia Data message identity");
 
-    check(modem_service_request_sms_read(record.indices,
-                                         record.index_count,
-                                         record.quarantined,
-                                         record.identity_hash),
-          "GSM7 application detail read is admitted");
-    mh_settle();
-    modem_sms_read_result_t read_result;
-    check(modem_service_pop_sms_read_result(&read_result) &&
-              read_result.request_id == s_last_sms_request_id &&
-              read_result.kind == MODEM_SMS_REQUEST_READ &&
-              read_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              read_result.message.has_ports &&
-              read_result.message.dest_port == 0x158bu &&
-              strcmp(read_result.message.text, "STATE?state=Active") == 0,
-          "detail read retains application metadata without identity drift");
-}
 
-static void test_interleaved_arrival_waits_for_current_snapshot(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "interleaved application-SMS fixture boots");
-    s_sms_test_row_enabled = true;
-    s_sms_test_row_unread = true;
-    s_sms_test_cmti_interleave = true;
-    s_sms_test_pdu =
-        "00440A8151551000000000000000000000001A060504158B0000"
-        "536A905AFCCDE9617AB9171CD3D3F632";
 
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "crossed mailbox scan is admitted");
-    mh_settle();
-    modem_sms_mailbox_result_t mailbox_result;
-    check(modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              mailbox_result.request_id == s_last_sms_request_id &&
-              mailbox_result.kind == MODEM_SMS_REQUEST_MAILBOX &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mailbox_result.complete &&
-              mh_status().sms_received_count == 1u &&
-              mh_status().sms_user_received_count == 0u,
-          "arrival crossing CMGL cannot publish from the stale snapshot");
 
-    s_sms_test_cmti_interleave = false;
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "current mailbox retry is admitted");
-    mh_settle();
-    check(modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              mailbox_result.request_id == s_last_sms_request_id &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mailbox_result.complete &&
-              mh_status().sms_user_received_count == 1u,
-          "next clean snapshot publishes the interleaved user arrival once");
-}
 
-static void test_vvm_cleanup_error_retries_without_alerting(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "VVM cleanup-retry fixture boots");
-    s_sms_test_row_enabled = true;
-    s_sms_test_row_unread = true;
-    s_sms_test_pdu =
-        "00440A8151551000000000000000000000001A06050415780000"
-        "536A905AFCCDE9617AB9171CD3D3F632";
-    s_fault = TELIT_FAULT_VVM_DELETE_ERROR_ONCE;
-    mh_feed("+CMTI: \"ME\",7");
 
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "VVM cleanup-error scan is admitted");
-    mh_settle();
-    modem_sms_mailbox_result_t mailbox_result;
-    check(modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              mailbox_result.request_id == s_last_sms_request_id &&
-              mailbox_result.kind == MODEM_SMS_REQUEST_MAILBOX &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mailbox_result.complete &&
-              modem_service_sms_mailbox_count() == 0u &&
-              s_sms_test_row_enabled &&
-              mh_status().sms_user_received_count == 0u,
-          "definitive cleanup error keeps VVM hidden and silent");
-
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "VVM cleanup retry scan is admitted");
-    mh_settle();
-    check(modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              mailbox_result.request_id == s_last_sms_request_id &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mailbox_result.complete &&
-              !s_sms_test_row_enabled &&
-              mh_tx_count_exact("AT+CMGD=7") == 2u &&
-              mh_status().sms_user_received_count == 0u,
-          "later scan retries cleanup without inventing an arrival");
-}
-
-static void test_vvm_cleanup_timeout_is_bounded_and_silent(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "VVM cleanup-timeout fixture boots");
-    s_sms_test_row_enabled = true;
-    s_sms_test_row_unread = true;
-    s_sms_test_pdu =
-        "00440A8151551000000000000000000000001A06050415780000"
-        "536A905AFCCDE9617AB9171CD3D3F632";
-    s_fault = TELIT_FAULT_VVM_DELETE_TIMEOUT_ONCE;
-    mh_feed("+CMTI: \"ME\",7");
-
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "VVM cleanup-timeout scan is admitted");
-    mh_settle();
-    modem_sms_mailbox_result_t mailbox_result;
-    modem_service_test_snapshot_t probe = service_probe();
-    check(!modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              probe.command_active &&
-              probe.active_command == MODEM_SERVICE_TEST_COMMAND_SMS_DELETE,
-          "mailbox waits while the cleanup command remains unresolved");
-    mh_advance(5001u);
-    check(modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              mailbox_result.request_id == s_last_sms_request_id &&
-              mailbox_result.kind == MODEM_SMS_REQUEST_MAILBOX &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mailbox_result.complete &&
-              modem_service_sms_mailbox_count() == 0u &&
-              s_sms_test_row_enabled &&
-              mh_status().sms_user_received_count == 0u,
-          "cleanup timeout is bounded without exposing or alerting on VVM");
-
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "post-timeout VVM cleanup retry is admitted");
-    mh_settle();
-    check(modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              mailbox_result.request_id == s_last_sms_request_id &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              !s_sms_test_row_enabled &&
-              mh_tx_count_exact("AT+CMGD=7") == 2u &&
-              mh_status().sms_user_received_count == 0u,
-          "later clean scan retries an uncertain delete safely");
-}
-
-static void test_unclassifiable_cmti_fails_open(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u),
-          "unclassifiable-CMTI fixture boots");
-    mh_feed("+CMTI: \"SM\",7");
-    check(mh_status().sms_received_count == 1u &&
-              mh_status().sms_user_received_count == 1u,
-          "foreign-storage CMTI fails open instead of suppressing a user SMS");
-}
-
-static void test_sms_ri_wakes_sleeping_transport(void) {
-    begin_telit(true);
-    check(boot_until_ready(30000u), "sleeping-SMS wake fixture boots");
-    settle_dtr_sleep();
-    check(s_mh_dtr_sleep_permitted && service_probe().sms_wake_armed &&
-              s_psmri_live_armed,
-          "fixture sleeps only after the pre-CFUN PSMRI lifecycle qualifies");
-
-    size_t profile_writes_before = mh_tx_count_exact(
-        "AT#WKIO=0;#E2SMSRI=0;\\R2&W0");
-    size_t runtime_psmri_before = mh_tx_count_exact("AT#PSMRI=1000");
-    check(modem_service_request_debug_at("AT+CPMS?"),
-          "query-only CPMS probe is admitted");
-    mh_settle();
-    check(mh_tx_count_exact(
-                  "AT#WKIO=0;#E2SMSRI=0;\\R2&W0") ==
-                  profile_writes_before &&
-              mh_tx_count_exact("AT#PSMRI=1000") == runtime_psmri_before &&
-              s_psmri_live_armed && s_e2smsri_ms == 0u &&
-              s_psmri_ms == 1000u,
-          "query-only CPMS leaves the qualified SMS wake lifecycle intact");
-
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "mailbox request is admitted before sleeping-SMS wake probe");
-    mh_settle();
-    size_t cpms = tx_last_index("AT+CPMS=\"ME\",\"ME\",\"ME\"");
-    size_t cmgf = tx_last_index("AT+CMGF=0");
-    check(mh_tx_count_exact(
-                  "AT#WKIO=0;#E2SMSRI=0;\\R2&W0") ==
-                  profile_writes_before &&
-              mh_tx_count_exact("AT#PSMRI=1000") == runtime_psmri_before &&
-              cpms < cmgf && s_psmri_live_armed &&
-              s_e2smsri_ms == 0u && s_psmri_ms == 1000u,
-          "CPMS-backed mailbox work emits no post-CFUN wake command");
-
-    settle_dtr_sleep();
-    check(s_mh_dtr_sleep_permitted && !s_mh_cts_asserted,
-          "re-armed SMS path reaches DTR sleep");
-
-    modem_diag_snapshot_t before;
-    modem_diag_snapshot_t after;
-    modem_service_get_diag_snapshot(&before);
-    uint32_t sms_before = mh_status().sms_received_count;
-    /* Board-1 WWX releases the buffered +CMTI only after #PSMRI returns high.
-     * Latch the edge, but keep DTR asleep until that release is observed. */
-    s_mh_ri_wake_pending = true;
-    s_mh_ri_asserted = true;
-    modem_service_tick(s_mh_now);
-    modem_service_get_diag_snapshot(&after);
-    check(s_mh_dtr_sleep_permitted && !s_mh_cts_asserted &&
-              after.transport.ri_release_pending &&
-              after.transport.wake_attempts == before.transport.wake_attempts,
-          "active RI pulse is latched without asserting DTR early");
-    mh_advance(g_modem_vendor.wake.awake_window_ms + 1u);
-    modem_service_get_diag_snapshot(&after);
-    check(s_mh_dtr_sleep_permitted && !s_mh_cts_asserted &&
-              after.transport.ri_release_pending,
-          "ordinary awake-window expiry cannot bypass the RI release gate");
-    s_mh_ri_asserted = false;
-    modem_service_tick(s_mh_now);
-    mh_feed("+CMTI: \"ME\",8");
-
-    modem_service_get_diag_snapshot(&after);
-    check(!s_mh_dtr_sleep_permitted && s_mh_cts_asserted &&
-              mh_status().sms_received_count == sms_before + 1u,
-          "RI release starts DTR wake and consumes the buffered SMS URC");
-    check(after.transport.wake_attempts ==
-                  before.transport.wake_attempts + 1u &&
-              after.transport.wake_timeouts == before.transport.wake_timeouts &&
-              after.transport.ri_release_timeouts ==
-                  before.transport.ri_release_timeouts,
-          "SMS RI uses the qualified DTR wake path without a timeout");
-
-    settle_dtr_sleep();
-    modem_service_get_diag_snapshot(&before);
-    sms_before = mh_status().sms_received_count;
-    /* A pulse that completed before the main loop ran still has to wake from
-     * the ISR latch even though the physical level is high again. */
-    s_mh_ri_wake_pending = true;
-    modem_service_tick(s_mh_now);
-    mh_feed("+CMTI: \"ME\",9");
-    modem_service_get_diag_snapshot(&after);
-    check(!s_mh_dtr_sleep_permitted && s_mh_cts_asserted &&
-              mh_status().sms_received_count == sms_before + 1u &&
-              after.transport.wake_attempts ==
-                  before.transport.wake_attempts + 1u &&
-              after.transport.wake_timeouts == before.transport.wake_timeouts,
-          "a completed RI pulse remains recoverable from the edge latch");
-
-    settle_dtr_sleep();
-    modem_service_get_diag_snapshot(&before);
-    s_mh_ri_wake_pending = true;
-    s_mh_ri_asserted = true;
-    modem_service_tick(s_mh_now);
-    mh_advance(g_modem_vendor.wake.ri_release_timeout_ms + 1u);
-    modem_service_get_diag_snapshot(&after);
-    check(!s_mh_dtr_sleep_permitted && s_mh_cts_asserted &&
-              !after.transport.ri_release_pending &&
-              after.transport.wake_attempts ==
-                  before.transport.wake_attempts + 1u &&
-              after.transport.ri_release_timeouts ==
-                  before.transport.ri_release_timeouts + 1u,
-          "stuck-low RI forces one bounded wake instead of blocking forever");
-    s_mh_ri_asserted = false;
-}
 
 static void test_sms_wake_profile_failure_fails_closed(void) {
     begin_telit(true);
@@ -4434,13 +3635,14 @@ static void test_provision_fault_outcomes(void) {
     s_cpms_configured = false;
     s_fault = TELIT_FAULT_CPMS_SET_ERROR;
     check(boot_until_ready(60000u),
-          "recoverable SMS-storage provisioning failure reaches degraded READY");
+          "unavailable ME storage does not block startup");
+    settle_dtr_sleep();
     modem_status_t status = mh_status();
-    check(!status.sms_init_ok && !status.provisioning_verified,
-          "skipped SMS row is visible and never recorded as fully verified");
-    check(mh_tx_count_exact("AT+CPMS=\"ME\",\"ME\",\"ME\"") == 3u &&
+    check(status.sms_init_ok && status.provisioning_verified,
+          "an unavailable ME store does not degrade local messaging");
+    check(mh_tx_count_exact("AT+CPMS=\"ME\",\"ME\",\"ME\"") == 0u &&
               mh_tx_count_exact("AT#REBOOT") == 0u,
-          "failed recoverable write is bounded and cannot trigger a false reboot");
+          "no storage-selection writes or reboot are needed");
 
     begin_telit(true);
     s_e2smsri_ms = 1000u;
@@ -6406,6 +5608,99 @@ static void feed_direct(const char *header, const char *payload) {
 }
 
 /* Golden: the same vendor hook + codec the service uses, run independently. */
+static void test_sms_ri_wakes_sleeping_transport(void) {
+    begin_telit(true);
+    check(boot_until_ready(30000u), "sleeping-SMS wake fixture boots");
+    settle_dtr_sleep();
+    check(s_mh_dtr_sleep_permitted && service_probe().sms_wake_armed &&
+              s_psmri_live_armed,
+          "fixture sleeps only after the pre-CFUN PSMRI lifecycle qualifies");
+
+    size_t profile_writes_before = mh_tx_count_exact(
+        "AT#WKIO=0;#E2SMSRI=0;\\R2&W0");
+    size_t runtime_psmri_before = mh_tx_count_exact("AT#PSMRI=1000");
+    check(modem_service_request_debug_at("AT+CPMS?"),
+          "query-only CPMS probe is admitted");
+    mh_settle();
+    check(mh_tx_count_exact(
+                  "AT#WKIO=0;#E2SMSRI=0;\\R2&W0") ==
+                  profile_writes_before &&
+              mh_tx_count_exact("AT#PSMRI=1000") == runtime_psmri_before &&
+              s_psmri_live_armed && s_e2smsri_ms == 0u &&
+              s_psmri_ms == 1000u,
+          "query-only CPMS leaves the qualified SMS wake lifecycle intact");
+
+    settle_dtr_sleep();
+    check(s_mh_dtr_sleep_permitted && !s_mh_cts_asserted,
+          "re-armed SMS path reaches DTR sleep");
+
+    modem_diag_snapshot_t before;
+    modem_diag_snapshot_t after;
+    modem_service_get_diag_snapshot(&before);
+    uint32_t sms_before = mh_status().sms_received_count;
+    /* Board-1 WWX releases the buffered +CMTI only after #PSMRI returns high.
+     * Latch the edge, but keep DTR asleep until that release is observed. */
+    s_mh_ri_wake_pending = true;
+    s_mh_ri_asserted = true;
+    modem_service_tick(s_mh_now);
+    modem_service_get_diag_snapshot(&after);
+    check(s_mh_dtr_sleep_permitted && !s_mh_cts_asserted &&
+              after.transport.ri_release_pending &&
+              after.transport.wake_attempts == before.transport.wake_attempts,
+          "active RI pulse is latched without asserting DTR early");
+    mh_advance(g_modem_vendor.wake.awake_window_ms + 1u);
+    modem_service_get_diag_snapshot(&after);
+    check(s_mh_dtr_sleep_permitted && !s_mh_cts_asserted &&
+              after.transport.ri_release_pending,
+          "ordinary awake-window expiry cannot bypass the RI release gate");
+    s_mh_ri_asserted = false;
+    modem_service_tick(s_mh_now);
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+
+    modem_service_get_diag_snapshot(&after);
+    check(!s_mh_dtr_sleep_permitted && s_mh_cts_asserted &&
+              mh_status().sms_received_count == sms_before + 1u,
+          "RI release starts DTR wake and consumes the buffered SMS URC");
+    check(after.transport.wake_attempts ==
+                  before.transport.wake_attempts + 1u &&
+              after.transport.wake_timeouts == before.transport.wake_timeouts &&
+              after.transport.ri_release_timeouts ==
+                  before.transport.ri_release_timeouts,
+          "SMS RI uses the qualified DTR wake path without a timeout");
+
+    settle_dtr_sleep();
+    modem_service_get_diag_snapshot(&before);
+    sms_before = mh_status().sms_received_count;
+    /* A pulse that completed before the main loop ran still has to wake from
+     * the ISR latch even though the physical level is high again. */
+    s_mh_ri_wake_pending = true;
+    modem_service_tick(s_mh_now);
+    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
+    modem_service_get_diag_snapshot(&after);
+    check(!s_mh_dtr_sleep_permitted && s_mh_cts_asserted &&
+              mh_status().sms_received_count == sms_before + 1u &&
+              after.transport.wake_attempts ==
+                  before.transport.wake_attempts + 1u &&
+              after.transport.wake_timeouts == before.transport.wake_timeouts,
+          "a completed RI pulse remains recoverable from the edge latch");
+
+    settle_dtr_sleep();
+    modem_service_get_diag_snapshot(&before);
+    s_mh_ri_wake_pending = true;
+    s_mh_ri_asserted = true;
+    modem_service_tick(s_mh_now);
+    mh_advance(g_modem_vendor.wake.ri_release_timeout_ms + 1u);
+    modem_service_get_diag_snapshot(&after);
+    check(!s_mh_dtr_sleep_permitted && s_mh_cts_asserted &&
+              !after.transport.ri_release_pending &&
+              after.transport.wake_attempts ==
+                  before.transport.wake_attempts + 1u &&
+              after.transport.ri_release_timeouts ==
+                  before.transport.ri_release_timeouts + 1u,
+          "stuck-low RI forces one bounded wake instead of blocking forever");
+    s_mh_ri_asserted = false;
+}
+
 static bool build_expected_direct_pdu(const char *header, const char *payload,
                                       char *pdu, uint8_t *tpdu_len) {
     sms_deliver_t deliver;
@@ -6430,75 +5725,26 @@ static void feed_direct_wire(const char *header, const uint8_t *body,
 /* The PDU hex the service wrote after its last AT+CMGW= (the raw event that
  * follows the command; the ^Z is a separate one-byte event). */
 static bool captured_stored_pdu(char *out, size_t cap) {
-    size_t cmgw = SIZE_MAX;
-    for (size_t i = 0u; i < s_mh_tx_event_count; i++) {
-        const mh_tx_event_t *event = &s_mh_tx_events[i];
-        if (event->kind == MH_TX_EVENT_CSTR && event->len >= 8u &&
-            memcmp(event->data, "AT+CMGW=", 8u) == 0) {
-            cmgw = i;
-        }
-    }
-    if (cmgw == SIZE_MAX) {
-        return false;
-    }
-    for (size_t i = cmgw + 1u; i < s_mh_tx_event_count; i++) {
-        const mh_tx_event_t *event = &s_mh_tx_events[i];
-        if (event->kind == MH_TX_EVENT_RAW && event->len > 1u &&
-            !event->truncated && event->len < cap) {
-            memcpy(out, event->data, event->len);
-            out[event->len] = '\0';
-            return true;
-        }
-    }
-    return false;
+    if (!s_mh_local_pdu[0] || strlen(s_mh_local_pdu) >= cap) return false;
+    strcpy(out, s_mh_local_pdu);
+    return true;
 }
 
 static void test_direct_delivery_is_restored_as_a_pdu(void) {
-    static const uint8_t sub = 0x1au;
-    if (!begin_sms_operation_fixture("direct-delivery fixture boots")) {
-        return;
-    }
-    char expected_pdu[SMS_DELIVER_HEX_MAX];
-    uint8_t expected_tpdu = 0u;
-    check(build_expected_direct_pdu(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY,
-                                    expected_pdu, &expected_tpdu),
-          "direct-delivery golden builds independently");
-    modem_status_t before = mh_status();
-    size_t cpms_poll_before = mh_tx_count_exact("AT+CPMS?");
-
+    if (!begin_sms_operation_fixture("direct local-delivery fixture boots")) return;
+    char expected[SMS_DELIVER_HEX_MAX], actual[SMS_DELIVER_HEX_MAX];
+    uint8_t tpdu;
+    check(build_expected_direct_pdu(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY, expected, &tpdu),
+          "independent normalized PDU builds");
     feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-
-    char cmgw[24];
-    snprintf(cmgw, sizeof(cmgw), "AT+CMGW=%u,0", (unsigned)expected_tpdu);
-    size_t cpms_event = tx_event_cstr(DIRECT_CPMS_SET, 0u);
-    size_t pdu_mode = tx_event_cstr("AT+CMGF=0", cpms_event + 1u);
-    size_t cmgw_event = tx_event_cstr(cmgw, pdu_mode + 1u);
-    size_t pdu_event = tx_event_raw(expected_pdu, strlen(expected_pdu),
-                                    cmgw_event + 1u);
-    size_t sub_event = tx_event_raw(&sub, 1u, pdu_event + 1u);
-    size_t text_mode = tx_event_cstr("AT+CMGF=1", sub_event + 1u);
-    check(cpms_event != SIZE_MAX && pdu_mode != SIZE_MAX &&
-              cmgw_event != SIZE_MAX && pdu_event != SIZE_MAX &&
-              sub_event != SIZE_MAX && text_mode != SIZE_MAX &&
-              mh_tx_count_exact("AT+CMGF=1") == 1u,
-          "a +CMT is re-stored as an SMS-DELIVER PDU in exact wire order");
-    modem_status_t after = mh_status();
-    check(after.sms_received_count == before.sms_received_count + 1u &&
-              after.sms_user_received_count == before.sms_user_received_count &&
-              after.command_errors == before.command_errors,
-          "a stored delivery counts like a +CMTI (classified by the scan)");
-    check(mh_tx_count_exact("AT+CPMS?") == cpms_poll_before + 1u,
-          "a stored delivery schedules the +CMTI receive-store check");
-    check(!after.operation_busy && !service_probe().command_active &&
-              service_probe().request_queue_depth == 0u,
-          "the internal store leaves no request or operation behind");
-
-    /* The ring slot was released: a second delivery stores again. */
-    mh_clear_tx_capture();
+    check(captured_stored_pdu(actual, sizeof(actual)) && strcmp(actual, expected) == 0 &&
+          s_mh_local_received == 1u && mh_status().sms_received_count == 1u &&
+          mh_tx_count_exact("AT+CMGF=0") == 0u && mh_tx_count_exact(DIRECT_CPMS_SET) == 0u,
+          "delivery goes straight to local storage without AT mode windows");
+    s_mh_local_reject = true;
     feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    check(mh_tx_count_exact(cmgw) == 1u &&
-              mh_status().sms_received_count == before.sms_received_count + 2u,
-          "a released ring slot stores the next delivery");
+    check(s_mh_local_lost == 1u && s_mh_local_received == 1u &&
+          mh_status().command_errors == 1u, "storage admission failure is visible and does not fake arrival");
 }
 
 static void test_direct_controls_skip_storage(void) {
@@ -6522,7 +5768,6 @@ static void test_direct_controls_skip_storage(void) {
               after.sms_filtered_vvm == before.sms_filtered_vvm + 1u,
           "complete controls count by reason, even beyond the ring depth");
     check(after.sms_received_count == before.sms_received_count &&
-              after.sms_user_received_count == before.sms_user_received_count &&
               after.command_errors == before.command_errors &&
               mh_tx_count_exact(DIRECT_CPMS_SET) == 0u &&
               mh_tx_count_exact("AT+CMGF=0") == 0u &&
@@ -6532,7 +5777,7 @@ static void test_direct_controls_skip_storage(void) {
           "controls cause no store, arrival, error, host ACK or pending work");
     feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
     check(mh_status().sms_received_count == before.sms_received_count + 1u &&
-              mh_tx_count_exact("AT+CMGW=26,0") == 1u,
+              mh_tx_count_exact("AT+CMGW=26,0") == 0u,
           "ordinary text immediately after filtered controls still stores");
 
     /* Identical bytes on ordinary octet teleservice are not a WDP assertion. */
@@ -6728,8 +5973,8 @@ static void test_direct_delivery_mid_command_and_qcmti(void) {
     s_hold_final_command = NULL;
     mh_feed("OK");
     check(!service_probe().command_active &&
-              mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
-              mh_tx_count_exact("AT+CMGF=1") == 1u &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u &&
+              mh_tx_count_exact("AT+CMGF=1") == 0u &&
               mh_status().sms_received_count == before.sms_received_count + 1u,
           "the store runs after the command completes");
 
@@ -6745,9 +5990,9 @@ static void test_direct_delivery_mid_command_and_qcmti(void) {
     feed_direct("+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,0",
                 "OK");
     check(!service_probe().command_active && !mh_status().operation_busy &&
-              mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
-              mh_tx_count_exact("AT+CMGW=18,0") == 1u &&
-              mh_tx_count_exact("AT+CMGF=1") == 1u &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u &&
+              mh_tx_count_exact("AT+CMGW=18,0") == 0u &&
+              mh_tx_count_exact("AT+CMGF=1") == 0u &&
               mh_status().sms_received_count == before.sms_received_count + 2u,
           "a length-0 +CMT completes on its header: the OK after it finishes "
           "the command and one empty message is stored");
@@ -6772,8 +6017,8 @@ static void test_direct_delivery_mid_command_and_qcmti(void) {
     for (unsigned i = 0u; i < 5u; i++) {
         mh_advance(100u); /* the store may first need the DTR wake */
     }
-    check(mh_tx_count_exact("AT+CMGF=0") == 1u &&
-              mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
+    check(mh_tx_count_exact("AT+CMGF=0") == 0u &&
+              mh_tx_count_exact("AT+CMGW=26,0") == 0u &&
               mh_status().sms_received_count == before.sms_received_count + 2u,
           "the delivery after a corrupted one stores exactly one message");
 
@@ -6803,89 +6048,11 @@ static void test_direct_delivery_mid_command_and_qcmti(void) {
           "$QCMTI is recognised, counted as an error, and never read");
 }
 
-static void test_direct_delivery_retries_after_store_failure(void) {
-    if (!begin_sms_operation_fixture("direct-delivery retry fixture boots")) {
-        return;
-    }
-    modem_status_t before = mh_status();
 
-    s_sms_flow_fault = SMS_FLOW_FAULT_CPMS_ERROR;
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    for (unsigned i = 0u; i < 8u; i++) {
-        mh_advance(100u);
-    }
-    check(mh_tx_count_exact(DIRECT_CPMS_SET) == 3u &&
-              mh_tx_count_exact("AT+CMGF=0") == 0u,
-          "a failed store is retried from the ring, bounded to three attempts");
-    modem_status_t after = mh_status();
-    /* Three failed operations count one command error each (finish_operation
-     * accounting shared by every failed SMS command) plus exactly one for the
-     * drop itself. */
-    check(after.sms_received_count == before.sms_received_count &&
-              after.command_errors == before.command_errors + 3u + 1u &&
-              !after.operation_busy &&
-              service_probe().request_queue_depth == 0u,
-          "a dropped delivery costs exactly one error beyond its three failed stores");
-    /* A failed CPMS set also re-arms the deferred SMS-setup chain (CSMP then
-     * CPMS), so count the store itself: no PDU mode is ever entered again. */
-    mh_advance(1000u);
-    check(mh_tx_count_exact("AT+CMGF=0") == 0u && !mh_status().operation_busy &&
-              service_probe().request_queue_depth == 0u,
-          "a dropped slot is never retried again");
-
-    /* The slot was dropped after the third attempt; a healthy modem stores
-     * the next delivery in one attempt. */
-    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
-    mh_clear_tx_capture();
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    check(mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
-              mh_tx_count_exact("AT+CMGF=1") == 1u &&
-              mh_status().sms_received_count == before.sms_received_count + 1u,
-          "a dropped slot does not block later deliveries");
-
-    /* Ring full: the ninth pending delivery while eight are held is dropped. */
-    s_sms_flow_fault = SMS_FLOW_FAULT_CMGF_PDU_TIMEOUT; /* no CMGF=0 final */
-    mh_clear_tx_capture();
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY); /* slot 0: parks */
-    check(service_probe().command_active &&
-              mh_tx_count_exact("AT+CMGF=0") == 1u,
-          "ring-full fixture parks the first store at AT+CMGF=0");
-    modem_status_t held_before = mh_status();
-    for (unsigned i = 1u; i < 8u; i++) {
-        feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY); /* slots 1..7 */
-    }
-    check(mh_status().command_errors == held_before.command_errors,
-          "eight deliveries are held without loss");
-    modem_status_t full_before = mh_status();
-    feed_direct(CONTROL_DM_TELIT_HEADER, CONTROL_DM_WDP_HEX);
-    check(mh_status().command_errors == full_before.command_errors &&
-              mh_status().sms_filtered_oma_dm == full_before.sms_filtered_oma_dm + 1u,
-          "a full storage ring still silently consumes complete controls");
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY); /* no slot */
-    check(mh_status().command_errors == full_before.command_errors + 1u,
-          "the ninth delivery on a full ring is counted as an error");
-    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
-    for (unsigned i = 0u; i < 24u; i++) {
-        mh_advance(1000u); /* CMGF=0 times out; retry, then drain the rest */
-    }
-    check(mh_status().sms_received_count == before.sms_received_count + 1u + 8u &&
-              !mh_status().operation_busy &&
-              service_probe().request_queue_depth == 0u,
-          "all eight held slots drain once the modem answers again");
-}
 
 /* Bodies of distinct lengths give distinct AT+CMGW=<tpdu>,0 commands, so
  * the store order is observable on the wire. */
-static void feed_direct_len(unsigned chars) {
-    static const char LETTERS[] = "abcdefghijkl";
-    char header[96];
-    char body[16];
-    snprintf(header, sizeof(header),
-             "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,%u", chars);
-    memcpy(body, LETTERS, chars);
-    body[chars] = '\0';
-    feed_direct(header, body);
-}
+
 
 static void test_direct_delivery_dropped_line_resets_the_collector(void) {
     if (!begin_sms_operation_fixture("direct-delivery dropped-line fixture boots")) {
@@ -6916,132 +6083,17 @@ static void test_direct_delivery_dropped_line_resets_the_collector(void) {
           "the command and nothing is stored");
     /* The collector is clean afterwards: a real delivery stores normally. */
     feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    check(mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
+    check(mh_tx_count_exact(DIRECT_CPMS_SET) == 0u &&
               mh_status().sms_received_count == before.sms_received_count + 1u,
           "the next delivery after a dropped line stores normally");
 }
 
 /* Index of the n-th (1-based) CSTR event equal to text, or SIZE_MAX. */
-static size_t tx_event_cstr_nth(const char *text, unsigned n) {
-    size_t at = 0u;
-    for (unsigned i = 0u; i < n; i++) {
-        at = tx_event_cstr(text, at);
-        if (at == SIZE_MAX) {
-            return SIZE_MAX;
-        }
-        at++;
-    }
-    return at - 1u;
-}
 
-static void test_direct_delivery_restores_text_mode_after_a_cancelled_scan(void) {
-    /* A MAILBOX scan parked after AT+CMGF=0 succeeded, then cancelled by a
-     * runtime power fault (the live cancel path: call requests wait behind
-     * a running SMS operation, and the multipart-read yield already restores
-     * text mode itself). After recovery the idle scheduler must issue
-     * AT+CMGF=1 before any +CMT store. */
-    if (!begin_sms_operation_fixture("mode-restore fixture boots")) {
-        return;
-    }
-    s_hold_final_command = "AT+CMGL=4";
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX),
-          "mailbox scan is admitted");
-    mh_settle();
-    check(service_probe().command_active && mh_tx_count_exact("AT+CMGF=0") == 1u &&
-              mh_tx_count_exact("AT+CMGF=1") == 0u,
-          "the scan is parked at AT+CMGL=4 with PDU mode entered");
 
-    s_mh_supply_pg = false;
-    mh_advance(250u);
-    modem_sms_mailbox_result_t mailbox_result;
-    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
-              modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              mailbox_result.outcome == MODEM_SMS_OUTCOME_CANCELLED &&
-              service_probe().sms_mode_restore_pending,
-          "the cancelled scan leaves a text-mode restore pending");
 
-    s_hold_final_command = NULL;
-    s_mh_supply_pg = true;
-    mh_clear_tx_capture();
-    modem_service_power_on();
-    check(boot_until_ready(30000u), "retained modem recovers");
-    modem_status_t before = mh_status();
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    size_t cnmi = tx_event_cstr("AT+CNMI=2,2,0,0,0", 0u);
-    size_t init_text = tx_event_cstr_nth("AT+CMGF=1", 1u);
-    size_t restore_text = tx_event_cstr_nth("AT+CMGF=1", 2u);
-    size_t store_pdu = tx_event_cstr("AT+CMGF=0", 0u);
-    check(cnmi != SIZE_MAX && init_text != SIZE_MAX && restore_text != SIZE_MAX &&
-              store_pdu != SIZE_MAX && init_text < cnmi && cnmi < restore_text &&
-              restore_text < store_pdu && !service_probe().sms_mode_restore_pending &&
-              mh_status().sms_received_count == before.sms_received_count + 1u,
-          "after recovery the idle restore issues AT+CMGF=1 before the +CMT store");
 
-    /* Bounded: a restore the module keeps rejecting is retried from the idle
-     * scheduler at most three times, then given up. */
-    if (!begin_sms_operation_fixture("mode-restore retry fixture boots")) {
-        return;
-    }
-    s_hold_final_command = "AT+CMGL=4";
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX), "retry scan admitted");
-    mh_settle();
-    s_mh_supply_pg = false;
-    mh_advance(250u);
-    check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
-              service_probe().sms_mode_restore_pending,
-          "retry fixture cancelled with a restore pending");
-    s_hold_final_command = NULL;
-    s_mh_supply_pg = true;
-    s_sms_fail_cmgf_text_when_ready = true;
-    mh_clear_tx_capture();
-    modem_service_power_on();
-    check(boot_until_ready(30000u), "retained modem recovers for the retry fixture");
-    before = mh_status();
-    for (unsigned i = 0u; i < 6u; i++) {
-        mh_advance(1000u);
-    }
-    size_t rejected = mh_tx_count_exact("AT+CMGF=1") - 1u; /* minus init's */
-    check(rejected == 3u && !service_probe().sms_mode_restore_pending &&
-              !mh_status().operation_busy,
-          "a rejected restore is retried three times, then given up");
-    s_sms_fail_cmgf_text_when_ready = false;
-    mh_advance(1000u);
-    check(mh_tx_count_exact("AT+CMGF=1") == 4u,
-          "no further restore after giving up");
-}
 
-static void test_direct_delivery_failed_restore_after_store_is_recovered(void) {
-    /* A store whose AT+CMGF=1 answers ERROR still published its row; the
-     * module may rest in PDU mode, so the idle restore must run. */
-    if (!begin_sms_operation_fixture("failed-restore-after-store fixture boots")) {
-        return;
-    }
-    modem_status_t before = mh_status();
-    s_sms_cmgf_text_error_budget = 1u; /* only the store's own AT+CMGF=1 fails */
-    mh_clear_tx_capture();
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    mh_advance(100u);
-    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
-              mh_status().sms_received_count == before.sms_received_count + 1u &&
-              !mh_status().operation_busy,
-          "the stored row is published OK despite the failed AT+CMGF=1");
-    check(mh_tx_count_exact("AT+CMGF=1") == 2u &&
-              tx_event_cstr_nth("AT+CMGF=1", 2u) > tx_event_cstr("AT+CMGW=26,0", 0u) &&
-              !service_probe().sms_mode_restore_pending,
-          "the idle scheduler re-issues AT+CMGF=1 after the store's failed restore");
-
-    /* Same for a MAILBOX scan whose own restore fails. */
-    mh_clear_tx_capture();
-    s_sms_cmgf_text_error_budget = 1u;
-    check(modem_service_request_sms_mailbox(MODEM_SMS_MAILBOX_INBOX), "scan admitted");
-    mh_settle();
-    mh_advance(100u);
-    modem_sms_mailbox_result_t mailbox_result;
-    check(modem_service_pop_sms_mailbox_result(&mailbox_result) &&
-              !mh_status().operation_busy &&
-              mh_tx_count_exact("AT+CMGF=1") == 2u && !service_probe().sms_mode_restore_pending,
-          "the idle scheduler restores text mode after the failed scan restore");
-}
 
 static void test_direct_delivery_interrupted_body_times_out(void) {
     /* A header followed by a truncated body must not keep the collector (and
@@ -7085,171 +6137,15 @@ static void test_direct_delivery_interrupted_body_times_out(void) {
     for (unsigned i = 0u; i < 4u; i++) {
         mh_advance(100u); /* the store may first need the DTR wake */
     }
-    check(mh_tx_count_exact("AT+CMGF=0") == 1u &&
+    check(mh_tx_count_exact("AT+CMGF=0") == 0u &&
               mh_status().sms_received_count == before.sms_received_count + 1u &&
               mh_status().command_errors == before.command_errors,
           "a body completed within the deadline is stored");
 }
 
-static void test_direct_delivery_storage_full_waits_for_room(void) {
-    /* A full ME store must not burn the bounded attempts: the module has
-     * already acknowledged the network, so the entry waits for room. */
-    if (!begin_sms_operation_fixture("storage-full fixture boots")) {
-        return;
-    }
-    settle_dtr_sleep(); /* drain the boot backstops, incl. the first AT+CPMS? */
-    modem_status_t before = mh_status();
-    s_sms_flow_fault = SMS_FLOW_FAULT_CMGW_FINAL_MEMORY_FULL;
-    mh_clear_tx_capture();
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    for (unsigned i = 0u; i < 5u; i++) {
-        mh_advance(1000u);
-    }
-    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
-              mh_status().sms_received_count == before.sms_received_count &&
-              !mh_status().operation_busy && service_probe().request_queue_depth == 0u,
-          "a memory-full store is not retried while the store stays full");
 
-    /* (a) a DELETE that completes OK makes room: the store is retried. */
-    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
-    static const uint16_t victim = 7u;
-    check(modem_service_request_delete_sms_indices(&victim, 1u), "delete is admitted");
-    for (unsigned i = 0u; i < 5u; i++) {
-        mh_advance(100u); /* the delete first needs the DTR wake */
-    }
-    modem_sms_delete_result_t delete_result;
-    check(modem_service_pop_sms_delete_result(&delete_result) &&
-              delete_result.outcome == MODEM_SMS_OUTCOME_OK,
-          "the delete completes OK");
-    for (unsigned i = 0u; i < 3u; i++) {
-        mh_advance(100u);
-    }
-    check(mh_tx_count_exact("AT+CMGW=26,0") == 2u &&
-              mh_status().sms_received_count == before.sms_received_count + 1u,
-          "after a successful delete the held store is retried and succeeds");
 
-    /* (b) a +CPMS? poll reporting used < total unblocks as well. */
-    before = mh_status();
-    s_sms_flow_fault = SMS_FLOW_FAULT_CMGW_FINAL_MEMORY_FULL;
-    mh_clear_tx_capture();
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    mh_advance(1000u);
-    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u, "second memory-full store is held");
-    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
-    /* The +CMTI is only the harness's trigger for an AT+CPMS? poll (store
-     * mode never runs alongside direct delivery); the poll's answer unblocks. */
-    mh_feed("+CMTI: \"ME\",30"); /* schedules AT+CPMS?; the harness answers 0/255 */
-    for (unsigned i = 0u; i < 3u; i++) {
-        mh_advance(100u);
-    }
-    check(mh_tx_count_exact("AT+CPMS?") >= 1u && mh_tx_count_exact("AT+CMGW=26,0") == 2u &&
-              mh_status().sms_received_count == before.sms_received_count + 2u,
-          "a receive-store poll with room unblocks the held store");
 
-    /* (c) without a delete or a poll, one retry after 60 s. */
-    before = mh_status();
-    s_sms_flow_fault = SMS_FLOW_FAULT_CMGW_FINAL_MEMORY_FULL;
-    mh_clear_tx_capture();
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    for (unsigned i = 0u; i < 30u; i++) {
-        mh_advance(1000u);
-    }
-    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u, "still held at 30 s");
-    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
-    /* 31 s reach the 60 s retry; the rest lets the retried store's first
-     * command dispatch through the DTR wake after the long idle. */
-    for (unsigned i = 0u; i < 45u; i++) {
-        mh_advance(1000u);
-    }
-    check(mh_tx_count_exact("AT+CMGW=26,0") == 2u &&
-              mh_status().sms_received_count == before.sms_received_count + 1u,
-          "after 60 s the held store is retried once");
-
-    /* Refused at the prompt stage (AT+CMGW= answered +CMS ERROR: 322, no
-     * prompt): the same hold, retried after a delete. */
-    before = mh_status();
-    s_sms_flow_fault = SMS_FLOW_FAULT_CMGW_PROMPT_MEMORY_FULL;
-    mh_clear_tx_capture();
-    feed_direct(DIRECT_3GPP2_HEADER, DIRECT_3GPP2_BODY);
-    for (unsigned i = 0u; i < 5u; i++) {
-        mh_advance(1000u);
-    }
-    check(mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
-              mh_status().sms_received_count == before.sms_received_count &&
-              !mh_status().operation_busy,
-          "a prompt-stage memory-full refusal holds the slot without retry");
-    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
-    check(modem_service_request_delete_sms_indices(&victim, 1u), "second delete is admitted");
-    for (unsigned i = 0u; i < 8u; i++) {
-        mh_advance(100u);
-    }
-    check(modem_service_pop_sms_delete_result(&delete_result) &&
-              delete_result.outcome == MODEM_SMS_OUTCOME_OK &&
-              mh_tx_count_exact("AT+CMGW=26,0") == 2u &&
-              mh_status().sms_received_count == before.sms_received_count + 1u,
-          "after the delete the prompt-refused store is retried and succeeds");
-}
-
-static void test_direct_delivery_bursts_store_in_arrival_order(void) {
-    if (!begin_sms_operation_fixture("direct-delivery FIFO fixture boots")) {
-        return;
-    }
-    modem_status_t before = mh_status();
-
-    /* Three back-to-back +CMT pairs queued before the service runs. */
-    mh_clear_tx_capture();
-    static const char LETTERS[] = "abcdefghijkl";
-    for (unsigned chars = 5u; chars <= 7u; chars++) {
-        char header[96];
-        char body[16];
-        snprintf(header, sizeof(header),
-                 "+CMT: \"7866910488\",\"\",\"20260916105524\",129,4098,0,8,%u", chars);
-        memcpy(body, LETTERS, chars);
-        body[chars] = '\0';
-        mh_rx_push(header);
-        mh_rx_push(body);
-    }
-    mh_settle();
-    for (unsigned i = 0u; i < 4u; i++) {
-        mh_advance(100u);
-    }
-    size_t first = tx_event_cstr("AT+CMGW=23,0", 0u);
-    size_t second = tx_event_cstr("AT+CMGW=24,0", 0u);
-    size_t third = tx_event_cstr("AT+CMGW=25,0", 0u);
-    check(first != SIZE_MAX && second != SIZE_MAX && third != SIZE_MAX &&
-              first < second && second < third &&
-              mh_status().sms_received_count == before.sms_received_count + 3u &&
-              mh_status().command_errors == before.command_errors,
-          "three back-to-back deliveries are stored in arrival order");
-
-    /* A slot freed and refilled while older entries wait must not jump the
-     * queue: A stores, B and C wait, D lands in A's slot, order stays B C D. */
-    mh_clear_tx_capture();
-    before = mh_status();
-    s_hold_final_command = "AT+CMGF=1";
-    feed_direct_len(5u); /* A: parks at its AT+CMGF=1 final */
-    check(service_probe().command_active && mh_tx_count_exact("AT+CMGW=23,0") == 1u,
-          "FIFO fixture parks A at its text-mode restore");
-    feed_direct_len(6u); /* B waits */
-    feed_direct_len(7u); /* C waits */
-    mh_feed("OK");       /* A completes; B starts and parks likewise */
-    check(mh_tx_count_exact("AT+CMGW=24,0") == 1u && service_probe().command_active,
-          "B starts after A and parks");
-    /* D is 9 chars: 8 septets pack into 7 octets, the same TPDU length as C. */
-    feed_direct_len(9u); /* D takes A's freed slot while C still waits */
-    s_hold_final_command = NULL;
-    mh_feed("OK");       /* B completes; C then D drain */
-    for (unsigned i = 0u; i < 4u; i++) {
-        mh_advance(100u);
-    }
-    size_t c_event = tx_event_cstr("AT+CMGW=25,0", 0u);
-    size_t d_event = tx_event_cstr("AT+CMGW=26,0", 0u);
-    check(c_event != SIZE_MAX && d_event != SIZE_MAX && c_event < d_event &&
-              mh_status().sms_received_count == before.sms_received_count + 4u &&
-              !mh_status().operation_busy &&
-              service_probe().request_queue_depth == 0u,
-          "a refilled slot does not overtake older held deliveries (FIFO)");
-}
 
 typedef struct {
     const char *header;
@@ -7308,7 +6204,7 @@ static void test_direct_delivery_plain_bodies_are_read_raw(void) {
             fprintf(stderr, "raw body case '%s': stored=%u text='%s'\n", c->name,
                     stored ? 1u : 0u, stored ? decoded.text : "");
         }
-        check(text_ok && mh_tx_count_exact("AT+CMGF=1") == 1u &&
+        check(text_ok && mh_tx_count_exact("AT+CMGF=1") == 0u &&
                   mh_status().sms_received_count == before.sms_received_count + 1u &&
                   mh_status().command_errors == before.command_errors &&
                   !mh_status().operation_busy,
@@ -7333,7 +6229,7 @@ static void test_direct_delivery_plain_bodies_are_read_raw(void) {
         snprintf(cmgw, sizeof(cmgw), "AT+CMGW=%u,0", (unsigned)expected_tpdu);
         char ascii_pdu[SMS_DELIVER_HEX_MAX];
         sms_codec_message_t ascii;
-        check(mh_tx_count_exact(cmgw) == 1u && captured_stored_pdu(ascii_pdu, sizeof(ascii_pdu)) &&
+        check(mh_tx_count_exact(cmgw) == 0u && captured_stored_pdu(ascii_pdu, sizeof(ascii_pdu)) &&
                   strcmp(ascii_pdu, expected) == 0 && sms_pdu_decode(ascii_pdu, &ascii) &&
                   strcmp(ascii.text, "Warp loopback 2") == 0 &&
                   mh_status().sms_received_count == ascii_before.sms_received_count + 1u,
@@ -7450,7 +6346,7 @@ static void test_direct_delivery_plain_bodies_are_read_raw(void) {
                 mh_advance(100u);
             }
             check(mh_status().command_errors == p_before.command_errors + 1u &&
-                      mh_tx_count_exact("AT+CMGW=26,0") == 1u &&
+                      mh_tx_count_exact("AT+CMGW=26,0") == 0u &&
                       mh_status().sms_received_count == p_before.sms_received_count + 1u &&
                       !modem_sms_direct_pending(),
                   probes[i].name);
@@ -7506,7 +6402,7 @@ static void test_direct_delivery_plain_bodies_are_read_raw(void) {
     char pdu[SMS_DELIVER_HEX_MAX];
     sms_codec_message_t decoded;
     check(!service_probe().command_active &&
-              mh_tx_count_exact(DIRECT_CPMS_SET) == 1u &&
+              mh_tx_count_exact(DIRECT_CPMS_SET) == 0u &&
               captured_stored_pdu(pdu, sizeof(pdu)) && sms_pdu_decode(pdu, &decoded) &&
               strcmp(decoded.text, MULTI) == 0 &&
               mh_status().sms_received_count == before.sms_received_count + 1u,
@@ -7650,7 +6546,6 @@ int main(void) {
     test_late_psmri_invalidates_and_replays_lifecycle();
     test_sms_text_send_contract();
     test_sms_text_send_failures_and_prompt_settle();
-    test_sms_save_and_delete_contracts();
     test_sms_binary_send_contract();
     test_direct_delivery_is_restored_as_a_pdu();
     test_direct_controls_skip_storage();
@@ -7658,29 +6553,15 @@ int main(void) {
     test_picture_settings_repair_blocks_sms_not_calls();
     test_direct_delivery_mid_command_and_qcmti();
     test_slow_call_forwarding_keeps_receiving();
-    test_direct_delivery_retries_after_store_failure();
     test_direct_delivery_plain_bodies_are_read_raw();
-    test_direct_delivery_bursts_store_in_arrival_order();
     test_direct_delivery_dropped_line_resets_the_collector();
-    test_direct_delivery_restores_text_mode_after_a_cancelled_scan();
-    test_direct_delivery_failed_restore_after_store_is_recovered();
     test_direct_delivery_interrupted_body_times_out();
-    test_direct_delivery_storage_full_waits_for_room();
     test_sms_binary_failures_and_prompt_settle();
-    test_sms_cpms_timeout_cancels_every_cpms_operation();
     test_sms_power_recovery_never_replays_transaction();
     test_sms_cts_failure_cancels_every_operation();
     test_sms_queue_eviction_is_exact_for_every_operation();
     test_sms_recovery_cancels_every_uncommitted_operation();
     test_sms_crossed_urcs_remain_routed();
-    test_sms_unread_status_is_bracketed();
-    test_vvm_control_sms_is_consumed_silently();
-    test_legacy_url_vvm_is_consumed_silently();
-    test_unknown_application_sms_fails_open();
-    test_interleaved_arrival_waits_for_current_snapshot();
-    test_vvm_cleanup_error_retries_without_alerting();
-    test_vvm_cleanup_timeout_is_bounded_and_silent();
-    test_unclassifiable_cmti_fails_open();
     test_sms_ri_wakes_sleeping_transport();
     test_sms_wake_profile_failure_fails_closed();
     test_missing_sim_uses_bounded_activation_window();

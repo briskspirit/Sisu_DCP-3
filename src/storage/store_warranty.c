@@ -15,11 +15,6 @@ _Static_assert(STORE_WARRANTY_SERIAL_MAX == 15u,
                "board IMEI validation assumes a 15-digit identity");
 
 static store_warranty_state_t s_warranty;
-/* Payload v1 placed Life timer at warranty offset +8. v6.00 ground truth puts
- * it in call accounting instead. Preserve the old slot as a read-only migration
- * donor so a failure between two independent journal commits cannot erase the
- * only surviving copy; it is never used as live state after init. */
-static uint32_t s_legacy_warranty_life_timer_seconds;
 
 store_status_t store_warranty_get(store_warranty_state_t *out_state) {
     if (out_state == 0) {
@@ -83,7 +78,7 @@ store_status_t store_warranty_set(const store_warranty_state_t *state) {
     store_warranty_state_t normalized;
     memset(&normalized, 0, sizeof(normalized));
     /* Serial/IMEI is board identity, not an editable warranty field. Preserve
-     * it even when a legacy caller submits a full record with another value. */
+     * it even when a caller submits a full record with another value. */
     store_copy_text(normalized.serial, sizeof(normalized.serial), s_warranty.serial);
     store_copy_text(normalized.made, sizeof(normalized.made), state->made);
     store_copy_text(normalized.repaired, sizeof(normalized.repaired), state->repaired);
@@ -121,7 +116,6 @@ static void load_warranty_defaults(void) {
     store_copy_text(s_warranty.made, sizeof(s_warranty.made), STORE_WARRANTY_DEFAULT_MADE);
     store_copy_text(s_warranty.repaired, sizeof(s_warranty.repaired), STORE_WARRANTY_DEFAULT_REPAIRED);
     s_warranty.flags = 0u;
-    s_legacy_warranty_life_timer_seconds = 0u;
 }
 
 void store_warranty_post_load(void) {
@@ -131,10 +125,6 @@ void store_warranty_post_load(void) {
         s_warranty.serial[0] = '\0';
         (void)store_engine_mark_dirty(STORE_UNIT_SERVICE_WARRANTY);
     }
-}
-
-uint32_t store_warranty_legacy_life_timer(void) {
-    return s_legacy_warranty_life_timer_seconds;
 }
 
 static bool serialize_service_warranty(uint8_t *dst, size_t cap, size_t *out_len) {
@@ -159,9 +149,7 @@ static bool serialize_service_warranty(uint8_t *dst, size_t cap, size_t *out_len
         !write_u16_field(dst, cap, &pos, STORE_PAYLOAD_VERSION) ||
         !write_u8_field(dst, cap, &pos, s_warranty.flags) ||
         !write_u8_field(dst, cap, &pos, 0u) ||
-        /* Keep payload-v1 offsets stable. This donor is intentionally not
-         * advanced after migration; the calls-domain key is authoritative. */
-        !write_u32_field(dst, cap, &pos, s_legacy_warranty_life_timer_seconds) ||
+        !write_u32_field(dst, cap, &pos, 0u) ||
         !write_u8_field(dst, cap, &pos, serial_len) ||
         !write_bytes(dst, cap, &pos, fixed_serial, sizeof(fixed_serial)) ||
         !write_u8_field(dst, cap, &pos, made_len) ||
@@ -178,13 +166,13 @@ static bool serialize_service_warranty(uint8_t *dst, size_t cap, size_t *out_len
 
 static bool apply_service_warranty_payload(const uint8_t *payload, size_t len) {
     if (len < 12u || read_u32(&payload[0]) != WARRANTY_MAGIC ||
-        read_u16(&payload[4]) != STORE_PAYLOAD_VERSION) {
+        read_u16(&payload[4]) != STORE_PAYLOAD_VERSION ||
+        payload[7] != 0u || read_u32(&payload[8]) != 0u) {
         return false;
     }
     store_warranty_state_t loaded;
     memset(&loaded, 0, sizeof(loaded));
     loaded.flags = payload[6];
-    uint32_t legacy_life_timer_seconds = read_u32(&payload[8]);
     size_t pos = 12u;
     if (pos + 1u + STORE_WARRANTY_SERIAL_MAX + 1u > len) {
         return false;
@@ -236,7 +224,6 @@ static bool apply_service_warranty_payload(const uint8_t *payload, size_t len) {
         store_copy_text(loaded.repaired, sizeof(loaded.repaired), STORE_WARRANTY_DEFAULT_REPAIRED);
     }
     s_warranty = loaded;
-    s_legacy_warranty_life_timer_seconds = legacy_life_timer_seconds;
     return true;
 }
 

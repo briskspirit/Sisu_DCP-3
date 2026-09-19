@@ -125,7 +125,7 @@ const modem_vendor_t g_modem_vendor = {
     .parse_sim_observation = telit_parse_sim_observation,
     .provision_steps = TELIT_PROVISION_STEPS,
     .provision_step_count = TELIT_PROVISION_STEP_COUNT,
-    .provision_schema_version = 11u,
+    .provision_schema_version = 12u,
     .provision_reboot_cmd = "AT#REBOOT",
     .provision_reboot_timeout_ms = 10000u,
     .wake = {
@@ -148,13 +148,6 @@ const modem_vendor_t g_modem_vendor = {
         .command_invalidates_arm = telit_command_invalidates_sms_wake,
         .qualified_by_sim_completion = true,
         .sim_activation_window_ms = 10000u,
-    },
-    .sms_read_status = {
-        /* LE910Cx ThreadX AT guide, AT#SMSUCS: mode 1 prevents +CMGL/+CMGR
-         * from consuming REC UNREAD; mode 0 restores ordinary read semantics. */
-        .preserve_unread_cmd = "AT#SMSUCS=1",
-        .consume_unread_cmd = "AT#SMSUCS=0",
-        .timeout_ms = 2500u,
     },
     .call_urc_prefix = "#ECAM:",
     .parse_call_urc = telit_parse_ecam,

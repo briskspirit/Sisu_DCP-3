@@ -9,6 +9,7 @@ enum {
     SID_LOCAL_KIB_FREE,
     SID_LOCAL_CONTACT_COUNT,
     SID_LOCAL_STORAGE_UNAVAILABLE,
+    SID_DATA_MESSAGE,
 };
 
 /* UI localization by v6.00 string id (SID), exactly like the ROM: each UI site

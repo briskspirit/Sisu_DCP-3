@@ -2,9 +2,18 @@
 
 #include <string.h>
 #include "services/sms_picture_codec.h"
+#include "services/sms_vvm_filter.h"
 
 #define KNOWN_FLAGS (MESSAGE_FILE_DRAFT | MESSAGE_FILE_QUARANTINED | MESSAGE_FILE_SENT)
 #define CONCAT_WINDOW_SECONDS 86400u
+
+/* Called only by the sole core0 message owner. Reuse decode scratch rather
+ * than nesting several ~0.5 KiB decoded PDUs on the MCU's 4 KiB stack. No
+ * decoded view escapes a public call, and these calls are not reentrant. */
+static sms_codec_message_t s_first, s_part;
+static message_file_part_t s_incoming;
+static char s_hex[MESSAGE_FILE_PDU_MAX * 2u + 1u];
+static uint8_t s_control[MODEM_SMS_BINARY_MAX];
 
 static int nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -30,7 +39,7 @@ static bool part_parse(const char *hex, message_file_part_t *part, sms_codec_mes
 static bool part_decode(const message_file_part_t *part, sms_codec_message_t *out) {
     if (part->size == 0u || part->size > MESSAGE_FILE_PDU_MAX) return false;
     static const char digits[] = "0123456789ABCDEF";
-    char hex[MESSAGE_FILE_PDU_MAX * 2u + 1u];
+    char *hex = s_hex;
     for (unsigned i = 0u; i < part->size; i++) {
         hex[2u * i] = digits[part->bytes[i] >> 4];
         hex[2u * i + 1u] = digits[part->bytes[i] & 15u];
@@ -90,18 +99,18 @@ static bool valid_file(const message_file_t *file) {
             memchr(file->draft.text, 0, sizeof(file->draft.text)) != NULL;
     }
     if (file->count == 0u || file->count > MESSAGE_FILE_PART_LIMIT) return false;
-    sms_codec_message_t first, part;
-    if (!part_decode(&file->parts[0], &first)) return false;
+    sms_codec_message_t *first = &s_first, *part = &s_part;
+    if (!part_decode(&file->parts[0], first)) return false;
     bool quarantine = (file->flags & MESSAGE_FILE_QUARANTINED) != 0u;
-    if (quarantined(&first) && !quarantine) return false;
+    if (quarantined(first) && !quarantine) return false;
     uint8_t mask = 0u;
     for (unsigned i = 0u; i < file->count; i++) {
-        if (!part_decode(&file->parts[i], &part) ||
-            (i != 0u && !same_group(&first, &part))) return false;
+        if (!part_decode(&file->parts[i], part) ||
+            (i != 0u && !same_group(first, part))) return false;
         if (quarantine) continue;
-        if (quarantined(&part)) return false;
-        if (!part.has_concat) return file->count == 1u;
-        uint8_t bit = (uint8_t)(1u << (part.concat_seq - 1u));
+        if (quarantined(part)) return false;
+        if (!part->has_concat) return file->count == 1u;
+        uint8_t bit = (uint8_t)(1u << (part->concat_seq - 1u));
         if (mask & bit) return false;
         mask |= bit;
     }
@@ -121,33 +130,33 @@ bool message_file_draft(message_file_t *file, const char *address, const char *t
 bool message_file_receive(message_file_t *file, const char *pdu) {
     if (file == NULL) return false;
     memset(file, 0, sizeof(*file));
-    sms_codec_message_t decoded;
-    if (!part_parse(pdu, &file->parts[0], &decoded)) return false;
+    sms_codec_message_t *decoded = &s_part;
+    if (!part_parse(pdu, &file->parts[0], decoded)) return false;
     file->count = 1u;
-    if (quarantined(&decoded)) file->flags |= MESSAGE_FILE_QUARANTINED;
+    if (quarantined(decoded)) file->flags |= MESSAGE_FILE_QUARANTINED;
     return true;
 }
 
 message_merge_t message_file_merge(message_file_t *file, const char *pdu) {
     if (file == NULL || (file->flags & MESSAGE_FILE_DRAFT) || file->count == 0u ||
         file->count > MESSAGE_FILE_PART_LIMIT) return MESSAGE_MERGE_UNRELATED;
-    message_file_part_t incoming;
-    sms_codec_message_t a, b;
-    if (!part_parse(pdu, &incoming, &b) || !part_decode(&file->parts[0], &a))
+    message_file_part_t *incoming = &s_incoming;
+    sms_codec_message_t *a = &s_first, *b = &s_part;
+    if (!part_parse(pdu, incoming, b) || !part_decode(&file->parts[0], a))
         return MESSAGE_MERGE_UNRELATED;
     for (uint8_t i = 0; i < file->count; i++) {
-        if (file->parts[i].size == incoming.size &&
-            memcmp(file->parts[i].bytes, incoming.bytes, incoming.size) == 0)
+        if (file->parts[i].size == incoming->size &&
+            memcmp(file->parts[i].bytes, incoming->bytes, incoming->size) == 0)
             return MESSAGE_MERGE_DUPLICATE;
     }
-    if (!same_group(&a, &b)) return MESSAGE_MERGE_UNRELATED;
+    if (!same_group(a, b)) return MESSAGE_MERGE_UNRELATED;
     if (file->count == MESSAGE_FILE_PART_LIMIT) return MESSAGE_MERGE_FULL;
-    bool conflict = quarantined(&b);
+    bool conflict = quarantined(b);
     for (uint8_t i = 0; i < file->count; i++) {
-        if (!part_decode(&file->parts[i], &a)) return MESSAGE_MERGE_UNRELATED;
-        if (a.concat_seq == b.concat_seq) conflict = true;
+        if (!part_decode(&file->parts[i], a)) return MESSAGE_MERGE_UNRELATED;
+        if (a->concat_seq == b->concat_seq) conflict = true;
     }
-    file->parts[file->count++] = incoming;
+    file->parts[file->count++] = *incoming;
     if (conflict) file->flags |= MESSAGE_FILE_QUARANTINED;
     return MESSAGE_MERGE_ADDED;
 }
@@ -157,17 +166,40 @@ bool message_file_complete(const message_file_t *file) {
     if (file->flags & MESSAGE_FILE_DRAFT) return true;
     if (file->count == 0u || file->count > MESSAGE_FILE_PART_LIMIT) return false;
     if (file->flags & MESSAGE_FILE_QUARANTINED) return true;
-    sms_codec_message_t part;
-    if (!part_decode(&file->parts[0], &part)) return false;
-    if (!part.has_concat) return file->count == 1u;
-    uint8_t total = part.concat_total, mask = 0u;
+    sms_codec_message_t *part = &s_part;
+    if (!part_decode(&file->parts[0], part)) return false;
+    if (!part->has_concat) return file->count == 1u;
+    uint8_t total = part->concat_total, mask = 0u;
     if (total == 0u || total > MODEM_SMS_SEGMENT_MAX || total != file->count) return false;
     for (uint8_t i = 0u; i < file->count; i++) {
-        if (!part_decode(&file->parts[i], &part) || part.concat_seq == 0u || part.concat_seq > total)
+        if (!part_decode(&file->parts[i], part) || part->concat_seq == 0u || part->concat_seq > total)
             return false;
-        mask |= (uint8_t)(1u << (part.concat_seq - 1u));
+        mask |= (uint8_t)(1u << (part->concat_seq - 1u));
     }
     return mask == (uint8_t)((1u << total) - 1u);
+}
+
+bool message_file_is_vvm_control(const message_file_t *file) {
+    if (!message_file_complete(file) ||
+        (file->flags & (MESSAGE_FILE_DRAFT | MESSAGE_FILE_QUARANTINED)) ||
+        !part_decode(&file->parts[0], &s_first) || s_first.pid != 0u ||
+        (s_first.dcs != 0u && s_first.dcs != 4u && s_first.dcs != 8u)) return false;
+    size_t used = 0u;
+    for (uint8_t seq = 1u; seq <= file->count; seq++) {
+        bool found = false;
+        for (uint8_t i = 0u; i < file->count; i++) {
+            if (!part_decode(&file->parts[i], &s_part)) return false;
+            if (!s_part.has_concat || s_part.concat_seq == seq) { found = true; break; }
+        }
+        if (!found || s_part.binary != s_first.binary) return false;
+        size_t n = s_part.binary ? s_part.binary_len : strlen(s_part.text);
+        if (n > sizeof(s_control) - used) return false;
+        memcpy(s_control + used, s_part.binary ? s_part.binary_data :
+               (const uint8_t *)s_part.text, n);
+        used += n;
+    }
+    return sms_vvm_control_payload_is_recognized(s_first.has_ports,
+                s_first.dest_port, s_control, used);
 }
 
 bool message_file_encode(const message_file_t *file, uint8_t *dst, size_t cap, size_t *len) {
@@ -210,14 +242,12 @@ bool message_file_decode(message_file_t *file, const uint8_t *src, size_t len) {
     } else {
         if (src[4] == 0u || src[4] > MESSAGE_FILE_PART_LIMIT || src[6] != 0u) return false;
         file->count = src[4];
-        sms_codec_message_t decoded;
         for (uint8_t i = 0; i < file->count; i++) {
             if (pos == len) return false;
             uint8_t n = src[pos++];
             if (n == 0u || n > MESSAGE_FILE_PDU_MAX || n > len - pos) return false;
             file->parts[i].size = n;
             memcpy(file->parts[i].bytes, src + pos, n); pos += n;
-            if (!part_decode(&file->parts[i], &decoded)) return false;
         }
     }
     return pos == len && valid_file(file);
@@ -232,11 +262,11 @@ bool message_file_metadata(const message_file_t *file, message_metadata_t *out) 
         strcpy(out->address, file->draft.address);
         return true;
     }
-    sms_codec_message_t part;
-    if (file->count == 0u || !part_decode(&file->parts[0], &part)) return false;
-    strcpy(out->address, part.address);
-    strcpy(out->timestamp, part.timestamp);
-    out->binary = part.binary || part.has_ports || out->quarantined;
+    sms_codec_message_t *part = &s_part;
+    if (file->count == 0u || !part_decode(&file->parts[0], part)) return false;
+    strcpy(out->address, part->address);
+    strcpy(out->timestamp, part->timestamp);
+    out->binary = part->binary || part->has_ports || out->quarantined;
     return true;
 }
 
@@ -251,16 +281,16 @@ bool message_file_content(const message_file_t *file, message_content_t *out) {
     if (out->metadata.binary) return true;
     size_t used = 0u;
     for (uint8_t seq = 1u; seq <= file->count; seq++) {
-        sms_codec_message_t part;
+        sms_codec_message_t *part = &s_part;
         bool found = false;
         for (uint8_t i = 0u; i < file->count; i++) {
-            if (!part_decode(&file->parts[i], &part)) return false;
-            if (!part.has_concat || part.concat_seq == seq) { found = true; break; }
+            if (!part_decode(&file->parts[i], part)) return false;
+            if (!part->has_concat || part->concat_seq == seq) { found = true; break; }
         }
         if (!found) return false;
-        size_t n = strlen(part.text);
+        size_t n = strlen(part->text);
         if (n > MESSAGE_TEXT_MAX - used) return false;
-        memcpy(out->text + used, part.text, n + 1u); used += n;
+        memcpy(out->text + used, part->text, n + 1u); used += n;
     }
     return true;
 }
