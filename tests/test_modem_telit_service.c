@@ -929,6 +929,7 @@ static void telit_response(const char *command) {
         if (s_fault == TELIT_FAULT_MWI_ERROR_ONCE && !s_fault_consumed) {
             s_fault_consumed = true;
             s_mh_final = MH_FINAL_ERROR;
+            return;
         } else if (s_fault == TELIT_FAULT_MWI_URC_DURING_QUERY_ONCE &&
             !s_fault_consumed) {
             s_fault_consumed = true;
@@ -5478,6 +5479,27 @@ static void test_local_forwarding_flags_without_network_fallback(void) {
           "newer CFU evidence survives a flags-absent query final");
 }
 
+static void test_mwi_error_fixture_has_no_body(void) {
+    begin_telit(true);
+    s_fault = TELIT_FAULT_MWI_ERROR_ONCE;
+    s_mh_final = MH_FINAL_OK;
+    size_t rx_before = s_mh_rx_len;
+    telit_response("AT#MWI?");
+    check(s_fault_consumed && s_mh_final == MH_FINAL_ERROR,
+          "MWI fault fixture produces a one-shot error final");
+    check(s_mh_rx_len == rx_before,
+          "MWI error final has no response body");
+
+    s_mh_final = MH_FINAL_OK;
+    rx_before = s_mh_rx_len;
+    telit_response("AT#MWI?");
+    const char expected[] = "#MWI: 1,0\r\n";
+    check(s_mh_final == MH_FINAL_OK &&
+              s_mh_rx_len - rx_before == sizeof(expected) - 1u &&
+              memcmp(s_mh_rx + rx_before, expected, sizeof(expected) - 1u) == 0,
+          "query after the one-shot MWI fault returns a normal snapshot");
+}
+
 static void test_supplementary_refresh_recovery(void) {
     begin_telit(true);
     s_fault = TELIT_FAULT_MBN_ERROR_ALWAYS;
@@ -6901,6 +6923,7 @@ int main(void) {
     test_mwi_ambiguous_query_never_invents_voice_mail();
     test_carrier_refresh_priority();
     test_local_forwarding_flags_without_network_fallback();
+    test_mwi_error_fixture_has_no_body();
     test_supplementary_refresh_recovery();
     test_call_forward_queue_cancellation();
     test_newer_call_forward_result_survives_old_final();
