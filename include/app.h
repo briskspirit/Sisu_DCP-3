@@ -143,6 +143,8 @@ typedef struct {
     uint32_t backlight_activity_ms;
     uint8_t power_menu_selected;
     bool power_off_failed;
+    bool power_on_pending;
+    uint32_t power_on_deadline_ms;
     app_powerup_stage_t powerup_stage;
     bool powerup_skip_boot_logo;
     uint8_t powerup_frame_index;

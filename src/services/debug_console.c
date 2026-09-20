@@ -655,7 +655,8 @@ static void handle_line(app_t *app, char *line) {
         if (s_phone_power_on == 0) {
             printf("[debug] phone power-on hook not registered\n");
         } else if (started) {
-            printf("[debug] phone power-on started\n");
+            printf("[debug] phone power-on %s\n",
+                   app->power_on_pending ? "waiting for battery" : "started");
         } else if (!was_off) {
             printf("[debug] phone already on\n");
         } else {
@@ -2502,6 +2503,12 @@ static void command_hw(const app_t *app) {
     } else {
         printf("[hw] batt policy unavailable (LTC voltage not authoritative)\n");
     }
+    printf("[hw] poweron pending=%u deadline=%lums samples=%u attempts=%u average=%umV\n",
+           app->power_on_pending ? 1u : 0u,
+           (unsigned long)app->power_on_deadline_ms,
+           (unsigned)s.battery_power_on_samples,
+           (unsigned)s.battery_power_on_attempts,
+           (unsigned)s.battery_power_on_average_mv);
     printf("[hw] charger conn=%u vin=%lumV adc=%u pin=%umV en=%c forced=%u stat=%u,%u state=%s chem=%s\n",
            s.charger_connected ? 1u : 0u,
            (unsigned long)s.charger_input_mv,

@@ -40,6 +40,13 @@ The ordinary powered-on clock-gating mask remains enabled during this fallible
 period. It is cleared only after every abortable check passes; carrying that
 mask into P1.7 was the root cause of the repeatable 2.40 mA off-state result.
 
+A qualified Power hold can arrive before the fresh LTC startup window has
+enough valid samples. That explicit power-on request waits up to three seconds
+in soft off for battery admission; it is not discarded or treated as permission
+to start the modem. A completed refusal or timeout clears the request. Releasing
+after the qualified hold does not cancel it, but a short tap never creates one.
+Deep-sleep entry is deferred only while this bounded request remains pending.
+
 ## Entry Sequence
 
 The production sequence is fallible-first:

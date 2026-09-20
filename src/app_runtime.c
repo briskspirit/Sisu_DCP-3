@@ -31,6 +31,7 @@
 
 void app_runtime_init(app_t *app) {
     app->route = APP_ROUTE_POWER_OFF;
+    app->power_on_pending = false;
     app->powerup_stage = APP_POWERUP_DONE;
     app->backlight_force_active = true;
     app->backlight_force_on = false;
@@ -59,7 +60,7 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
         }
         /* No alarm, incoming-call, SMS or clock editor can escape this state.
          * Battery protection and the ordinary power-off path remain live. */
-        changed |= tick_power_off(app);
+        changed |= tick_power_off(app, now_ms);
         changed |= tick_contact_service(app, now_ms);
         changed |= poll_battery(app, now_ms);
         return changed;
@@ -68,7 +69,7 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
     if (app->route == APP_ROUTE_POWERUP && tick_powerup(app, now_ms)) {
         changed = true;
     }
-    if (tick_power_off(app)) {
+    if (tick_power_off(app, now_ms)) {
         changed = true;
     }
 

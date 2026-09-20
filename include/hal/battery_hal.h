@@ -23,6 +23,7 @@
 typedef enum {
     BATTERY_POWER_ON_OK = 0,   /* >= VBAT_POWERON_MIN_MV, or charger present */
     BATTERY_POWER_ON_REFUSE,   /* < VBAT_POWERON_MIN_MV, no charger: silent hard refuse */
+    BATTERY_POWER_ON_PENDING,  /* bounded startup qualification still acquiring */
 } battery_power_on_gate_t;
 
 void battery_hal_init(void);

@@ -10,11 +10,13 @@
 #include "hal/rtc_alarm_hal.h"
 #include "services/modem_service.h"
 #include "services/strings.h"
+#include "services/timebase.h"
 #include "ui/status_chrome.h"
 #include "ui/ui.h"
 #include "storage/store_service.h"
 
 #define POWER_MENU_COUNT 5u
+#define POWER_ON_QUALIFY_TIMEOUT_MS 3000u
 
 /* Quick power/profile menu. Each entry carries its v6.00 string id (SID)
  * alongside the English literal, which stays BOTH the fallback and the record
@@ -126,9 +128,17 @@ bool handle_power_menu_key(app_t *app, uint16_t key, uint32_t now) {
     return true;
 }
 
-bool tick_power_off(app_t *app) {
+bool tick_power_off(app_t *app, uint32_t now) {
     if (app->route != APP_ROUTE_POWER_OFF) {
+        app->power_on_pending = false;
         return false;
+    }
+    if (app->power_on_pending) {
+        if (time_diff_ms(now, app->power_on_deadline_ms) >= 0) {
+            app->power_on_pending = false;
+        } else if (power_on(app, now) && app->route != APP_ROUTE_POWER_OFF) {
+            return true;
+        }
     }
     if (app->power_off_failed && modem_service_is_powered_off()) {
         /* A terminal fault keeps sampling the already-authorized PWRMON-low
@@ -157,6 +167,7 @@ bool tick_power_off(app_t *app) {
 
 void power_off(app_t *app, uint32_t now) {
     (void)now;
+    app->power_on_pending = false;
     /* Net Monitor can drive BQ25171 /CE high for a bench test. Restore the
      * production fail-enabled state before entering soft-off: with Rev B2 R77
      * DNP, retaining that override can prevent a flat pack from accepting a
@@ -257,7 +268,19 @@ bool power_on(app_t *app, uint32_t now) {
      * 2100 mV floor and silent refusal are original behavior. Rev B2 feeds that
      * decision from its rolling bounded LTC qualification rather than one
      * filtered value; a charger remains the recovery exception. */
-    if (!board_diag_battery_power_on_allowed()) {
+    board_diag_power_on_status_t status = board_diag_battery_power_on_status();
+    if (status == BOARD_DIAG_POWER_ON_PENDING) {
+        /* The wake hold is a one-shot event and can precede the fifth valid
+         * LTC sample. Keep that request, even after key release, but never
+         * turn a missing gauge into an indefinite wake or a battery bypass. */
+        if (!app->power_on_pending) {
+            app->power_on_pending = true;
+            app->power_on_deadline_ms = now + POWER_ON_QUALIFY_TIMEOUT_MS;
+        }
+        return true;
+    }
+    app->power_on_pending = false;
+    if (status != BOARD_DIAG_POWER_ON_ALLOWED) {
         /* Silent refuse: stay in soft-off (route is already POWER_OFF). */
         return false;
     }

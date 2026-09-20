@@ -22,6 +22,12 @@ typedef enum {
     BOARD_DIAG_CHARGE_DISABLED,
 } board_diag_charge_state_t;
 
+typedef enum {
+    BOARD_DIAG_POWER_ON_REFUSED = 0,
+    BOARD_DIAG_POWER_ON_PENDING,
+    BOARD_DIAG_POWER_ON_ALLOWED,
+} board_diag_power_on_status_t;
+
 typedef struct {
     uint16_t battery_mv; /* Nokia 65 mA reference-load domain */
     bool battery_valid;
@@ -130,7 +136,10 @@ bool board_diag_battery_supply_failure_indicates_empty(void);
 /* Power-on admission uses the rolling bounded LTC qualification even if the
  * newest conversion failed. A refusal gets one fresh charger-input sample, but
  * bypasses the battery floor only when /CE readback and BQ status prove active
- * recovery. Called only on an explicit power-on action and adds no dormant wake. */
+ * recovery. Pending is not permission to start: an explicit power-on request
+ * may wait for qualification while awake, with its own bounded deadline. */
+board_diag_power_on_status_t board_diag_battery_power_on_status(void);
+/* Fail-closed convenience for callers that cannot defer their action. */
 bool board_diag_battery_power_on_allowed(void);
 bool board_diag_charger_connected(void);
 /* Effective headset insert state (physical OR the bench force override),

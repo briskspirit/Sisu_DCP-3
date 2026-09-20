@@ -429,7 +429,8 @@ int main(void) {
         if (s_app.route == APP_ROUTE_POWER_OFF) {
             runtime_watchdog_note_phase(RUNTIME_WATCHDOG_PHASE_POWER_OFF);
         }
-        power_sleep_tick(s_app.route == APP_ROUTE_POWER_OFF,
+        power_sleep_tick(s_app.route == APP_ROUTE_POWER_OFF &&
+                             !s_app.power_on_pending,
                          s_app.battery_charger_connected,
                          now); /* may never return (dormant off state) */
         /* Quiet clock-down: while the screen is dim in standby with

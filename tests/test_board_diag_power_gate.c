@@ -149,6 +149,26 @@ static void test_qualified_history_survives_invalid_latest_sample(void) {
           "qualified history needs no synchronous ADC work");
 }
 
+static void test_pending_qualification_is_not_refusal_or_permission(void) {
+    s_production_gate = BATTERY_POWER_ON_PENDING;
+    s_fresh_charger_present = false;
+    check(board_diag_battery_power_on_status() == BOARD_DIAG_POWER_ON_PENDING,
+          "unfinished LTC acquisition remains distinguishable from low voltage");
+    check(!board_diag_battery_power_on_allowed(),
+          "pending acquisition never passes the boolean admission helper");
+    s_fresh_charger_present = true;
+    check(board_diag_battery_power_on_status() == BOARD_DIAG_POWER_ON_ALLOWED,
+          "fresh enabled active charger permits recovery during qualification");
+    s_charge_status = BATTERY_CHARGE_IDLE;
+    check(board_diag_battery_power_on_status() == BOARD_DIAG_POWER_ON_PENDING,
+          "connected but idle charger cannot bypass pending qualification");
+    s_charge_status = BATTERY_CHARGE_ACTIVE;
+    s_fresh_charger_present = false;
+    s_production_gate = BATTERY_POWER_ON_REFUSE;
+    check(board_diag_battery_power_on_status() == BOARD_DIAG_POWER_ON_REFUSED,
+          "completed unsuccessful qualification remains a terminal refusal");
+}
+
 static void test_valid_battery_uses_voltage_gate_without_adc_work(void) {
     s_production_gate = BATTERY_POWER_ON_REFUSE;
     s_fresh_charger_present = false;
@@ -247,6 +267,7 @@ int main(void) {
     charger_control_service_init(0u, 0u);
     test_unknown_battery_requires_fresh_charger_evidence();
     test_qualified_history_survives_invalid_latest_sample();
+    test_pending_qualification_is_not_refusal_or_permission();
     test_valid_battery_uses_voltage_gate_without_adc_work();
     test_unknown_battery_does_not_trust_stale_cached_charger();
     test_supply_failure_needs_fresh_marginal_pack_evidence();

@@ -839,7 +839,7 @@ run test_call_waiting_handoff src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # ge
 run test_phonebook_speed_call src/apps/phonebook_app.c src/services/feature_gates.c src/ui/menu_visible.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c" src/ui/framebuffer.c "${DEAD_CODE_FLAGS[@]}"
 run test_profiles_app       src/apps/profiles_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_settings_restore   src/apps/settings_app.c "${DEAD_CODE_FLAGS[@]}"
-run test_power_app          src/apps/power_app.c "${DEAD_CODE_FLAGS[@]}"
+run test_power_app          src/apps/power_app.c src/hal/power_button_hal.c src/hal/battery_gauge_logic.c src/services/event_queue.c "${DEAD_CODE_FLAGS[@]}"
 run test_powerup_app        src/apps/powerup_app.c src/audio/audio_levels.c "${DEAD_CODE_FLAGS[@]}"
 run test_contact_service_render src/apps/powerup_app.c src/ui/framebuffer.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c" "${DEAD_CODE_FLAGS[@]}"
 run test_snake_app          src/apps/snake_app.c "${DEAD_CODE_FLAGS[@]}"

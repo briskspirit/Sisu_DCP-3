@@ -353,7 +353,7 @@ battery_power_on_gate_t battery_hal_power_on_gate(bool charger) {
         return BATTERY_POWER_ON_OK;
     }
     if (!battery_power_on_qualifier_ready(&s_power_on_qualifier)) {
-        return BATTERY_POWER_ON_REFUSE;
+        return BATTERY_POWER_ON_PENDING;
     }
     return battery_hal_power_on_gate_from_mv(
         battery_power_on_qualifier_average_mv(&s_power_on_qualifier), false);

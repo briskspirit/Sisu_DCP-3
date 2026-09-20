@@ -3,6 +3,10 @@
 
 #include "apps/power_app.h"
 #include "apps/powerup_app.h"
+#include "hal/battery_gauge_logic.h"
+#include "hal/power_button_hal.h"
+#include "services/board_diag_service.h"
+#include "services/input_keys.h"
 #include "storage/store_service.h"
 
 static int s_failures;
@@ -12,9 +16,30 @@ static uint32_t s_failure_reads;
 static unsigned s_battery_draws;
 static uint8_t s_last_battery_level;
 static bool s_service_fault, s_power_allowed = true;
+static bool s_use_qualifier;
+static bool s_power_pending;
+static battery_power_on_qualifier_t s_qualifier;
 static unsigned s_modem_starts, s_codec_starts, s_success_starts, s_service_starts;
 bool store_service_contact_service_required(void) { return s_service_fault; }
-bool board_diag_battery_power_on_allowed(void) { return s_power_allowed; }
+board_diag_power_on_status_t board_diag_battery_power_on_status(void) {
+    if (s_use_qualifier) {
+        if (!battery_power_on_qualifier_ready(&s_qualifier)) {
+            return BOARD_DIAG_POWER_ON_PENDING;
+        }
+        return battery_power_on_qualifier_average_mv(&s_qualifier) >= 2100u
+            ? BOARD_DIAG_POWER_ON_ALLOWED : BOARD_DIAG_POWER_ON_REFUSED;
+    }
+    if (s_power_pending) {
+        return BOARD_DIAG_POWER_ON_PENDING;
+    }
+    return s_power_allowed
+        ? BOARD_DIAG_POWER_ON_ALLOWED : BOARD_DIAG_POWER_ON_REFUSED;
+}
+void gpio_init(unsigned int gpio) { (void)gpio; }
+void gpio_set_dir(unsigned int gpio, bool output) { (void)gpio; (void)output; }
+void gpio_pull_up(unsigned int gpio) { (void)gpio; }
+bool gpio_get(unsigned int gpio) { (void)gpio; return true; }
+int32_t time_diff_ms(uint32_t a, uint32_t b) { return (int32_t)(a - b); }
 void modem_service_power_on(void) { s_modem_starts++; }
 void core1_services_codec_init(void) { s_codec_starts++; }
 void start_powerup(app_t *app, uint32_t now) {
@@ -81,6 +106,100 @@ void draw_text_block(framebuffer_t *fb,
     (void)max_lines;
 }
 
+static void test_held_wake_waits_for_battery_samples(uint32_t release_ms) {
+    app_t app = {.route = APP_ROUTE_POWER_OFF};
+    power_button_t button;
+    event_queue_t queue;
+    power_button_init(&button);
+    power_button_seed_held(&button, 0u);
+    event_queue_init(&queue);
+    battery_power_on_qualifier_init(&s_qualifier);
+    s_use_qualifier = true;
+    s_service_fault = false;
+    unsigned starts = s_modem_starts;
+    unsigned holds = 0u;
+
+    /* The first LTC conversion settles; five later 250 ms conversions must
+     * qualify the pack after the one-shot 1.2 s held-key event. */
+    uint32_t sequence = 0u;
+    for (uint32_t now = 200u; now <= 2500u; now += 10u) {
+        if ((now - 200u) % 250u == 0u) {
+            sequence++;
+            battery_power_on_qualifier_observe(
+                &s_qualifier, 0u, sequence, sequence > 1u, 2550u);
+        }
+        power_button_feed(&button, now < release_ms, &queue, now);
+        input_event_t event;
+        while (event_queue_pop(&queue, &event)) {
+            if (event.type == EVENT_KEY_HOLD && event.code == KEY_POWER) {
+                holds++;
+                (void)power_on(&app, event.when_ms);
+            }
+        }
+        (void)tick_power_off(&app, now);
+        if (now < 1450u) {
+            check(s_modem_starts == starts,
+                  "wake does not start modem before battery qualification");
+        }
+    }
+    if (release_ms > POWER_BUTTON_POWER_ON_HOLD_MS) {
+        check(holds == 1u, "qualifying Power hold produces just one hold event");
+        check(app.route == APP_ROUTE_POWERUP && s_modem_starts == starts + 1u,
+              "held wake starts once when battery qualification completes without a second press");
+    } else {
+        check(holds == 0u && app.route == APP_ROUTE_POWER_OFF &&
+                  !app.power_on_pending && s_modem_starts == starts,
+              "short wake press never starts after battery samples become ready");
+    }
+    s_use_qualifier = false;
+}
+
+static void test_pending_power_on_is_bounded(void) {
+    app_t app = {.route = APP_ROUTE_POWER_OFF};
+    unsigned starts = s_modem_starts;
+    s_power_pending = true;
+    check(power_on(&app, 100u) && app.power_on_pending &&
+              app.route == APP_ROUTE_POWER_OFF && s_modem_starts == starts,
+          "pending admission accepts intent without starting hardware");
+    uint32_t deadline = app.power_on_deadline_ms;
+    check(power_on(&app, 200u) && app.power_on_deadline_ms == deadline,
+          "repeated pending requests cannot extend the qualification deadline");
+    check(!tick_power_off(&app, deadline - 1u) && app.power_on_pending,
+          "request remains pending just before its deadline");
+    check(!tick_power_off(&app, deadline) && !app.power_on_pending &&
+              s_modem_starts == starts,
+          "missing battery evidence expires without starting hardware");
+    s_power_pending = false;
+    s_power_allowed = true;
+    (void)tick_power_off(&app, deadline + 10u);
+    check(s_modem_starts == starts, "expired request cannot cause a late power-on");
+
+    s_power_pending = true;
+    check(power_on(&app, 5000u), "new explicit request can qualify again");
+    s_power_pending = false;
+    s_power_allowed = false;
+    check(!tick_power_off(&app, 5100u) && !app.power_on_pending &&
+              s_modem_starts == starts,
+          "confirmed low or unusable battery cancels pending request immediately");
+    s_power_allowed = true;
+    (void)tick_power_off(&app, 5200u);
+    check(s_modem_starts == starts, "later battery recovery cannot revive a refused request");
+
+    s_power_pending = true;
+    check(power_on(&app, UINT32_MAX - 2999u) && app.power_on_deadline_ms == 0u,
+          "pending deadline may wrap to zero without becoming a sentinel");
+    check(!tick_power_off(&app, UINT32_MAX) && app.power_on_pending,
+          "wrapped deadline is still pending before expiry");
+    check(!tick_power_off(&app, 0u) && !app.power_on_pending,
+          "wrapped deadline expires at zero");
+
+    check(power_on(&app, 100u), "route-change case begins pending");
+    app.route = APP_ROUTE_CLOCK_ALARM;
+    (void)tick_power_off(&app, 200u);
+    check(!app.power_on_pending, "another route cancels deferred power-on intent");
+    s_power_pending = false;
+}
+
 int main(void) {
     app_t app = {0};
     app.route = APP_ROUTE_POWER_OFF;
@@ -133,22 +252,22 @@ int main(void) {
     app.battery_charge_active = false;
     app.battery_charger_connected = false;
 
-    check(!tick_power_off(&app) && !app.power_off_failed,
+    check(!tick_power_off(&app, 0u) && !app.power_off_failed,
           "quiet soft-off ignores an empty failure latch");
 
     s_failure_pending = true;
-    check(tick_power_off(&app) && app.power_off_failed && app.dirty &&
+    check(tick_power_off(&app, 0u) && app.power_off_failed && app.dirty &&
               app.backlight_force_active && app.backlight_force_on,
           "terminal modem shutdown failure becomes a visible powered-off fault");
-    check(!tick_power_off(&app),
+    check(!tick_power_off(&app, 0u),
           "the app-visible shutdown fault is consumed exactly once");
 
     s_modem_powered_off = true;
     app.dirty = false;
-    check(tick_power_off(&app) && !app.power_off_failed && app.dirty &&
+    check(tick_power_off(&app, 0u) && !app.power_off_failed && app.dirty &&
               app.backlight_force_active && !app.backlight_force_on,
           "late safe shutdown retires the warning and restores dark soft-off");
-    check(!tick_power_off(&app),
+    check(!tick_power_off(&app, 0u),
           "late shutdown completion is also handled exactly once");
     s_modem_powered_off = false;
 
@@ -156,9 +275,15 @@ int main(void) {
     app.route = APP_ROUTE_STANDBY;
     s_failure_pending = true;
     uint32_t reads_before = s_failure_reads;
-    check(!tick_power_off(&app) && s_failure_pending &&
+    check(!tick_power_off(&app, 0u) && s_failure_pending &&
               s_failure_reads == reads_before,
           "a non-power-off route neither steals nor renders the failure event");
+
+    s_failure_pending = false;
+    test_held_wake_waits_for_battery_samples(UINT32_MAX);
+    test_held_wake_waits_for_battery_samples(1210u);
+    test_held_wake_waits_for_battery_samples(1000u);
+    test_pending_power_on_is_bounded();
 
     if (s_failures != 0) {
         fprintf(stderr, "%d power app test(s) failed\n", s_failures);

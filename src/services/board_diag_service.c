@@ -244,29 +244,37 @@ static bool charger_can_recover_pack(bool charger_present) {
             BATTERY_CHARGER_ACTIVE;
 }
 
-bool board_diag_battery_power_on_allowed(void) {
+board_diag_power_on_status_t board_diag_battery_power_on_status(void) {
     bool recovery_active = charger_can_recover_pack(
         s_charger_connected);
     if (s_batt_force_active || s_charger_forced) {
         return battery_hal_power_on_gate_from_mv(
-                   s_battery_mv, recovery_active) !=
-               BATTERY_POWER_ON_REFUSE;
+                   s_battery_mv, recovery_active) == BATTERY_POWER_ON_OK
+            ? BOARD_DIAG_POWER_ON_ALLOWED : BOARD_DIAG_POWER_ON_REFUSED;
     }
     /* The rolling qualifier deliberately tolerates failed conversions, so do
      * not let one invalid latest snapshot discard its bounded history. Cached
      * charger presence is trusted only alongside a valid battery snapshot;
      * otherwise the fresh GP43 observation below must prove it. */
-    if (battery_hal_power_on_gate(
-            s_battery_valid && recovery_active) !=
-        BATTERY_POWER_ON_REFUSE) {
-        return true;
+    battery_power_on_gate_t gate = battery_hal_power_on_gate(
+        s_battery_valid && recovery_active);
+    if (gate == BATTERY_POWER_ON_OK) {
+        return BOARD_DIAG_POWER_ON_ALLOWED;
     }
     /* Sample VIN synchronously, but only an enabled BQ ACTIVE state may bypass
      * the low-voltage gate. A completed, inhibited, or faulted charger cannot
      * support modem startup merely because its adapter is still attached. */
     bool charger_present =
         battery_hal_charger_input_present_now(time_ms());
-    return charger_can_recover_pack(charger_present);
+    if (charger_can_recover_pack(charger_present)) {
+        return BOARD_DIAG_POWER_ON_ALLOWED;
+    }
+    return gate == BATTERY_POWER_ON_PENDING
+        ? BOARD_DIAG_POWER_ON_PENDING : BOARD_DIAG_POWER_ON_REFUSED;
+}
+
+bool board_diag_battery_power_on_allowed(void) {
+    return board_diag_battery_power_on_status() == BOARD_DIAG_POWER_ON_ALLOWED;
 }
 
 bool board_diag_headset_inserted(void) {
