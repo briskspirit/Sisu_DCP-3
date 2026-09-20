@@ -26,12 +26,12 @@ contract and bench-qualified subsystem inventory.
 - Git
 - Python 3
 - ARM embedded toolchain compatible with Pico SDK builds
-- Raspberry Pi Pico SDK 2.2.0 at qualified commit
-  `a1438dff1d38bd9c65dbd693f0e5db4b9ae91779`
+- Raspberry Pi Pico SDK 2.3.1 at pinned commit
+  `079c6f39023649b154152db30f1d781e884879bc`
 
-No SDK setup is required. The first configure fetches the exact qualified SDK
-commit into a local `.pico-sdk/` cache (gitignored); later configures select and
-verify that checkout automatically. A mismatched revision or dirty SDK worktree
+No SDK setup is required on a fresh checkout. The first configure fetches the
+pinned SDK commit into a local `.pico-sdk/` cache (gitignored); later configures
+select and verify that checkout automatically. A mismatched revision or dirty SDK worktree
 fails the configure instead of silently changing the firmware toolchain. The
 default build is the CDC-enabled service firmware used for development and
 bench work:
@@ -40,6 +40,11 @@ bench work:
 cmake -S . -B build
 cmake --build build
 ```
+
+An existing 2.2.0 checkout is not updated silently. To retain it for comparison,
+clone 2.3.1 into a separate directory and pass that directory through
+`PICO_SDK_PATH` in a new build directory. Initialize its `lib/tinyusb` submodule;
+the revision and cleanliness checks still apply.
 
 An intentional SDK experiment can bypass qualification with
 `-DSISU_ALLOW_UNQUALIFIED_PICO_SDK=ON`; CMake emits a warning and the result is
@@ -105,3 +110,34 @@ SISU_TEST_REQUIRE_ORIGINAL_ASSETS=1 tests/run_tests.sh
 
 CI deliberately sets `SISU_TEST_FORCE_SYNTHETIC_ASSETS=1` on both Linux and
 macOS so the public path and both linker variants remain continuously tested.
+
+## SDK Regression Checks
+
+The 2.3.1 upgrade retains the existing POWMAN checkpoint, custom core1 flash
+park, DMA/PIO ownership, and standby policy. It does not adopt `pico_low_power`
+or change the compiler. SDK 2.3.0 is not supported because of its RP2350 sleep
+regression; 2.3.1 includes the [upstream fix](https://github.com/raspberrypi/pico-sdk/pull/3127).
+
+Validation completed on the upgrade branch (firmware built with Arm GCC 15.3.1;
+hardware tests on Rev B2/A4):
+
+- Service, release, and optional diagnostic builds; flash-boundary and stack gates; release
+  exclusion of USB CDC and the privileged console.
+- Host suites with original assets (137 tests) and synthetic assets (136 tests).
+- All six upstream timer/synchronization tests on hardware, covering software
+  and hardware spinlocks, plus 400 POWMAN XOSC/LPOSC handoff cycles and rollover.
+- 512 scratch-record replacements/remounts, including codec playback and
+  modem-side PIO/DMA park paths; no flash-pause or DMA-abort timeouts.
+- USB output backpressure and 30 CDC reopen cycles; no spontaneous reset.
+- Network registration, self-sent text and three-part picture reception, local
+  storage, and recovery from intentional main-loop and flash-watchdog hangs.
+
+The reproducible standalone hardware tests are in
+[`tools/sdk_qualification`](tools/sdk_qualification/README.md). They are separate
+test images, not code added to the phone runtime.
+
+Before merging the upgrade, repeat unplugged dormant wake by keypad and incoming
+SMS/call, and power-off/wake. Check real bidirectional call audio as part of that
+call test. The USB-connected bridge exercise had no modem DVI clock and does not
+prove voice quality. Release firmware has been built, not bench-qualified, on
+2.3.1. The previously measured standby-current figures have not been remeasured.

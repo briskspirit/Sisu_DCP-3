@@ -17,10 +17,12 @@ engineering tools rather than features of the original phone.
 
 ## Build
 
-The project uses CMake and the qualified Raspberry Pi Pico SDK 2.2.0 commit
-`a1438dff1d38bd9c65dbd693f0e5db4b9ae91779`. A local SDK checkout in
+The project uses CMake and pins Raspberry Pi Pico SDK 2.3.1 to commit
+`079c6f39023649b154152db30f1d781e884879bc`. A local SDK checkout in
 `.pico-sdk/pico_sdk-src` is selected automatically; an explicit
 `PICO_SDK_PATH` overrides the path but must identify that same clean commit.
+See [SDK regression checks](BUILD.md#sdk-regression-checks) for qualification
+coverage and the remaining physical checks on the upgrade branch.
 
 ```sh
 cmake -S . -B build

@@ -64,10 +64,9 @@ static uint32_t calibrated_lposc_hz(void) {
 }
 
 static void powman_timer_checkpoint(void) {
-    /* SDK 2.2.0's tick-source setters stop and restart POWMAN from its last
-     * explicitly set time, not its live count. Checkpointing immediately before
-     * each source change ports the preserving-pause behavior added in SDK 2.3.0
-     * without adopting that release's RP2350 sleep_until() regression. */
+    /* Preserve the explicit checkpoint used with SDK 2.2.0. SDK 2.3.1 also
+     * preserves the counter internally; retaining this keeps the existing
+     * standby handoff unchanged while the SDK upgrade is qualified. */
     uint64_t current_ms = powman_timer_get_ms();
     powman_timer_set_ms(current_ms);
     if (!powman_timer_is_running()) {

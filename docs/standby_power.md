@@ -65,16 +65,18 @@ TIMER0 does not advance while its clock is stopped. The standby HAL therefore
 uses the POWMAN AON counter as wall-time authority across dormant and rebases
 the firmware timebase before normal scheduling resumes.
 
-Pico SDK 2.2.0 stops POWMAN while changing tick sources and may restart from
-the last explicitly written value. The HAL checkpoints the live counter before
-each XOSC/LPOSC handoff and uses the RP2350 OTP LPOSC calibration when valid.
-This local workaround is part of the qualified clock contract.
+The HAL checkpoints the live counter before each XOSC/LPOSC handoff and uses
+the RP2350 OTP LPOSC calibration when valid. The checkpoint originally worked
+around SDK 2.2.0 restarting from the last explicitly written counter value.
+SDK 2.3.1 preserves that counter internally, but the explicit checkpoint is
+retained to keep the existing standby handoff unchanged during qualification.
 
-The project stays pinned to SDK 2.2.0 until a newer SDK is reviewed for RP2350
-timer, POWMAN, USB, multicore, flash, DMA, and PIO changes and passes the full
-standby regression gate. SDK 2.3.0 is specifically unqualified because its
-RP2350 `sleep_until()` regression affects the 125 Hz main loop. An SDK version
-bump is not a routine build-only change.
+The upgrade branch pins SDK 2.3.1, which fixes the RP2350 `sleep_until()`
+regression in 2.3.0. The upstream timer/synchronization tests and POWMAN source
+handoff tests pass on the DUT. Unplugged dormant, real wake inputs, and P1.7
+still require regression checks before merging; USB-connected tests do not
+substitute for them. See [SDK regression checks](../BUILD.md#sdk-regression-checks).
+The current measurements below predate this upgrade.
 
 ## Maintenance Policy
 

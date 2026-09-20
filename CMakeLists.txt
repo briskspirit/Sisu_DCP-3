@@ -16,11 +16,11 @@ if(NOT PICO_SDK_PATH AND NOT DEFINED ENV{PICO_SDK_PATH}
 endif()
 
 set(SISU_PICO_SDK_QUALIFIED_COMMIT
-    "a1438dff1d38bd9c65dbd693f0e5db4b9ae91779")
+    "079c6f39023649b154152db30f1d781e884879bc")
 set(SISU_ALLOW_UNQUALIFIED_PICO_SDK OFF CACHE BOOL
     "Allow an SDK other than the clean, qualified pico-sdk commit (development only)")
 set(PICO_SDK_FETCH_FROM_GIT ON CACHE BOOL "Fetch pico-sdk when PICO_SDK_PATH is not set")
-# FORCE also upgrades an existing build cache that still names the mutable 2.2.0
+# FORCE also updates build caches that still name an older revision or mutable
 # tag. Alternate SDKs remain possible only through the explicit unqualified-SDK
 # switch, so an ordinary configure cannot silently change the toolchain.
 set(PICO_SDK_FETCH_FROM_GIT_TAG "${SISU_PICO_SDK_QUALIFIED_COMMIT}" CACHE STRING
