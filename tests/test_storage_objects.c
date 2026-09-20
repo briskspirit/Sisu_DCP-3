@@ -236,9 +236,9 @@ static storage_user_usage_t check_usage(void) {
 static void test_accounting(void) {
     fresh();
     storage_user_usage_t usage = check_usage();
-    assert(usage.allocated_bytes == 12u * 4096u);
+    assert(usage.allocated_bytes == 10u * 4096u);
     for (unsigned i = 0; i < STORAGE_OBJECT_COLLECTION_COUNT; i++) {
-        assert(usage.pools[i].allocated_bytes == (i == STORAGE_USER_OTHER ? 16384u : 8192u));
+        assert(usage.pools[i].allocated_bytes == 8192u);
         assert(usage.pools[i].contents.files == (i == STORAGE_USER_OTHER ? 1u : 0u));
     }
     uint32_t id;
@@ -446,6 +446,77 @@ static void test_initialization_cuts(void) {
     printf("object initialization: %u torn-write cases passed\n", count * 3u);
 }
 
+static void test_lazy_cards_at_full_upgrade(void) {
+    fresh();
+    uint32_t id, scanned;
+    assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);
+    memset(data, 0x5c, sizeof(data));
+    assert(storage_object_write(STORAGE_OBJECT_CONTACT, id, data, 80u) == STORAGE_RECORD_OK);
+    assert(storage_object_scan_begin(STORAGE_OBJECT_BUSINESS_CARD) == STORAGE_RECORD_NOT_FOUND);
+    unsigned records = 0;
+    storage_record_result_t rc;
+    while ((rc = backend.write(&backend, (uint16_t)(0x7700u + records), data, sizeof(data))) == STORAGE_RECORD_OK)
+        records++;
+    assert(rc == STORAGE_RECORD_FULL && records > 0u);
+    storage_user_usage_t usage = check_usage();
+    assert(usage.pools[STORAGE_USER_OTHER].allocated_bytes == usage.pools[STORAGE_USER_OTHER].limit_bytes);
+    /* This is the pre-card layout: existing collections and no cards directory.
+     * Opening it at boot must remain read-only, even with OTHER exhausted. */
+    reopen();
+    unsigned before = operations;
+    assert(storage_object_scan_begin(STORAGE_OBJECT_BUSINESS_CARD) == STORAGE_RECORD_NOT_FOUND);
+    assert(storage_object_scan_begin(STORAGE_OBJECT_CONTACT) == STORAGE_RECORD_OK);
+    assert(storage_object_scan_next(&scanned) == STORAGE_RECORD_OK && scanned == id);
+    storage_object_scan_end();
+    size_t len;
+    assert(storage_object_read(STORAGE_OBJECT_CONTACT, id, readback, sizeof(readback), &len) == STORAGE_RECORD_OK);
+    assert(len == 80u && memcmp(data, readback, len) == 0 && operations == before);
+    assert(storage_object_write(STORAGE_OBJECT_BUSINESS_CARD, id, data, 80u) == STORAGE_RECORD_FULL);
+    reopen();
+    for (unsigned i = 0; i < records; i++)
+        assert(storage_lfs_remove(&backend, (uint16_t)(0x7700u + i)) == STORAGE_RECORD_OK);
+    assert(storage_object_write(STORAGE_OBJECT_BUSINESS_CARD, id, data, 80u) == STORAGE_RECORD_OK);
+    reopen();
+    assert(storage_object_scan_begin(STORAGE_OBJECT_BUSINESS_CARD) == STORAGE_RECORD_OK);
+    assert(storage_object_scan_next(&scanned) == STORAGE_RECORD_OK && scanned == id);
+    storage_object_scan_end();
+}
+
+static void test_card_directory_cuts(void) {
+    fresh();
+    uint32_t id;
+    assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);
+    memset(data, 0x6b, sizeof(data));
+    assert(storage_object_write(STORAGE_OBJECT_CONTACT, id, data, 80u) == STORAGE_RECORD_OK);
+    memcpy(baseline, media, sizeof(media));
+    operations = 0;
+    assert(storage_object_write(STORAGE_OBJECT_BUSINESS_CARD, id, data, sizeof(data)) == STORAGE_RECORD_OK);
+    unsigned count = operations;
+    for (unsigned point = 1; point <= count; point++) {
+        for (tear = 0; tear < 3; tear++) {
+            for (unsigned mode = 0; mode < 2; mode++) {
+                storage_lfs_deinit(); memcpy(media, baseline, sizeof(media)); reopen();
+                operations = 0; cut_at = point; return_error = mode != 0u;
+                if (setjmp(cut) == 0) {
+                    storage_record_result_t rc = storage_object_write(STORAGE_OBJECT_BUSINESS_CARD, id, data, sizeof(data));
+                    assert(return_error && rc == STORAGE_RECORD_ERROR);
+                }
+                cut_at = 0; return_error = false;
+                if (mode == 0u) reopen();
+                size_t len;
+                assert(storage_object_read(STORAGE_OBJECT_CONTACT, id, readback, sizeof(readback), &len) == STORAGE_RECORD_OK);
+                assert(len == 80u && memcmp(data, readback, len) == 0);
+                storage_record_result_t rc = storage_object_read(STORAGE_OBJECT_BUSINESS_CARD, id, readback, sizeof(readback), &len);
+                assert(rc == STORAGE_RECORD_NOT_FOUND || (rc == STORAGE_RECORD_OK &&
+                    len == sizeof(data) && memcmp(data, readback, len) == 0));
+                assert(storage_object_write(STORAGE_OBJECT_BUSINESS_CARD, id, data, sizeof(data)) == STORAGE_RECORD_OK);
+                (void)check_usage();
+            }
+        }
+    }
+    printf("lazy card directory: %u torn-write cases passed\n", count * 6u);
+}
+
 static void test_delete_cuts(void) {
     fresh();
     uint32_t id, neighbor;
@@ -598,6 +669,8 @@ int main(void) {
     test_state();
     test_basics();
     test_initialization_cuts();
+    test_lazy_cards_at_full_upgrade();
+    test_card_directory_cuts();
     test_write_cuts(80u, sizeof(data), false);
     test_write_cuts(sizeof(data), 80u, false);
     test_write_cuts(80u, 0u, false);

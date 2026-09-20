@@ -576,6 +576,7 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
         business_card_service_tick();
         return;
     }
+    business_card_service_maintain(now);
     uint32_t wall = message_datetime_seconds(wall_time);
     s_status.retention_clock_valid = wall != 0u;
     if (s_retry_pending && (int32_t)(now - s_retry_at) < 0) return;

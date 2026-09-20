@@ -38,7 +38,8 @@ storage_record_result_t storage_object_get_state(storage_object_collection_t col
 storage_record_result_t storage_object_set_state(storage_object_collection_t collection,
     uint32_t id, uint32_t state);
 /* A single startup scan owns the iterator. Close it before mutating objects.
- * NOT_FOUND means end of collection; all other failures are real errors. */
+ * NOT_FOUND means end of collection, or an absent lazily created card directory
+ * at scan_begin; all other failures are real errors. */
 storage_record_result_t storage_object_scan_begin(storage_object_collection_t collection);
 storage_record_result_t storage_object_scan_next(uint32_t *id);
 void storage_object_scan_end(void);

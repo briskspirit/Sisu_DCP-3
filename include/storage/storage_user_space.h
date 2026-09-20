@@ -3,6 +3,10 @@
 
 #include "storage/storage_backend.h"
 
+/* Card receipts share OTHER, but must leave room for atomic user-record
+ * replacement and shared metadata relocation. This is not a new partition. */
+#define STORAGE_USER_CARD_HEADROOM_BYTES (16u * 1024u)
+
 typedef enum {
     STORAGE_USER_CONTACTS,
     STORAGE_USER_INBOX,

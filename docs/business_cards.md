@@ -59,14 +59,24 @@ The user-volume `cards` directory holds up to 16 complete receipts, including
 bounded deduplication history. Each file retains the assembled message's original
 segments, with an atomic attribute distinguishing unread, saved and discarded.
 The directory shares the existing OTHER budget; partition sizes do not change.
-Its metadata pair costs 8 KiB when the directory is first created.
+Its metadata pair costs 8 KiB when the first card is stored. An absent directory
+is an empty collection, so upgrading a full volume does not require an allocation
+at boot. If there is no room to create it, received cards remain staged.
 
 Partial cards use the existing pending-SMS budget, identity checks and expiry.
 Out-of-order parts, a split text prefix and reboot between parts are supported.
 Publication writes the card before removing its staging file. Exact retransmitted
 segments are recognized even after Save/Discard, while the retained receipt exists.
-The oldest consumed receipts may be removed to admit new cards, including under
-filesystem-budget pressure. Unread complete cards are never evicted or expired.
+Card writes leave 16 KiB of OTHER headroom for existing user-record updates and
+metadata relocation. The oldest consumed receipts may be removed to admit new
+cards. Idle maintenance also reclaims consumed history when unrelated writes
+use that headroom; another incoming card is not required. A receipt whose source
+still exists in staging is retained until publication cleanup finishes. Unread
+complete cards are never evicted or expired.
+
+After an I/O failure, idle maintenance retries the card cache reload at most once
+per second in the normal safe storage window. It does not require another SMS or
+reboot, and does not keep a powered-off phone awake solely to retry.
 
 Contact import reuses the card's globally allocated object ID. If power fails
 between writing the contact and consuming the card, retry verifies that exact

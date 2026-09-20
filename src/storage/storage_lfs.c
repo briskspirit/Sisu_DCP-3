@@ -642,6 +642,8 @@ storage_record_result_t storage_objects_open(void) {
     for (unsigned i = 0; i < STORAGE_OBJECT_COLLECTION_COUNT; i++) {
         rc = lfs_stat(&fs->fs, OBJECT_DIRS[i], &info);
         if (rc == LFS_ERR_NOENT) {
+            /* Upgrades must not need free space merely to read existing data. */
+            if (i == STORAGE_OBJECT_BUSINESS_CARD) continue;
             rc = budget_begin(fs, (storage_user_pool_t)i, false);
             if (rc != 0) return result_for(fs, rc);
             rc = lfs_mkdir(&fs->fs, OBJECT_DIRS[i]);
@@ -783,6 +785,15 @@ storage_record_result_t storage_object_write(storage_object_collection_t collect
     if (rc != 0) return result_for(fs, rc);
     rc = budget_begin(fs, (storage_user_pool_t)collection, false);
     if (rc != 0) return result_for(fs, rc);
+    if (collection == STORAGE_OBJECT_BUSINESS_CARD) {
+        unsigned reserve = STORAGE_USER_CARD_HEADROOM_BYTES / fs->cfg.block_size;
+        s_budget_left = s_budget_left > reserve ? s_budget_left - reserve : 0u;
+        rc = lfs_mkdir(&fs->fs, OBJECT_DIRS[collection]);
+        if (rc != 0 && rc != LFS_ERR_EXIST) {
+            budget_end();
+            return result_for(fs, rc);
+        }
+    }
     char temporary[32];
     object_temporary(collection, temporary);
     uint8_t header[OBJECT_HEADER];

@@ -16,6 +16,8 @@ typedef struct {
  * exact retransmission detection, including after Save/Discard. */
 void business_card_service_init(void);
 void business_card_service_tick(void);
+/* Bounded idle recovery/reclamation in the same safe storage window. */
+void business_card_service_maintain(uint32_t now_ms);
 bool business_card_service_idle(void);
 bool business_card_service_ready(void);
 uint32_t business_card_service_pending_first(void);

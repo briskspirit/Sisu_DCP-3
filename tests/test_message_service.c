@@ -714,6 +714,41 @@ static void test_business_cards(void) {
     assert(status().outbox == 0u);
 }
 
+static void test_card_runtime_recovery(void) {
+    for (unsigned save = 0u; save < 2u; save++) {
+        fresh();
+        uint32_t id = receive_card(1);
+        if (save) {
+            phonebook_entry_t entry;
+            assert(business_card_service_get(id, &entry));
+            assert(phonebook_service_import(id, &entry) == PHONEBOOK_OUTCOME_OK);
+        }
+        assert(business_card_service_request(id, save != 0u));
+        write_error = true; tick();
+        business_card_action_result_t result;
+        assert(business_card_service_pop_result(&result) && result.outcome == PHONEBOOK_OUTCOME_ERROR);
+        assert(!business_card_service_ready());
+        write_error = false; io_error = true;
+        drain();
+        assert(!business_card_service_ready() && message_service_sleep_ready());
+        io_error = false;
+        drain(); /* No new SMS, user action, or reboot may be needed. */
+        assert(business_card_service_ready() && business_card_service_pending_first() == id);
+        assert(card_action(id, save != 0u).outcome == PHONEBOOK_OUTCOME_OK);
+        assert(phonebook_service_count() == save);
+    }
+    /* A full pre-card OTHER budget must not latch Contact service at boot. */
+    fresh();
+    static uint8_t padding[4000];
+    unsigned records = 0;
+    storage_record_result_t rc;
+    while ((rc = backend.write(&backend, (uint16_t)(0x7700u + records), padding, sizeof(padding))) == STORAGE_RECORD_OK)
+        records++;
+    assert(rc == STORAGE_RECORD_FULL);
+    reopen();
+    assert(boot_faults == 0u && business_card_service_ready() && status().ready);
+}
+
 static void test_card_save_power_cuts(void) {
     fresh(); uint32_t id = receive_card(1);
     memcpy(baseline, media, sizeof(media));
@@ -803,7 +838,7 @@ static void test_card_budget_reclaims_consumed(void) {
     strcpy(body, head);
     memset(body + strlen(head), 'A', 800u - strlen(head));
     strcpy(body + 800u, "\r\nEND:VCARD\r\n");
-    uint32_t first = 0u;
+    uint32_t first = 0u, last = 0u;
     for (unsigned card = 0u; card < 12u; card++) {
         memset(&file, 0, sizeof(file));
         size_t len = strlen(body), count = (len + 119u) / 120u;
@@ -825,12 +860,47 @@ static void test_card_budget_reclaims_consumed(void) {
         assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);
         assert(business_card_service_publish(id, &file) == STORAGE_RECORD_OK);
         if (card == 0u) first = id;
+        last = id;
         assert(card_action(id, false).outcome == PHONEBOOK_OUTCOME_OK);
     }
     assert(!business_card_service_get(first, &((phonebook_entry_t){0})));
     storage_user_usage_t usage;
     assert(storage_user_get_usage(&usage) == STORAGE_RECORD_OK);
-    assert(usage.pools[STORAGE_USER_OTHER].allocated_bytes <= usage.pools[STORAGE_USER_OTHER].limit_bytes);
+    assert(usage.pools[STORAGE_USER_OTHER].allocated_bytes + STORAGE_USER_CARD_HEADROOM_BYTES <=
+           usage.pools[STORAGE_USER_OTHER].limit_bytes);
+    assert(backend.write(&backend, 0x7700u, padding, 1200u) == STORAGE_RECORD_OK);
+    uint32_t unread = receive_card(40);
+    assert(business_card_service_get(last, &((phonebook_entry_t){0})));
+    assert(backend.write(&backend, 0x7799u, padding, sizeof(padding)) == STORAGE_RECORD_OK);
+    /* Recreate the state after publication committed but staging cleanup did
+     * not. The receipt is already consumed and must not be resurrected. */
+    size_t len;
+    assert(storage_object_read(STORAGE_OBJECT_BUSINESS_CARD, last, wire, sizeof(wire), &len) == STORAGE_RECORD_OK);
+    assert(storage_object_write(STORAGE_OBJECT_PENDING_SMS, last, wire, len) == STORAGE_RECORD_OK);
+    reopen();
+    business_card_service_maintain(now);
+    assert(business_card_service_get(last, &((phonebook_entry_t){0})));
+    memcpy(baseline, media, sizeof(media));
+    operations = 0;
+    drain(); /* Legacy-record pressure alone must reclaim consumed history. */
+    unsigned count = operations;
+    assert(count > 0u);
+    assert(!business_card_service_get(last, &((phonebook_entry_t){0})));
+    assert(business_card_service_pending_first() == unread);
+    for (unsigned point = 1u; point <= count; point++) {
+        for (tear = 0u; tear < 3u; tear++) {
+            storage_lfs_deinit(); memcpy(media, baseline, sizeof(media)); reopen();
+            operations = 0; cut_at = point;
+            if (setjmp(cut) == 0) { drain(); assert(false); }
+            cut_at = 0; reopen(); drain();
+            assert(!business_card_service_get(last, &((phonebook_entry_t){0})));
+            assert(business_card_service_pending_first() == unread && status().pending == 0u);
+        }
+    }
+    printf("card pressure cleanup: %u torn-write cases passed\n", count * 3u);
+    assert(backend.write(&backend, 0x7700u, padding, sizeof(padding)) == STORAGE_RECORD_OK);
+    reopen();
+    assert(business_card_service_pending_first() == unread && boot_faults == 0u);
 }
 
 int main(void) {
@@ -840,6 +910,7 @@ int main(void) {
     test_expiry(); test_expiry_power_cuts(); test_control_admission();
     test_durable_receive_receipts();
     test_business_cards(); test_card_save_power_cuts(); test_card_publication_power_cuts();
+    test_card_runtime_recovery();
     test_card_limits_and_corruption();
     test_card_budget_reclaims_consumed();
     storage_lfs_deinit(); puts("PASS: local messages");

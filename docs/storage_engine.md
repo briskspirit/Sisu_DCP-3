@@ -150,13 +150,17 @@ The 384 KiB user volume has these starting budgets:
 | Recovery reserve | 32 KiB |
 
 The first four pools own their directory metadata pairs and file data blocks.
-The shared pool contains call lists, pictures, tones, T9 and divert history,
+The shared pool contains call lists, pictures, tones, T9 and divert history, business-card receipts,
 the durable object-ID allocator, root metadata and any unclassified filesystem
 overhead. Its constituent records also have separate file-count/byte diagnostics;
 they do not each have a separate physical quota.
 
-At startup, object initialization creates the
-directories and enables admission checks for ordinary user-record writes too.
+At startup, object initialization creates the four core collection directories
+and enables admission checks for ordinary user-record writes too. The optional
+business-card directory is created on its first write, not at boot. Card writes
+leave 16 KiB of shared-pool headroom; consumed receipts are reclaimed under
+pressure without evicting unread cards or receipts still needed by staging
+cleanup. See [Business cards](business_cards.md).
 Usage is reconstructed from live filesystem blocks, deduplicated, and cached
 until a filesystem mutation. There is no persisted counter/index to become
 inconsistent with the files. The single core0 storage owner performs admission
