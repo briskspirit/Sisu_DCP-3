@@ -9,7 +9,8 @@
 #include <string.h>
 
 #define OWN_TONES_MAGIC 0x4f544e31u
-#define RECEIVED_TONES_MAGIC 0x31544e52u
+#define RECEIVED_TONES_MAGIC_V1 0x31544e52u
+#define RECEIVED_TONES_MAGIC 0x32544e52u
 #define PENDING_COUNT 2u
 #define RECEIVE_TTL_MS (30u * 60u * 1000u)
 
@@ -19,6 +20,7 @@ typedef struct {
     uint16_t reference, source_port;
     uint8_t state, total, seen, dcs, flags;
     uint8_t lengths[MODEM_SMS_SEGMENT_MAX];
+    uint32_t timestamps[MODEM_SMS_SEGMENT_MAX];
     char sender[MODEM_SMS_SENDER_MAX + 1u];
     char timestamp[MODEM_SMS_TIMESTAMP_MAX + 1u];
     uint8_t data[STORE_OWN_TONE_PACKED_MAX];
@@ -250,12 +252,22 @@ static bool timestamp_matches(const char *a, const char *b, bool concat) {
     return ta != 0u && tb != 0u && gap < RECEIVE_TTL_MS / 1000u;
 }
 
-static bool identity_matches(const pending_tone_t *p, const sms_codec_message_t *part) {
+static unsigned identity_match_rank(const pending_tone_t *p, const sms_codec_message_t *part) {
     uint8_t flags = (part->has_concat ? 1u : 0u) | (part->concat_ref_16bit ? 2u : 0u);
-    return p->state != TONE_FREE && p->reference == part->concat_ref &&
-        p->source_port == part->source_port && p->flags == flags &&
-        strcmp(p->sender, part->address) == 0 &&
-        timestamp_matches(p->timestamp, part->timestamp, part->has_concat);
+    if (p->state == TONE_FREE || p->reference != part->concat_ref ||
+        p->source_port != part->source_port || p->flags != flags ||
+        strcmp(p->sender, part->address) != 0) return 0u;
+    unsigned index = part->has_concat ? part->concat_seq - 1u : 0u;
+    bool complete = p->state == TONE_READY || p->state == TONE_CONSUMED;
+    if (complete && (p->seen & (1u << index)) == 0u) return 0u;
+    uint32_t timestamp = message_timestamp_seconds(part->timestamp);
+    if ((p->seen & (1u << index)) != 0u && p->timestamps[index] != 0u) {
+        if (p->timestamps[index] == timestamp) return 2u;
+        /* Completed receipts deduplicate individual transmissions, not every
+         * later use of the same concatenation reference within the TTL. */
+        if (complete) return 0u;
+    }
+    return timestamp_matches(p->timestamp, part->timestamp, part->has_concat) ? 1u : 0u;
 }
 
 store_status_t store_ringtone_receive(const sms_codec_message_t *part, uint32_t now_ms) {
@@ -263,11 +275,15 @@ store_status_t store_ringtone_receive(const sms_codec_message_t *part, uint32_t 
     if (!store_service_ready()) return STORE_STATUS_NOT_READY;
     store_ringtone_expire(now_ms);
     pending_tone_t *p = NULL, *available = NULL;
+    unsigned rank = 0u;
     for (unsigned i = 0u; i < PENDING_COUNT; i++) {
         pending_tone_t *candidate = &s_own_tones.pending[i];
-        if (identity_matches(candidate, part)) { p = candidate; break; }
+        unsigned candidate_rank = identity_match_rank(candidate, part);
+        if (candidate_rank > rank) { p = candidate; rank = candidate_rank; }
+        if (rank == 2u) break;
         if (candidate->state == TONE_FREE ||
-            (candidate->state == TONE_CONSUMED && store_ringtone_commit_status() == STORE_STATUS_OK))
+            (available == NULL && candidate->state == TONE_CONSUMED &&
+                store_ringtone_commit_status() == STORE_STATUS_OK))
             available = candidate;
     }
     uint8_t total = part->has_concat ? part->concat_total : 1u;
@@ -308,6 +324,7 @@ store_status_t store_ringtone_receive(const sms_codec_message_t *part, uint32_t 
     memmove(p->data + offset + part->binary_len, p->data + offset, size - offset);
     memcpy(p->data + offset, part->binary_data, part->binary_len);
     p->lengths[seq - 1u] = (uint8_t)part->binary_len;
+    p->timestamps[seq - 1u] = message_timestamp_seconds(part->timestamp);
     p->seen |= (uint8_t)(1u << (seq - 1u));
     if (p->seen == (uint8_t)((1u << total) - 1u)) {
         ringtone_info_t info;
@@ -336,7 +353,7 @@ store_status_t store_ringtone_received_pdu_status(const char *pdu) {
     uint8_t seq = s_part.has_concat ? s_part.concat_seq : 1u;
     for (unsigned i = 0u; i < PENDING_COUNT; i++) {
         const pending_tone_t *p = &s_own_tones.pending[i];
-        if (!identity_matches(p, &s_part) || p->state == TONE_INVALID || p->total != total ||
+        if (identity_match_rank(p, &s_part) == 0u || p->state == TONE_INVALID || p->total != total ||
             p->dcs != s_part.dcs || !(p->seen & (1u << (seq - 1u)))) continue;
         uint16_t offset = 0u;
         for (unsigned j = 0u; j + 1u < seq; j++) offset += p->lengths[j];
@@ -406,8 +423,11 @@ static bool serialize_pending(uint8_t *dst, size_t cap, size_t *pos) {
             !write_u8_field(dst, cap, pos, p->seen) ||
             !write_u8_field(dst, cap, pos, p->dcs) ||
             !write_u8_field(dst, cap, pos, p->flags) ||
-            !write_bytes(dst, cap, pos, p->lengths, sizeof(p->lengths)) ||
-            !write_bytes(dst, cap, pos, p->sender, sizeof(p->sender)) ||
+            !write_bytes(dst, cap, pos, p->lengths, sizeof(p->lengths))) return false;
+        for (unsigned j = 0u; j < MODEM_SMS_SEGMENT_MAX; j++) {
+            if (!write_u32_field(dst, cap, pos, p->timestamps[j])) return false;
+        }
+        if (!write_bytes(dst, cap, pos, p->sender, sizeof(p->sender)) ||
             !write_bytes(dst, cap, pos, p->timestamp, sizeof(p->timestamp)) ||
             !write_bytes(dst, cap, pos, p->data, sizeof(p->data))) return false;
     }
@@ -415,10 +435,14 @@ static bool serialize_pending(uint8_t *dst, size_t cap, size_t *pos) {
 }
 
 static bool apply_pending(own_tone_state_t *loaded, const uint8_t *data, size_t len) {
-    const size_t record_size = 13u + MODEM_SMS_SEGMENT_MAX + MODEM_SMS_SENDER_MAX + 1u +
+    if (len < 8u) return false;
+    uint32_t magic = read_u32(data);
+    bool has_timestamps = magic == RECEIVED_TONES_MAGIC;
+    if (!has_timestamps && magic != RECEIVED_TONES_MAGIC_V1) return false;
+    const size_t record_size = 13u + MODEM_SMS_SEGMENT_MAX +
+        (has_timestamps ? 4u * MODEM_SMS_SEGMENT_MAX : 0u) + MODEM_SMS_SENDER_MAX + 1u +
         MODEM_SMS_TIMESTAMP_MAX + 1u + STORE_OWN_TONE_PACKED_MAX;
-    if (len != 8u + PENDING_COUNT * record_size || read_u32(data) != RECEIVED_TONES_MAGIC)
-        return false;
+    if (len != 8u + PENDING_COUNT * record_size) return false;
     loaded->next_id = read_u32(data + 4u);
     size_t pos = 8u;
     for (unsigned i = 0u; i < PENDING_COUNT; i++) {
@@ -429,6 +453,13 @@ static bool apply_pending(own_tone_state_t *loaded, const uint8_t *data, size_t 
         p->state = data[pos++]; p->total = data[pos++]; p->seen = data[pos++];
         p->dcs = data[pos++]; p->flags = data[pos++];
         memcpy(p->lengths, data + pos, sizeof(p->lengths)); pos += sizeof(p->lengths);
+        /* V1 receipts have only an assembly timestamp. Preserve them with
+         * conservative deduplication until expired or replaced. */
+        if (has_timestamps) {
+            for (unsigned j = 0u; j < MODEM_SMS_SEGMENT_MAX; j++) {
+                p->timestamps[j] = read_u32(data + pos); pos += 4u;
+            }
+        }
         memcpy(p->sender, data + pos, sizeof(p->sender)); pos += sizeof(p->sender);
         memcpy(p->timestamp, data + pos, sizeof(p->timestamp)); pos += sizeof(p->timestamp);
         memcpy(p->data, data + pos, sizeof(p->data)); pos += sizeof(p->data);
@@ -439,7 +470,8 @@ static bool apply_pending(own_tone_state_t *loaded, const uint8_t *data, size_t 
         if (p->id == 0u || p->total == 0u || p->total > MODEM_SMS_SEGMENT_MAX ||
             (p->dcs != 4u && p->dcs != 0xf5u) || (p->seen >> p->total) != 0u) return false;
         for (unsigned j = 0u; j < MODEM_SMS_SEGMENT_MAX; j++) {
-            if (p->lengths[j] > 140u || ((p->seen & (1u << j)) != 0u) != (p->lengths[j] != 0u))
+            if (p->lengths[j] > 140u || ((p->seen & (1u << j)) != 0u) != (p->lengths[j] != 0u) ||
+                (p->lengths[j] == 0u && p->timestamps[j] != 0u))
                 return false;
         }
         if (p->state == TONE_READY || p->state == TONE_CONSUMED) {

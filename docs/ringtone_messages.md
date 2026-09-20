@@ -32,6 +32,11 @@ Two pending receipts, each holding at most 256 melody bytes, share the same
 atomic littlefs record as Own/Received tone. Multipart arrivals may be out of
 order and may survive a reboot between parts. Identical retransmissions are
 deduplicated; conflicting parts do not replace a complete pending melody.
+Each part's service-centre timestamp is persisted. Completed receipts use it
+to distinguish retransmissions from new sends that reuse a concatenation
+reference, including an intentional resend of the same melody. Parts of an
+unfinished melody may have different timestamps within the 30-minute assembly
+window. Exact recorded parts take precedence over that assembly matching.
 Saving the melody and consuming its receipt are one commit. The saved note is
 shown only after that commit succeeds. A full pending queue preserves existing
 unread tones and reports a receive failure.
@@ -41,6 +46,11 @@ runtime since their latest new part (rebased on boot). Complete unread melodies
 do not expire. Consumed receipts may be reused sooner when another melody
 arrives. Recovery from modem storage requires an exact durable part receipt
 and an unchanged reread before deleting the modem copy.
+Permanently rejected modem records are retained, counted as recovery errors,
+and skipped so later messages can be recovered. Temporary storage failures
+still trigger a delayed retry. Older ringtone records remain readable; receipts
+written before per-part timestamps were added retain conservative matching
+until they expire or are replaced.
 
 The playback expansion is bounded to 512 notes. Infinite pattern repeats are
 played once for preview and repeated while ringing a call. Legacy textual
