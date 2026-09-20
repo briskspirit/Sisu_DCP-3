@@ -537,11 +537,12 @@ bool handle_messages_list_key(app_t *app, uint16_t key, uint32_t now) {
             return true;
         }
         if (key == KEY_NAVI) {
-            if (app->messages_info_selected <= 1u) {
-                store_setting_set_u8(STORE_SETTING_SMS_INFO_SERVICE, app->messages_info_selected == 0u ? 1u : 0u);
+            if (app->messages_info_selected <= 1u &&
+                store_setting_set_u8(STORE_SETTING_SMS_INFO_SERVICE,
+                                     app->messages_info_selected == 0u ? 1u : 0u) == STORE_STATUS_OK) {
                 open_display_sid(app, 3u, 0x3b4u, "Saved", APP_ROUTE_MESSAGES_LIST, now);
             } else {
-                open_display_sid(app, 2u, 0xb5u, "No info\nmessages\non this topic", APP_ROUTE_MESSAGES_LIST, now);
+                open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_MESSAGES_LIST, now);
             }
             return true;
         }
@@ -1236,7 +1237,7 @@ static void sms_timestamp_text(const char *timestamp, char *dst, size_t cap) {
         copy_text(dst, cap, timestamp);
         return;
     }
-    copy_text(dst, cap, "12-May-2026\n00:00:00");
+    copy_text(dst, cap, "--");
 }
 
 static void sms_detail_page_text(const app_t *app, char *dst, size_t cap) {
@@ -1249,9 +1250,9 @@ static void sms_detail_page_text(const app_t *app, char *dst, size_t cap) {
         if (app->messages_detail_page == 0u) {
             sms_sender_page_text(record, dst, cap);
         } else if (app->messages_detail_page == 1u) {
-            char centre[STORE_TEXT_MAX + 1u];
-            store_setting_get_text(STORE_SETTING_SMS_MESSAGE_CENTRE, centre, sizeof(centre));
-            snprintf(dst, cap, "Message centre: %s", centre[0] ? centre : "+1234567890");
+            /* The local message metadata does not carry the receiving SMSC.
+             * An outgoing preference is not the source of this message. */
+            snprintf(dst, cap, "%s\n--", ts_or(0x335u, "Message centre number"));
         } else {
             sms_timestamp_text(record->timestamp, dst, cap);
         }
@@ -1453,7 +1454,7 @@ static void sms_open_settings_menu(app_t *app) {
 
 static void sms_select_settings_item(app_t *app, uint32_t now) {
     if (app->messages_settings_kind == 0u && app->messages_settings_selected == 0u) {
-        char centre[STORE_TEXT_MAX + 1u];
+        char centre[STORE_TEXT_MAX + 1u] = "";
         store_setting_get_text(STORE_SETTING_SMS_MESSAGE_CENTRE, centre, sizeof(centre));
         open_editor(app, "Enter number:", centre, 30u, EDITOR_KIND_NUMBER, EDITOR_CONTEXT_SMS_MESSAGE_CENTRE, true, now);
         return;
@@ -1480,11 +1481,17 @@ static void sms_select_settings_item(app_t *app, uint32_t now) {
 
 static void sms_save_settings_value(app_t *app, uint32_t now) {
     uint8_t key = app->messages_settings_value_key;
-    uint8_t value = app->messages_settings_value_selected;
-    if (key == 3u || key == 4u) {
-        value = app->messages_settings_value_selected == 0u ? 1u : 0u;
+    uint8_t selected = app->messages_settings_value_selected;
+    if (key < 1u || key > 4u || selected >= messages_settings_value_count(key)) {
+        open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_MESSAGES_LIST, now);
+        return;
     }
-    store_setting_set_u8(messages_settings_store_key(key), value);
+    uint8_t value = key >= 3u ? (selected == 0u ? 1u : 0u) : selected;
+    /* These are local set preferences, not acknowledgements from the modem. */
+    if (store_setting_set_u8(messages_settings_store_key(key), value) != STORE_STATUS_OK) {
+        open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_MESSAGES_LIST, now);
+        return;
+    }
     app->messages_mode = MESSAGES_MODE_SETTINGS_MENU;
     open_display_sid(app, 3u, 0x3b4u, "Saved", APP_ROUTE_MESSAGES_LIST, now);
 }
@@ -1579,7 +1586,6 @@ static store_setting_key_t messages_settings_store_key(uint8_t key) {
     }
     return STORE_SETTING_SMS_REPLY_SAME_CENTRE;
 }
-
 
 static bool messages_root_item_visible(uint8_t raw) {
     if (raw >= ARRAY_COUNT(MESSAGES_ROOT_LABELS)) {

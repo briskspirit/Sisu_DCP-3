@@ -570,8 +570,10 @@ bool handle_editor_key(app_t *app, uint16_t key, event_type_t event_type, uint32
         } else if (app->editor_context == EDITOR_CONTEXT_SMS_MESSAGE_CENTRE) {
             if (app->editor_value[0] == '\0') {
                 open_display_sid(app, 0u, 0x208u, "No phone\nnumber", APP_ROUTE_EDITOR, now);
+            } else if (store_setting_set_text(STORE_SETTING_SMS_MESSAGE_CENTRE,
+                                              app->editor_value) != STORE_STATUS_OK) {
+                open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_EDITOR, now);
             } else {
-                store_setting_set_text(STORE_SETTING_SMS_MESSAGE_CENTRE, app->editor_value);
                 close_editor(app);
                 open_display_sid(app, 3u, 0x358u, "Centre\nnumber\nsaved", APP_ROUTE_MESSAGES_LIST, now);
             }

@@ -14,9 +14,9 @@
 
 /* Menu/option labels carry the v6.00 string id (SID) for localization alongside
  * the English literal, which stays BOTH the fallback AND the strcmp
- * dispatch/preview key (see handle_call_register_options_key,
- * call_register_preview). The label[] entry is never localized in place -- only
- * the rendered copy is, built via cr_loc() at draw time. sid 0 = no exact 1:1
+ * dispatch key (see handle_call_register_options_key). The label[] entry is
+ * never localized in place -- only the rendered copy is, built via cr_loc() at
+ * draw time. sid 0 = no exact 1:1
  * v6.00 match: either ambiguous across contexts (many SIDs) or a
  * space-vs-newline mismatch with the ROM string; fall back to the literal. */
 typedef struct {
@@ -98,8 +98,7 @@ static void open_call_register_metric(app_t *app, call_register_metric_kind_t ki
 static const cr_label_t *call_register_menu_labels(call_register_menu_kind_t kind);
 static uint8_t call_register_menu_count(call_register_menu_kind_t kind);
 static const char *call_register_menu_breadcrumb(call_register_menu_kind_t kind, uint8_t selected, char *scratch, size_t scratch_cap);
-static const char *call_register_preview(call_register_menu_kind_t kind, const char *label, char *scratch, size_t scratch_cap);
-static bool call_register_menu_has_preview(call_register_menu_kind_t kind, const char *label);
+static const char *call_register_preview(call_register_menu_kind_t kind, uint8_t selected);
 static store_call_list_t call_register_selected_list_kind(const app_t *app);
 static bool call_register_current_record(const app_t *app, store_call_record_t *record);
 static const char *call_register_caption(store_call_list_t kind, uint8_t index, char *scratch, size_t cap);
@@ -125,13 +124,10 @@ void render_call_register_menu(const app_t *app, framebuffer_t *fb) {
     }
 
     char breadcrumb[10];
-    char preview[18];
-    const char *label = labels[selected].label;      /* English: preview strcmp key */
     const char *shown = cr_loc(&labels[selected]);   /* localized: displayed copy */
-    const char *preview_text = call_register_preview(kind, label, preview, sizeof(preview));
     draw_static_page_list(fb,
                           shown,
-                          call_register_menu_has_preview(kind, label) ? preview_text : "",
+                          call_register_preview(kind, selected),
                           selected,
                           count,
                           call_register_menu_breadcrumb(kind, selected, breadcrumb, sizeof(breadcrumb)),
@@ -357,30 +353,27 @@ bool handle_call_register_menu_key(app_t *app, uint16_t key, uint32_t now) {
         call_register_clear_recent(app, app->call_register_menu_selected, now);
         return true;
     }
-    if (kind == CALL_REGISTER_MENU_COST_SETTINGS) {
-        open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_CALL_REGISTER_MENU, now);
-        return true;
-    }
     if (kind == CALL_REGISTER_MENU_PREPAID) {
         if (app->call_register_menu_selected == 0u) {
             uint8_t enabled = 0u;
             store_setting_get_u8(STORE_SETTING_CALL_CREDIT_INFO_DISPLAY, &enabled);
             open_call_register_menu(app, CALL_REGISTER_MENU_CREDIT_INFO, enabled ? 0u : 1u);
-        } else if (app->call_register_menu_selected == 3u) {
-            open_call_register_menu(app, CALL_REGISTER_MENU_RECHARGE_STATUS, 0u);
-        } else {
-            open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_CALL_REGISTER_MENU, now);
+            return true;
         }
-        return true;
+        if (app->call_register_menu_selected == 3u) {
+            open_call_register_menu(app, CALL_REGISTER_MENU_RECHARGE_STATUS, 0u);
+            return true;
+        }
     }
     if (kind == CALL_REGISTER_MENU_CREDIT_INFO) {
-        store_setting_set_u8(STORE_SETTING_CALL_CREDIT_INFO_DISPLAY,
-                             app->call_register_menu_selected == 0u ? 1u : 0u);
-        open_call_register_menu(app, CALL_REGISTER_MENU_PREPAID, 0u);
-        open_display_sid(app, 3u, 0x3b4u, "Saved", APP_ROUTE_CALL_REGISTER_MENU, now);
-        return true;
+        if (store_setting_set_u8(STORE_SETTING_CALL_CREDIT_INFO_DISPLAY,
+                                app->call_register_menu_selected == 0u ? 1u : 0u) == STORE_STATUS_OK) {
+            open_call_register_menu(app, CALL_REGISTER_MENU_PREPAID, 0u);
+            open_display_sid(app, 3u, 0x3b4u, "Saved", APP_ROUTE_CALL_REGISTER_MENU, now);
+            return true;
+        }
     }
-    open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_CALL_REGISTER_MENU, now);
+    open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_CALL_REGISTER_MENU, now);
     return true;
 }
 
@@ -536,9 +529,8 @@ bool handle_call_register_metric_key(app_t *app, uint16_t key, uint32_t now) {
         open_display_sid(app, 3u, 0x3cau, "Timers\ncleared", APP_ROUTE_CALL_REGISTER_METRIC, now);
         return true;
     }
-    if (kind == CALL_REGISTER_METRIC_COSTS && app->call_register_metric_selected == 2u) {
-        store_setting_set_u8(STORE_SETTING_CALL_COUNTERS_CLEARED, 1u);
-        open_display_sid(app, 3u, 0x100u, "Counters\ncleared", APP_ROUTE_CALL_REGISTER_METRIC, now);
+    if (kind == CALL_REGISTER_METRIC_COSTS) {
+        open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_CALL_REGISTER_METRIC, now);
         return true;
     }
     char value[18];
@@ -648,35 +640,18 @@ static const char *call_register_menu_breadcrumb(call_register_menu_kind_t kind,
     return scratch;
 }
 
-static const char *call_register_preview(call_register_menu_kind_t kind, const char *label, char *scratch, size_t scratch_cap) {
-    scratch[0] = '\0';
-    if (kind == CALL_REGISTER_MENU_COST_SETTINGS) {
-        if (strcmp(label, "Call costs'\nlimit") == 0) {
-            copy_text(scratch, scratch_cap, ts_or(0x10au, "Off"));
-        } else if (strcmp(label, "Show\ncosts in") == 0) {
-            copy_text(scratch, scratch_cap, ts_or(0x11cu, "Units"));
-        }
-    } else if (kind == CALL_REGISTER_MENU_PREPAID) {
-        if (strcmp(label, "Credit info display") == 0) {
+static const char *call_register_preview(call_register_menu_kind_t kind, uint8_t selected) {
+    if (kind == CALL_REGISTER_MENU_PREPAID) {
+        if (selected == 0u) {
             uint8_t enabled = 0u;
             store_setting_get_u8(STORE_SETTING_CALL_CREDIT_INFO_DISPLAY, &enabled);
-            copy_text(scratch, scratch_cap, enabled ? ts_or(0x10bu, "On") : ts_or(0x10au, "Off"));
-        } else if (strcmp(label, "Credit available") == 0 || strcmp(label, "Last event costs") == 0) {
-            copy_text(scratch, scratch_cap, "0.00");
+            return enabled ? ts_or(0x10bu, "On") : ts_or(0x10au, "Off");
         }
-    } else if (kind == CALL_REGISTER_MENU_RECHARGE_STATUS) {
-        copy_text(scratch, scratch_cap, "--.--");
+        if (selected == 1u || selected == 2u) return "--";
     }
-    return scratch;
-}
-
-static bool call_register_menu_has_preview(call_register_menu_kind_t kind, const char *label) {
-    return kind == CALL_REGISTER_MENU_COST_SETTINGS ||
-           kind == CALL_REGISTER_MENU_RECHARGE_STATUS ||
-           (kind == CALL_REGISTER_MENU_PREPAID &&
-            (strcmp(label, "Credit info display") == 0 ||
-             strcmp(label, "Credit available") == 0 ||
-             strcmp(label, "Last event costs") == 0));
+    if (kind == CALL_REGISTER_MENU_COST_SETTINGS) return "--";
+    if (kind == CALL_REGISTER_MENU_RECHARGE_STATUS) return "--.--";
+    return "";
 }
 
 static store_call_list_t call_register_selected_list_kind(const app_t *app) {
@@ -760,16 +735,8 @@ static void format_duration(uint32_t seconds, char *dst, size_t cap, bool hms) {
 }
 
 static const char *call_register_metric_value(call_register_metric_kind_t kind, uint8_t selected, char *scratch, size_t scratch_cap) {
-    uint8_t cleared = 0u;
     if (kind == CALL_REGISTER_METRIC_COSTS) {
-        store_setting_get_u8(STORE_SETTING_CALL_COUNTERS_CLEARED, &cleared);
-        if (cleared) {
-            copy_text(scratch, scratch_cap, "0.00");
-        } else if (selected == 0u) {
-            copy_text(scratch, scratch_cap, "0.40");
-        } else {
-            copy_text(scratch, scratch_cap, "1.20");
-        }
+        copy_text(scratch, scratch_cap, "--");
         return scratch;
     }
 

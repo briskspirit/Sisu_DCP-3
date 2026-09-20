@@ -43,6 +43,9 @@ static void check_str(const char *got, const char *want, const char *message) {
 }
 
 static uint8_t s_settings[STORE_SETTING_COUNT];
+static unsigned s_setting_writes;
+static char s_setting_text[STORE_TEXT_MAX + 1u];
+static store_status_t s_setting_write_status;
 static char s_saved_words[APP_SMS_T9_USER_WORD_LIMIT][STORE_T9_WORD_MAX + 1u];
 static uint8_t s_saved_word_count;
 static unsigned s_saved_word_writes;
@@ -121,6 +124,8 @@ static uint8_t s_list_count;
 static uint8_t s_list_selected;
 static char s_list_first[32];
 static char s_list_last[32];
+static char s_menu_preview[64];
+static char s_text_block[128];
 static unsigned s_pixel_count;
 static char s_drawn_text[8][MODEM_SMS_TEXT_MAX + 1u];
 static int s_drawn_y[8];
@@ -128,6 +133,9 @@ static uint8_t s_drawn_count;
 
 static void reset_fixture(void) {
     memset(s_settings, 0, sizeof(s_settings));
+    s_setting_writes = 0u;
+    s_setting_text[0] = '\0';
+    s_setting_write_status = STORE_STATUS_OK;
     s_settings[STORE_SETTING_SMS_DICTIONARY_LANGUAGE] = 0x81u;
     memset(s_saved_words, 0, sizeof(s_saved_words));
     s_saved_word_count = 0u;
@@ -203,6 +211,8 @@ static void reset_fixture(void) {
     s_list_selected = 0u;
     s_list_first[0] = '\0';
     s_list_last[0] = '\0';
+    s_menu_preview[0] = '\0';
+    s_text_block[0] = '\0';
     s_pixel_count = 0u;
     memset(s_drawn_text, 0, sizeof(s_drawn_text));
     memset(s_drawn_y, 0, sizeof(s_drawn_y));
@@ -238,13 +248,14 @@ store_status_t store_setting_get_u8(store_setting_key_t key, uint8_t *out_value)
 }
 
 store_status_t store_setting_set_u8(store_setting_key_t key, uint8_t value) {
-    s_settings[key] = value;
-    return STORE_STATUS_OK;
+    s_setting_writes++;
+    if (s_setting_write_status == STORE_STATUS_OK) s_settings[key] = value;
+    return s_setting_write_status;
 }
 
 store_status_t store_setting_get_text(store_setting_key_t key, char *out_text, uint8_t out_cap) {
     (void)key;
-    copy_text(out_text, out_cap, "");
+    copy_text(out_text, out_cap, s_setting_text);
     return STORE_STATUS_OK;
 }
 
@@ -854,7 +865,7 @@ void draw_static_page_list(framebuffer_t *fb,
                            uint8_t count,
                            const char *breadcrumb,
                            const char *softkey) {
-    (void)preview;
+    copy_text(s_menu_preview, sizeof(s_menu_preview), preview);
     const char *labels[] = {label};
     draw_flat_list(fb, labels, count != 0u ? 1u : 0u, selected, breadcrumb, softkey);
 }
@@ -869,7 +880,7 @@ void draw_text_block(framebuffer_t *fb,
                      uint8_t max_lines) {
     (void)fb;
     (void)font;
-    (void)text;
+    copy_text(s_text_block, sizeof(s_text_block), text);
     (void)x;
     (void)y;
     (void)width;
@@ -1850,6 +1861,156 @@ static void test_message_alert_follows_v600_call_state(void) {
           "incoming ringing suppresses the competing SMS tone and light event");
 }
 
+static void check_message_not_done(const app_t *app) {
+    check(s_display_calls == 1u && s_display_record == 32u &&
+              s_display_sid == 0x210u &&
+              s_display_return_route == APP_ROUTE_MESSAGES_LIST,
+          "unsupported message action uses the original Not done dialog");
+    check(app->route == APP_ROUTE_DISPLAY_MESSAGE && s_setting_writes == 0u &&
+              s_editor_calls == 0u && s_post_count == 0u,
+          "unsupported message action does not write settings, edit, or post work");
+}
+
+static void test_message_preferences_and_queries(void) {
+    framebuffer_t fb = {0};
+    static const struct {
+        uint8_t group, row, key, count;
+        store_setting_key_t stored_key;
+        const char *labels[6];
+    } cases[] = {
+        {0u, 1u, 1u, 4u, STORE_SETTING_SMS_SENT_AS, {"Text", "Fax", "Paging", "E-mail"}},
+        {0u, 2u, 2u, 6u, STORE_SETTING_SMS_VALIDITY, {"1 hour", "6 hours", "24 hours", "72 hours", "1 week", "Maximum time"}},
+        {1u, 0u, 3u, 2u, STORE_SETTING_SMS_DELIVERY_REPORTS, {"Yes", "No"}},
+        {1u, 1u, 4u, 2u, STORE_SETTING_SMS_REPLY_SAME_CENTRE, {"Yes", "No"}},
+    };
+    for (unsigned i = 0u; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        for (uint8_t choice = 0u; choice < cases[i].count; choice++) {
+            reset_fixture();
+            app_t app = {0};
+            app.messages_menu_selected = 4u;
+            (void)handle_messages_menu_key(&app, KEY_NAVI, 100u);
+            check(app.messages_mode == MESSAGES_MODE_SETTINGS_TOP,
+                  "message settings keeps the original Set 1/Common menu");
+            app.messages_settings_top_selected = cases[i].group;
+            (void)handle_messages_list_key(&app, KEY_NAVI, 110u);
+            check(app.messages_mode == MESSAGES_MODE_SETTINGS_MENU &&
+                      app.messages_settings_kind == cases[i].group,
+                  "message setting group opens its original items");
+            app.messages_settings_selected = cases[i].row;
+            (void)handle_messages_list_key(&app, KEY_NAVI, 120u);
+            check(app.messages_mode == MESSAGES_MODE_SETTINGS_VALUE &&
+                      app.messages_settings_value_key == cases[i].key,
+                  "local SMS preference keeps its original value picker");
+            render_messages_list(&app, &fb);
+            check(s_list_count == cases[i].count,
+                  "SMS preference picker retains every original choice");
+            check_str(s_softkey, "OK", "SMS preference picker keeps the OK softkey");
+            app.messages_settings_value_selected = choice;
+            (void)handle_messages_list_key(&app, KEY_NAVI, 130u);
+            uint8_t expected = cases[i].key >= 3u ? (choice == 0u ? 1u : 0u) : choice;
+            check(s_display_sid == 0x3b4u && s_setting_writes == 1u &&
+                      s_settings[cases[i].stored_key] == expected &&
+                      app.messages_mode == MESSAGES_MODE_SETTINGS_MENU,
+                  "simulated SMS preference saves locally and returns to its menu");
+            render_messages_list(&app, &fb);
+            check_str(s_menu_preview, cases[i].labels[choice],
+                      "SMS preference preview displays the saved choice");
+            app.route = APP_ROUTE_MESSAGES_LIST;
+            (void)handle_messages_list_key(&app, KEY_NAVI, 140u);
+            check(app.messages_settings_value_selected == choice,
+                  "reopening a simulated SMS preference selects its saved value");
+            app.messages_settings_value_selected = (uint8_t)((choice + 1u) % cases[i].count);
+            s_setting_write_status = STORE_STATUS_INVALID_ARGUMENT;
+            (void)handle_messages_list_key(&app, KEY_NAVI, 150u);
+            check(s_display_sid == 0x210u &&
+                      app.messages_mode == MESSAGES_MODE_SETTINGS_VALUE &&
+                      s_settings[cases[i].stored_key] == expected,
+                  "failed SMS preference write reports Not done and preserves the saved value");
+            check(s_post_count == 0u && s_send_sms_requests == 0u && s_binary_send_requests == 0u,
+                  "local SMS preference saving does not send modem commands or messages");
+        }
+    }
+    reset_fixture();
+    app_t centre = {0};
+    centre.messages_mode = MESSAGES_MODE_SETTINGS_MENU;
+    copy_text(s_setting_text, sizeof(s_setting_text), "+15551234567");
+    render_messages_list(&centre, &fb);
+    check_str(s_menu_preview, s_setting_text, "SMSC set keeps its stored-number preview");
+    (void)handle_messages_list_key(&centre, KEY_NAVI, 160u);
+    check(s_editor_calls == 1u && s_editor_context == EDITOR_CONTEXT_SMS_MESSAGE_CENTRE &&
+              s_editor_max_len == 30u,
+          "SMSC set keeps its original number editor");
+    check_str(s_editor_value, s_setting_text, "SMSC editor starts with the stored preference");
+    for (uint8_t item = 0u; item < 6u; item++) {
+        reset_fixture();
+        s_settings[STORE_SETTING_SMS_INFO_SERVICE] = 1u;
+        app_t app = {0};
+        app.messages_menu_selected = 5u;
+        render_messages_menu(&app, &fb);
+        check_str(s_menu_preview, "On", "Info service retains its local preference preview");
+        (void)handle_messages_menu_key(&app, KEY_NAVI, 200u);
+        check(app.messages_mode == MESSAGES_MODE_INFO,
+              "Info service keeps its original menu");
+        app.messages_info_selected = item;
+        (void)handle_messages_list_key(&app, KEY_NAVI, 210u);
+        if (item <= 1u) {
+            check(s_display_sid == 0x3b4u && s_setting_writes == 1u &&
+                      s_settings[STORE_SETTING_SMS_INFO_SERVICE] == (item == 0u ? 1u : 0u),
+                  "Info service On/Off saves the local preference");
+            s_setting_write_status = STORE_STATUS_INVALID_ARGUMENT;
+            app.messages_info_selected ^= 1u;
+            (void)handle_messages_list_key(&app, KEY_NAVI, 220u);
+            check(s_display_sid == 0x210u &&
+                      s_settings[STORE_SETTING_SMS_INFO_SERVICE] == (item == 0u ? 1u : 0u),
+                  "Info service rejects a failed preference write");
+        } else {
+            check_message_not_done(&app);
+            check(s_settings[STORE_SETTING_SMS_INFO_SERVICE] == 1u,
+                  "unsupported Info service query does not mutate the preference");
+        }
+    }
+    for (uint8_t key = 0u; key <= 5u; key++) {
+        reset_fixture();
+        app_t app = {0};
+        app.messages_kind = MESSAGES_KIND_SETTINGS;
+        app.messages_mode = MESSAGES_MODE_SETTINGS_VALUE;
+        app.messages_settings_value_key = key;
+        app.messages_settings_value_selected = 0xffu;
+        (void)handle_messages_list_key(&app, KEY_NAVI, 300u);
+        check_message_not_done(&app);
+        check(app.messages_mode == MESSAGES_MODE_SETTINGS_VALUE,
+              "invalid SMS preference submission stays in the value picker");
+    }
+}
+
+static void test_message_details_unknowns(void) {
+    reset_fixture();
+    app_t app = {0};
+    framebuffer_t fb = {0};
+    app.messages_mode = MESSAGES_MODE_DETAIL;
+    app.messages_kind = MESSAGES_KIND_INBOX;
+    app.sms_inbox_count = 1u;
+    app.messages_detail_page = 2u;
+    render_messages_list(&app, &fb);
+    check_str(s_text_block, "--", "missing incoming date is not a sample date");
+    copy_text(app.sms_inbox[0].timestamp, sizeof(app.sms_inbox[0].timestamp),
+              "26/09/20,13:45:06");
+    render_messages_list(&app, &fb);
+    check_str(s_text_block, "20-Sept-2026\n13:45:06",
+              "real incoming date keeps its existing presentation");
+    app.messages_detail_page = 1u;
+    copy_text(s_setting_text, sizeof(s_setting_text), "+15551234567");
+    render_messages_list(&app, &fb);
+    check_str(s_text_block, "Message centre number\n--",
+              "receiving SMSC is not invented from an outgoing preference");
+    app.messages_kind = MESSAGES_KIND_OUTBOX;
+    memset(app.sms_outbox, 0, sizeof(app.sms_outbox));
+    app.sms_outbox_count = 1u;
+    app.messages_detail_page = 2u;
+    render_messages_list(&app, &fb);
+    check_str(s_text_block, "--", "missing outgoing date is not a sample date");
+}
+
 int main(void) {
     test_init_loads_composer_state();
     test_open_multitap_delete_and_cursor();
@@ -1868,6 +2029,8 @@ int main(void) {
     test_async_sms_request_ownership();
     test_modem_sms_counter_epoch_rebase();
     test_message_alert_follows_v600_call_state();
+    test_message_preferences_and_queries();
+    test_message_details_unknowns();
 
     if (s_failures != 0) {
         fprintf(stderr, "%d messages app test(s) failed\n", s_failures);

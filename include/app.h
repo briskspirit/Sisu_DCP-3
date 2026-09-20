@@ -546,9 +546,6 @@ typedef struct {
     uint8_t settings_value_view_start;
     uint8_t settings_value_parent_kind;
     uint8_t settings_value_parent_selected;
-    uint8_t settings_pending_value;
-    uint8_t settings_pending_action;
-    uint32_t settings_pending_started_ms;
     uint8_t settings_welcome_option_selected;
     uint8_t settings_access_kind;
     uint8_t settings_access_step;

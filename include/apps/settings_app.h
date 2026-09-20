@@ -19,7 +19,6 @@ void open_settings_menu(app_t *app, settings_menu_kind_t kind, uint8_t selected)
 bool handle_settings_menu_key(app_t *app, uint16_t key, uint32_t now);
 bool handle_settings_value_key(app_t *app, uint16_t key, uint32_t now);
 bool handle_settings_welcome_options_key(app_t *app, uint16_t key, uint32_t now);
-bool tick_settings(app_t *app, uint32_t now);
 
 void render_settings_menu(const app_t *app, framebuffer_t *fb);
 void render_settings_value(const app_t *app, framebuffer_t *fb);

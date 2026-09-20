@@ -120,9 +120,6 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
     if (tick_phonebook_send(app, now_ms)) {
         changed = true;
     }
-    if (tick_settings(app, now_ms)) {
-        changed = true;
-    }
     if (tick_call_divert(app, now_ms)) {
         changed = true;
     }

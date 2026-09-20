@@ -11,12 +11,6 @@
 #include "services/input_keys.h"
 #include "storage/store_service.h"
 #include "services/strings.h"
-#include "services/timebase.h"
-
-#define SETTINGS_PENDING_NONE 0u
-#define SETTINGS_PENDING_NETWORK_SEARCH 1u
-#define SETTINGS_PENDING_CALL_WAITING 2u
-#define SETTINGS_PENDING_DELAY_MS 1800u
 
 typedef enum {
     SETTINGS_VALUE_AUTOMATIC_REDIAL = 0,
@@ -280,15 +274,7 @@ bool handle_settings_menu_key(app_t *app, uint16_t key, uint32_t now) {
             return true;
         }
         if (selected == 5u) {
-            uint8_t allowed = 1u;
-            store_setting_get_u8(STORE_SETTING_SETTINGS_PHONE_LINE_CHANGE_ALLOWED, &allowed);
-            allowed = allowed ? 0u : 1u;
-            store_setting_set_u8(STORE_SETTING_SETTINGS_PHONE_LINE_CHANGE_ALLOWED, allowed);
-            if (allowed) {
-                open_display_sid(app, 3u, 0x4du, "Line\nchange\nallowed", APP_ROUTE_SETTINGS_MENU, now);
-            } else {
-                open_display_sid(app, 3u, 0x4fu, "Line\nchange\nnot allowed", APP_ROUTE_SETTINGS_MENU, now);
-            }
+            open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_SETTINGS_MENU, now);
             return true;
         }
         static const settings_value_kind_t map[] = {
@@ -301,7 +287,11 @@ bool handle_settings_menu_key(app_t *app, uint16_t key, uint32_t now) {
         return true;
     }
     if (kind == SETTINGS_MENU_ACCESS_CODES) {
-        open_settings_access_editor(app, selected, now);
+        if (selected == 0u) {
+            open_settings_access_editor(app, selected, now);
+        } else {
+            open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_SETTINGS_MENU, now);
+        }
         return true;
     }
     return true;
@@ -367,31 +357,6 @@ bool handle_settings_welcome_options_key(app_t *app, uint16_t key, uint32_t now)
         close_editor(app);
         open_settings_menu(app, SETTINGS_MENU_PHONE, 2u);
         open_display_sid(app, 3u, 0x400u, "Welcome\nnote\nerased", APP_ROUTE_SETTINGS_MENU, now);
-    }
-    return true;
-}
-
-bool tick_settings(app_t *app, uint32_t now) {
-    if (app->settings_pending_action == SETTINGS_PENDING_NONE) {
-        return false;
-    }
-    if (app->route != APP_ROUTE_DISPLAY_MESSAGE) {
-        app->settings_pending_action = SETTINGS_PENDING_NONE;
-        return false;
-    }
-    if (time_diff_ms(now, app->settings_pending_started_ms + SETTINGS_PENDING_DELAY_MS) < 0) {
-        return false;
-    }
-    uint8_t action = app->settings_pending_action;
-    app->settings_pending_action = SETTINGS_PENDING_NONE;
-    if (action == SETTINGS_PENDING_NETWORK_SEARCH) {
-        open_settings_menu(app, SETTINGS_MENU_PHONE, 3u);
-        open_display_sid(app, 0u, 0x207u, "No\nnetwork\nfound", APP_ROUTE_SETTINGS_MENU, now);
-    } else if (action == SETTINGS_PENDING_CALL_WAITING) {
-        open_settings_menu(app, SETTINGS_MENU_CALL, 2u);
-        /* SET.7: "Request not confirmed" is record 0x0c (info bitmap 0053); the
-         * message text is v6.00 SID 0x3e2. */
-        open_display_sid(app, 12u, 0x3e2u, "Request\nnot\nconfirmed", APP_ROUTE_SETTINGS_MENU, now);
     }
     return true;
 }
@@ -472,18 +437,20 @@ void settings_cancel_editor(app_t *app, uint32_t now) {
 }
 
 void settings_submit_pin_request_editor(app_t *app, uint32_t now) {
-    size_t len = strlen(app->editor_value);
-    if (len < 4u || len > 8u) {
-        open_display_sid(app, 0u, 0xdcu, "Code\nerror", APP_ROUTE_EDITOR, now);
-        return;
-    }
-    store_setting_set_u8(STORE_SETTING_SETTINGS_PIN_CODE_REQUEST, app->settings_pending_value);
     close_editor(app);
     open_settings_menu(app, SETTINGS_MENU_SECURITY, 0u);
-    settings_show_saved(app, now);
+    open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_SETTINGS_MENU, now);
 }
 
 void settings_submit_access_code_editor(app_t *app, uint32_t now) {
+    /* Only the phone's local security code has a backend. Never acknowledge a
+     * SIM PIN/PIN2 change without an actual SIM transaction. */
+    if (app->settings_access_kind != 0u) {
+        close_editor(app);
+        open_settings_menu(app, SETTINGS_MENU_ACCESS_CODES, app->settings_access_kind);
+        open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_SETTINGS_MENU, now);
+        return;
+    }
     size_t len = strlen(app->editor_value);
     if (len == 0u || len > settings_access_max_len(app->settings_access_kind)) {
         open_display_sid(app, 0u, 0x145u, "Code\nerror", APP_ROUTE_EDITOR, now);
@@ -491,8 +458,7 @@ void settings_submit_access_code_editor(app_t *app, uint32_t now) {
     }
     if (app->settings_access_step == 0u) {
         if (app->settings_access_kind == 0u) {
-            /* The current security code is validated against the persisted
-             * code (PIN/PIN2 validation stays SIM-owned and modeled). */
+            /* Validate the current security code against the persisted code. */
             char code[STORE_TEXT_MAX + 1u];
             store_setting_get_text(STORE_SETTING_SECURITY_CODE, code, sizeof(code));
             if (strcmp(app->editor_value, code) != 0) {
@@ -528,17 +494,14 @@ void settings_submit_access_code_editor(app_t *app, uint32_t now) {
         open_display_sid(app, 0u, 0xddu, "Codes\ndo not\nmatch", APP_ROUTE_EDITOR, now);
         return;
     }
+    if (store_setting_set_text(STORE_SETTING_SECURITY_CODE,
+                               app->settings_access_new_code) != STORE_STATUS_OK) {
+        open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_EDITOR, now);
+        return;
+    }
     close_editor(app);
     open_settings_menu(app, SETTINGS_MENU_ACCESS_CODES, app->settings_access_kind);
-    if (app->settings_access_kind == 0u) {
-        /* Persist the new security code so security-gated flows honor it. */
-        store_setting_set_text(STORE_SETTING_SECURITY_CODE, app->settings_access_new_code);
-        open_display_sid(app, 3u, 0x29bu, "Security\ncode\nchanged", APP_ROUTE_SETTINGS_MENU, now);
-    } else if (app->settings_access_kind == 1u) {
-        open_display_sid(app, 3u, 0x237u, "PIN code changed", APP_ROUTE_SETTINGS_MENU, now);
-    } else {
-        open_display_sid(app, 3u, 0x233u, "PIN2 code changed", APP_ROUTE_SETTINGS_MENU, now);
-    }
+    open_display_sid(app, 3u, 0x29bu, "Security\ncode\nchanged", APP_ROUTE_SETTINGS_MENU, now);
 }
 
 static const settings_label_t *settings_menu_labels(settings_menu_kind_t kind) {
@@ -671,6 +634,13 @@ static const char *settings_menu_breadcrumb(settings_menu_kind_t kind, uint8_t s
 
 static const char *settings_menu_preview(settings_menu_kind_t kind, uint8_t selected, char *scratch, size_t scratch_cap) {
     scratch[0] = '\0';
+    /* Keep the original two-line menu layout without inventing SIM/network
+     * state for operations that are not implemented. */
+    if ((kind == SETTINGS_MENU_CALL && selected == 4u) ||
+        (kind == SETTINGS_MENU_PHONE && selected == 3u) ||
+        (kind == SETTINGS_MENU_SECURITY && selected < 4u)) {
+        return "--";
+    }
     if (kind == SETTINGS_MENU_CALL) {
         static const settings_value_kind_t map[] = {
             SETTINGS_VALUE_AUTOMATIC_REDIAL,
@@ -895,6 +865,20 @@ static const char *settings_value_label(settings_value_kind_t kind, uint8_t valu
 static bool apply_settings_value(app_t *app, uint32_t now) {
     uint8_t count = 0u;
     settings_value_kind_t kind = (settings_value_kind_t)app->settings_value_kind;
+    if (kind != SETTINGS_VALUE_AUTOMATIC_REDIAL &&
+        kind != SETTINGS_VALUE_SPEED_DIALLING &&
+        kind != SETTINGS_VALUE_OWN_NUMBER &&
+        kind != SETTINGS_VALUE_AUTOMATIC_ANSWER &&
+        kind != SETTINGS_VALUE_LANGUAGE &&
+        kind != SETTINGS_VALUE_CELL_INFO &&
+        kind != SETTINGS_VALUE_LIGHTS &&
+        kind != SETTINGS_VALUE_CONFIRM_SIM) {
+        /* Keep local preferences, including simulated ones, but do not
+         * acknowledge a SIM/network operation that never ran. */
+        return_to_settings_parent(app);
+        open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_SETTINGS_MENU, now);
+        return true;
+    }
     const settings_option_t *options = settings_value_options(kind, &count);
     if (count == 0u) {
         return true;
@@ -903,43 +887,10 @@ static bool apply_settings_value(app_t *app, uint32_t now) {
         app->settings_value_selected = 0u;
     }
     uint8_t value = options[app->settings_value_selected].value;
-    if (kind == SETTINGS_VALUE_CALL_WAITING) {
-        app->settings_pending_action = SETTINGS_PENDING_CALL_WAITING;
-        app->settings_pending_started_ms = now;
-        open_display_sid(app, 35u, 0x2a4u, "Requesting", APP_ROUTE_SETTINGS_MENU, now);
+    if (store_setting_set_u8(settings_value_store_key(kind), value) != STORE_STATUS_OK) {
+        open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_SETTINGS_VALUE, now);
         return true;
     }
-    if (kind == SETTINGS_VALUE_NETWORK && value == 1u) {
-        app->settings_pending_action = SETTINGS_PENDING_NETWORK_SEARCH;
-        app->settings_pending_started_ms = now;
-        open_display_sid(app, 35u, 0x299u, "Searching", APP_ROUTE_SETTINGS_MENU, now);
-        return true;
-    }
-    if (kind == SETTINGS_VALUE_PIN_REQUEST) {
-        app->settings_pending_value = value;
-        open_editor(app, ts_or(0x22fu, "Enter\nPIN code:"), "", 8u, EDITOR_KIND_NUMBER, EDITOR_CONTEXT_SETTINGS_PIN_REQUEST, false, now);
-        return true;
-    }
-    if (kind == SETTINGS_VALUE_FIXED_DIALLING) {
-        open_display_sid(app, 2u, 0x297u, "SIM card\nnot ready", APP_ROUTE_SETTINGS_MENU, now);
-        return true;
-    }
-    if (kind == SETTINGS_VALUE_PHONE_SECURITY) {
-        open_display_sid(app, 2u, 0x29au, "Security\ncode:", APP_ROUTE_SETTINGS_MENU, now);
-        return true;
-    }
-    if (kind == SETTINGS_VALUE_PHONE_LINE) {
-        /* SET.3: SID 0x0241 "Line 1\nselected" / 0x0053 "Line 2\nselected". */
-        store_setting_set_u8(settings_value_store_key(kind), value);
-        return_to_settings_parent(app);
-        if (value == 1u) {
-            open_display_sid(app, 3u, 0x53u, "Line 2\nselected", APP_ROUTE_SETTINGS_MENU, now);
-        } else {
-            open_display_sid(app, 3u, 0x241u, "Line 1\nselected", APP_ROUTE_SETTINGS_MENU, now);
-        }
-        return true;
-    }
-    store_setting_set_u8(settings_value_store_key(kind), value);
     if (kind == SETTINGS_VALUE_LANGUAGE) {
         /* SET.1: the new language drives the whole UI immediately. */
         strings_set_language(value);
