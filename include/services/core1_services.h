@@ -80,6 +80,7 @@ typedef enum {
     /* Stock game-level feedback. The low argument byte selects step / upper /
      * lower; the high byte remains the active profile's warning-tone level. */
     CORE1_CMD_AUDIO_GAME_LEVEL_TONE = 48,
+    CORE1_CMD_AUDIO_PACKED_TONE_PREVIEW = 49,
 } core1_cmd_t;
 
 typedef struct {
@@ -150,6 +151,7 @@ void core1_post_command(core1_cmd_t cmd, uint16_t arg);
 void core1_post_audio_composer_packed(const uint8_t *data, uint16_t len, uint8_t level);
 /* Looping variant (own-tone ring): replays until CORE1_CMD_AUDIO_STOP. */
 void core1_post_audio_composer_packed_loop(const uint8_t *data, uint16_t len, uint8_t level);
+void core1_post_audio_packed_tone_preview(const uint8_t *data, uint16_t len, uint8_t level);
 
 /* Audio idle gate -- the audio idle gate. During silence the codec I2S PIO+DMA
  * ping-pong is parked (the SAME battle-tested quiesce/resume pair the

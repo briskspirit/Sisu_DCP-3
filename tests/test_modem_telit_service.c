@@ -26,6 +26,7 @@ static const char SMS_PROFILE_QUERY[] = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?
 static const char SMS_PROFILE_RUNTIME[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0";
 static const char SMS_PROFILE_SET[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0";
 static bool s_recovery_test_message, s_recovery_test_changed;
+static bool s_recovery_test_ringtone;
 static unsigned s_recovery_test_reads, s_recovery_test_deletes;
 static bool s_psmri_live_armed;
 static bool s_late_psmri_invalidated_latch;
@@ -543,8 +544,13 @@ static void telit_response(const char *command) {
             mh_rx_push("+CMS ERROR: 321"); s_mh_final = MH_FINAL_NONE;
         } else {
             s_recovery_test_reads++;
-            mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,0,0,0,\"\",129,5");
-            mh_rx_push(s_recovery_test_changed ? "other" : "hello");
+            if (s_recovery_test_ringtone) {
+                mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,64,0,245,\"\",129,10");
+                mh_rx_push("06050415810000024A00");
+            } else {
+                mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,0,0,0,\"\",129,5");
+                mh_rx_push(s_recovery_test_changed ? "other" : "hello");
+            }
         }
         return;
     }
@@ -1168,6 +1174,7 @@ static void begin_telit(bool rxdiv_configured) {
     s_psmri_ms = 1000u;
     s_cnmi_mode = 0u;
     s_recovery_test_message = s_recovery_test_changed = false;
+    s_recovery_test_ringtone = false;
     s_recovery_test_reads = s_recovery_test_deletes = 0u;
     s_psmri_live_armed = false;
     s_late_psmri_invalidated_latch = false;
@@ -5874,6 +5881,47 @@ static void test_picture_text_send_and_local_receive(void) {
           "native WEMT picture part goes to local storage, never through ME/Inbox");
 }
 
+static void test_ringtone_transport_and_recovery(void) {
+    if (!begin_sms_operation_fixture("ringtone transport fixture boots")) return;
+    uint8_t payload[256] = {2u, 0x4au};
+    check(modem_service_request_send_binary_sms("5550101", payload, sizeof(payload), 0x1581u, 0u),
+          "native ringtone send admitted");
+    mh_settle();
+    modem_sms_send_result_t result;
+    check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_OK &&
+          mh_tx_count_exact("AT+CMGF=1;+CSMP=81,167,0,245") == 1u &&
+          mh_tx_count_exact("AT+CMGS=\"5550101\"") == 2u && mh_tx_count_exact("AT+CMGF=0") == 0u,
+          "multipart ringtone uses F5 and never enters PDU receive mode");
+    unsigned ordinary = s_mh_local_received, pictures = s_mh_picture_parts;
+    feed_direct("+CMT: \"12025550123\",\"\",\"20260918102440\",129,4101,1,0,10",
+                "06050415810000024A00");
+    check(s_mh_ringtone_parts == 1u && mh_status().ringtone_parts_received == 1u &&
+          s_mh_local_received == ordinary && s_mh_picture_parts == pictures,
+          "native WEMT ringtone routes only to the ringtone store");
+    s_mh_ringtone_reject = true;
+    feed_direct("+CMT: \"12025550123\",\"\",\"20260918102441\",129,4101,1,0,10",
+                "06050415810000024A00");
+    check(mh_status().ringtone_receive_errors == 1u && s_mh_local_received == ordinary,
+          "a rejected ringtone reports failure without becoming an ordinary Data message");
+
+    begin_telit(true);
+    boot_until_ready(30000u);
+    s_recovery_test_message = s_recovery_test_ringtone = true;
+    s_mh_local_commit_held = true;
+    mh_feed("+CMTI: \"ME\",3");
+    for (unsigned i = 0u; i < 100u && s_mh_ringtone_parts == 0u; i++) mh_advance(50u);
+    check(s_mh_ringtone_parts == 1u && s_mh_local_received == 0u &&
+          s_recovery_test_reads == 1u && s_recovery_test_deletes == 0u,
+          "ME ringtone recovery waits for durable ringtone storage");
+    mh_advance(1000u);
+    check(s_recovery_test_deletes == 0u, "uncommitted ringtone cannot release its ME copy");
+    s_mh_local_commit_held = false;
+    for (unsigned i = 0u; i < 100u && s_recovery_test_deletes == 0u; i++) mh_advance(50u);
+    check(s_recovery_test_reads == 2u && s_recovery_test_deletes == 1u &&
+          s_mh_ringtone_parts == 1u && mh_status().sms_recovered == 1u,
+          "committed ringtone authorizes exact reread and one ME deletion without duplicate delivery");
+}
+
 static void test_unicode_send_keeps_direct_delivery(void) {
     if (!begin_sms_operation_fixture("Unicode text-send fixture boots")) return;
     s_hold_final_command = "AT+CMGF=1;+CSMP=17,167,0,8";
@@ -6808,6 +6856,7 @@ int main(void) {
     test_supplementary_refresh_recovery();
     test_call_forward_queue_cancellation();
     test_newer_call_forward_result_survives_old_final();
+    test_ringtone_transport_and_recovery();
 
     if (s_failures == 0) {
         printf("test_modem_telit_service: OK\n");

@@ -44,6 +44,7 @@ uint8_t composer_octave_tracker_next(composer_octave_tracker_t *t, uint8_t expli
 
 /* Bit-pack `note_count` events into the Nokia composer stream (header,
  * name, tempo, per-note records). False on an unrepresentable count,
+ * malformed UTF-8/UCS-2 title (up to 15 characters),
  * destination overflow, or any value that does not fit its bit field
  * (tempo > 0x1f, pitch > 15, duration > 7); an octave outside 1..3 is
  * clamped to 1 as the format defines. */

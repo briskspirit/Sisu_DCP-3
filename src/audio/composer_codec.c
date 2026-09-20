@@ -151,6 +151,30 @@ static uint16_t composer_read_bits(composer_bit_reader_t *reader, uint8_t bits) 
 
 /* --- stream framing (byte-verified against the traced v6.00 format) --- */
 
+static bool title_decode(const char *name, uint16_t *chars, uint8_t *count, bool *unicode) {
+    const uint8_t *p = (const uint8_t *)(name != NULL ? name : "");
+    *count = 0u;
+    *unicode = false;
+    while (*p != 0u && *count < COMPOSER_CODEC_NAME_MAX) {
+        uint16_t cp = *p++;
+        if (cp >= 0x80u) {
+            unsigned extra;
+            uint16_t minimum;
+            if (cp >= 0xc2u && cp <= 0xdfu) { cp &= 0x1fu; extra = 1u; minimum = 0x80u; }
+            else if (cp >= 0xe0u && cp <= 0xefu) { cp &= 0x0fu; extra = 2u; minimum = 0x800u; }
+            else return false;
+            while (extra-- != 0u) {
+                if ((*p & 0xc0u) != 0x80u) return false;
+                cp = (uint16_t)((cp << 6u) | (*p++ & 0x3fu));
+            }
+            if (cp < minimum || (cp >= 0xd800u && cp <= 0xdfffu)) return false;
+        }
+        if (cp > 0xffu) *unicode = true;
+        chars[(*count)++] = cp;
+    }
+    return true;
+}
+
 bool composer_codec_encode(const char *name,
                            const composer_note_event_t *notes,
                            uint8_t note_count,
@@ -174,15 +198,19 @@ bool composer_codec_encode(const char *name,
     }
     composer_bit_writer_t writer;
     composer_bit_writer_init(&writer, dst, cap);
-    uint8_t name_len = (uint8_t)strnlen(name != 0 ? name : "", COMPOSER_CODEC_NAME_MAX);
+    uint16_t title[COMPOSER_CODEC_NAME_MAX];
+    uint8_t name_len;
+    bool unicode;
+    if (!title_decode(name, title, &name_len, &unicode)) return false;
     uint8_t note_length_field = (uint8_t)(note_count * 2u + 3u);
-    composer_bit_write(&writer, 0x02u, 8u);
+    composer_bit_write(&writer, unicode ? 0x03u : 0x02u, 8u);
     composer_bit_write(&writer, 0x4au, 8u);
+    if (unicode) composer_bit_write(&writer, 0x44u, 8u);
     composer_bit_write(&writer, 0x1du, 7u);
     composer_bit_write(&writer, 0x01u, 3u);
     composer_bit_write(&writer, name_len, 4u);
     for (uint8_t i = 0u; i < name_len; i++) {
-        composer_bit_write(&writer, (uint8_t)name[i], 8u);
+        composer_bit_write(&writer, title[i], unicode ? 16u : 8u);
     }
     composer_bit_write(&writer, 0x01u, 8u);
     composer_bit_write(&writer, 0x00u, 3u);
@@ -223,8 +251,10 @@ bool composer_codec_decode(const uint8_t *data, uint16_t len,
     composer_bit_reader_t reader;
     composer_reader_init(&reader, data, len);
 
-    if (composer_read_bits(&reader, 8u) != 0x02u ||
-        composer_read_bits(&reader, 8u) != 0x4au ||
+    uint16_t commands = composer_read_bits(&reader, 8u);
+    bool unicode = commands == 3u;
+    if ((commands != 2u && !unicode) || composer_read_bits(&reader, 8u) != 0x4au ||
+        (unicode && composer_read_bits(&reader, 8u) != 0x44u) ||
         composer_read_bits(&reader, 7u) != 0x1du ||
         composer_read_bits(&reader, 3u) != 0x01u) {
         return false;
@@ -234,7 +264,7 @@ bool composer_codec_decode(const uint8_t *data, uint16_t len,
         return false;
     }
     for (uint8_t i = 0u; i < name_len; i++) {
-        (void)composer_read_bits(&reader, 8u);
+        (void)composer_read_bits(&reader, unicode ? 16u : 8u);
     }
     if (composer_read_bits(&reader, 8u) != 0x01u) {
         return false;

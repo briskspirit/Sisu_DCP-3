@@ -146,6 +146,7 @@ static bool cmd_starts_audio(core1_cmd_t cmd) {
     case CORE1_CMD_AUDIO_COMPOSER_NOTE:
     case CORE1_CMD_AUDIO_COMPOSER_PACKED:
     case CORE1_CMD_AUDIO_COMPOSER_PACKED_LOOP:
+    case CORE1_CMD_AUDIO_PACKED_TONE_PREVIEW:
     case CORE1_CMD_AUDIO_RINGTONE_MENU_PREVIEW:
     case CORE1_CMD_AUDIO_TONES_SYSTEM_PREVIEW:
     case CORE1_CMD_AUDIO_TONES_CLICK_PREVIEW:
@@ -736,6 +737,10 @@ void core1_post_audio_composer_packed_loop(const uint8_t *data, uint16_t len, ui
     post_composer_packed(CORE1_CMD_AUDIO_COMPOSER_PACKED_LOOP, data, len, level);
 }
 
+void core1_post_audio_packed_tone_preview(const uint8_t *data, uint16_t len, uint8_t level) {
+    post_composer_packed(CORE1_CMD_AUDIO_PACKED_TONE_PREVIEW, data, len, level);
+}
+
 static void core1_main(void) {
     stack_monitor_core1_init();
     /* We coordinate flash writes with our own RAM-park handshake, not the SDK
@@ -816,7 +821,8 @@ static void core1_main(void) {
                 command.cmd == CORE1_CMD_AUDIO_TONES_PREVIEW_STOP) {
                 audio_service_command(command.cmd, command.arg);
             } else if (command.cmd == CORE1_CMD_AUDIO_COMPOSER_PACKED ||
-                       command.cmd == CORE1_CMD_AUDIO_COMPOSER_PACKED_LOOP) {
+                       command.cmd == CORE1_CMD_AUDIO_COMPOSER_PACKED_LOOP ||
+                       command.cmd == CORE1_CMD_AUDIO_PACKED_TONE_PREVIEW) {
                 /* Snapshot the shared composer buffer under the lock so a
                  * concurrent core0 re-post (memcpy into s_composer_packed)
                  * cannot tear the data while core1 reads it. */
@@ -833,6 +839,8 @@ static void core1_main(void) {
                 critical_section_exit(&s_command_lock);
                 if (command.cmd == CORE1_CMD_AUDIO_COMPOSER_PACKED_LOOP) {
                     audio_service_start_composer_packed_loop(packed, packed_len, packed_level);
+                } else if (command.cmd == CORE1_CMD_AUDIO_PACKED_TONE_PREVIEW) {
+                    audio_service_start_packed_tone_preview(packed, packed_len, packed_level);
                 } else {
                     audio_service_start_composer_packed(packed, packed_len, packed_level);
                 }

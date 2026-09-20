@@ -311,6 +311,8 @@ store_status_t store_picture_message_sender(uint8_t slot, char *dst, size_t cap)
     return STORE_STATUS_OK;
 }
 store_status_t store_picture_commit_status(void) { return s_picture_commit_status; }
+store_status_t store_ringtone_commit_status(void) { return STORE_STATUS_OK; }
+uint32_t store_ringtone_pending_first(void) { return 0u; }
 uint32_t store_picture_pending_first(void) {
     return s_picture_commit_status == STORE_STATUS_OK && !s_pending_picture_consumed
         ? s_pending_picture_id : 0u;

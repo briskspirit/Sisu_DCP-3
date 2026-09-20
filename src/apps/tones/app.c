@@ -343,7 +343,7 @@ static profile_setting_kind_t tones_profile_kind(tones_setting_kind_t kind) {
 static bool ringing_tone_row_visible(uint8_t raw) {
     uint8_t value = RINGING_TONE_OPTIONS[raw].value;
     if (value == 18u) {
-        return false; /* no received-melody transport implemented yet */
+        return store_own_tone_used(1u);
     }
     if (value == 19u) {
         return store_own_tone_used(0u);
@@ -571,16 +571,8 @@ static void preview_tones_setting(const app_t *app, tones_setting_kind_t kind, u
             post_ringtone_preview(app,
                                   (uint8_t)RINGING_TONE_OPTIONS[raw].ringtone_index,
                                   tones_current_ringing_audio_level(app));
-        } else if (RINGING_TONE_OPTIONS[raw].value == 19u) {
-            /* SET.9: preview the stored own tone while browsing. */
-            static store_own_tone_t own_tone;
-            if (store_own_tone_get(0u, &own_tone) == STORE_STATUS_OK && own_tone.used &&
-                own_tone.packed_len > 0u) {
-                core1_post_audio_composer_packed(own_tone.packed,
-                                                 own_tone.packed_len,
-                                                 tones_current_ringing_audio_level(app));
-            }
-        }
+        } else post_ringtone_preview_by_value(app, RINGING_TONE_OPTIONS[raw].value,
+                                             tones_current_ringing_audio_level(app));
         break;
     }
     case TONES_SETTING_RINGING_VOLUME:
@@ -671,6 +663,12 @@ static void post_ringtone_preview(const app_t *app, uint8_t ringtone_index, uint
 }
 
 static void post_ringtone_preview_by_value(const app_t *app, uint8_t ringtone_value, uint8_t level) {
+    if (ringtone_value == 18u || ringtone_value == 19u) {
+        static store_own_tone_t tone;
+        if (store_own_tone_get(ringtone_value == 18u ? 1u : 0u, &tone) == STORE_STATUS_OK && tone.packed_len != 0u)
+            core1_post_audio_packed_tone_preview(tone.packed, tone.packed_len, level);
+        return;
+    }
     for (uint8_t i = 0; i < ARRAY_COUNT(RINGING_TONE_OPTIONS); i++) {
         if (RINGING_TONE_OPTIONS[i].value == ringtone_value &&
             RINGING_TONE_OPTIONS[i].ringtone_index >= 0) {
@@ -712,6 +710,11 @@ const char *ringing_tone_value_label(uint8_t value) {
  * ACTIVE profile (the picker is not profile-editing). */
 void preview_ringing_tone_value_active_profile(uint8_t value) {
     stop_tones_preview();
+    if (value == 18u || value == 19u) {
+        post_ringtone_preview_by_value(NULL, value, audio_level_from_ringing_volume(
+            profile_get_tone_setting(profile_active_index(), PROFILE_SETTING_RINGING_VOLUME)));
+        return;
+    }
     for (uint8_t i = 0; i < ARRAY_COUNT(RINGING_TONE_OPTIONS); i++) {
         if (RINGING_TONE_OPTIONS[i].value == value && RINGING_TONE_OPTIONS[i].ringtone_index >= 0) {
             uint8_t active = profile_active_index();

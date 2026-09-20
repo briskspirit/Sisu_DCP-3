@@ -64,6 +64,7 @@ typedef enum {
     APP_ROUTE_TONE_COMPOSER,
     APP_ROUTE_TONE_COMPOSER_OPTIONS,
     APP_ROUTE_TONE_COMPOSER_TEMPO,
+    APP_ROUTE_RECEIVED_TONE,
     APP_ROUTE_SETTINGS_MENU,
     APP_ROUTE_SETTINGS_VALUE,
     APP_ROUTE_SETTINGS_WELCOME_OPTIONS,
@@ -496,6 +497,17 @@ typedef struct {
     uint32_t tone_composer_preview_stop_ms;
     bool tone_composer_send_waiting;
     uint32_t tone_composer_send_started_ms;
+    uint32_t tone_composer_send_request_id;
+    uint32_t ringtone_notice_id;
+    uint32_t ringtone_last_notice_id;
+    uint32_t ringtone_receive_id;
+    uint32_t ringtone_errors_seen;
+    uint32_t ringtone_play_until_ms;
+    uint8_t ringtone_option;
+    uint8_t ringtone_save_action;
+    bool ringtone_playing;
+    bool ringtone_warning;
+    bool ringtone_storage_failed;
     uint16_t tone_composer_packed_len;
     uint8_t tone_composer_packed[STORE_OWN_TONE_PACKED_MAX];
     uint8_t profiles_menu_kind;

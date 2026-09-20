@@ -1,5 +1,6 @@
 #include "audio/audio_service.h"
 #include "audio/composer_codec.h"
+#include "audio/ringtone_codec.h"
 
 #include "hardware/sync.h"
 #include "audio/audio_bridge.h"
@@ -91,9 +92,10 @@ typedef struct {
     uint32_t tone_segment_remaining;
     uint8_t tone_rest;
     const audio_sequence_step_t *sequence;
-    audio_sequence_step_t composer_sequence[96];
-    uint8_t sequence_len;
-    uint8_t sequence_pos;
+    audio_sequence_step_t composer_sequence[RINGTONE_EVENT_MAX * 2u];
+    uint16_t sequence_len;
+    uint16_t sequence_pos;
+    uint16_t sequence_loop_start;
     bool sequence_square;
     bool loop; /* COMPOSER_PACKED: replay whole-melody until stopped (own-tone ring) */
     bool dynamics; /* honour the 0x09 volume-seed crescendo for opted-in streams */
@@ -188,9 +190,10 @@ static int16_t keypad_audio_amplitude(uint8_t level);
 static bool composer_packed_decode(const uint8_t *data,
                                    uint16_t len,
                                    audio_sequence_step_t *steps,
-                                   uint8_t step_cap,
-                                   uint8_t *out_count);
-static uint16_t composer_packed_duration_ms(uint8_t tempo, uint8_t duration_code, uint8_t dotted);
+                                   uint16_t step_cap,
+                                   uint16_t *out_count,
+                                   uint16_t *loop_start,
+                                   bool loop);
 static uint16_t composer_packed_pitch_hz(uint8_t octave, uint8_t pitch_code);
 
 static audio_state_t s_audio;
@@ -854,7 +857,7 @@ static void audio_fill(void *ctx, int16_t *dst, uint32_t frame_count) {
                          * sample segment from a valid step (sequence_len >= 1), so
                          * this cannot spin. */
                         wrapped = true;
-                        state->sequence_pos = 0u;
+                        state->sequence_pos = state->sequence_loop_start;
                         state->phase0 = 0u;
                         continue;
                     }
@@ -1165,6 +1168,11 @@ void audio_service_start_composer_packed_loop(const uint8_t *data, uint16_t len,
     audio_update_active_flag();
 }
 
+void audio_service_start_packed_tone_preview(const uint8_t *data, uint16_t len, uint8_t level) {
+    audio_service_start_composer_packed(data, len, level);
+    s_tones_preview_owned = s_audio.kind == AUDIO_KIND_COMPOSER_PACKED;
+}
+
 static void start_composer_note(uint8_t pitch, uint8_t level) {
     uint16_t hz = pitch == 0x40u ? 0u : tone_frequency_hz(pitch);
     if (hz == 0u) {
@@ -1197,9 +1205,11 @@ static void start_composer_packed(const uint8_t *data, uint16_t len, uint8_t lev
         return;
     }
 
-    audio_sequence_step_t steps[96];
-    uint8_t step_count = 0u;
-    if (!composer_packed_decode(data, len, steps, (uint8_t)(sizeof(steps) / sizeof(steps[0])), &step_count) ||
+    /* Decode outside the audio IRQ; only the final copy touches live state. */
+    static audio_sequence_step_t steps[RINGTONE_EVENT_MAX * 2u];
+    uint16_t step_count = 0u, loop_start = 0u;
+    if (!composer_packed_decode(data, len, steps, (uint16_t)(sizeof(steps) / sizeof(steps[0])),
+                                &step_count, &loop_start, loop) ||
         step_count == 0u) {
         stop_all_audio();
         return;
@@ -1217,6 +1227,7 @@ static void start_composer_packed(const uint8_t *data, uint16_t len, uint8_t lev
     s_audio.sequence = s_audio.composer_sequence;
     s_audio.sequence_len = step_count;
     s_audio.sequence_pos = 0u;
+    s_audio.sequence_loop_start = loop_start;
     /* Own tone IS a ringtone: square voicing on the magnetic buzzer, like the
      * PPM ringtones -- not the codec/earpiece. Flat (composer data carries no
      * 0x09 crescendo); the ring volume sets the buzzer duty via s_env_ceiling. */
@@ -1746,38 +1757,40 @@ static int32_t headset_local_sample(int32_t sample) {
 static bool composer_packed_decode(const uint8_t *data,
                                    uint16_t len,
                                    audio_sequence_step_t *steps,
-                                   uint8_t step_cap,
-                                   uint8_t *out_count) {
-    if (data == 0 || len == 0u || steps == 0 || step_cap == 0u || out_count == 0) {
+                                   uint16_t step_cap,
+                                   uint16_t *out_count,
+                                   uint16_t *loop_start,
+                                   bool loop) {
+    if (data == 0 || len == 0u || steps == 0 || step_cap == 0u || out_count == 0 || loop_start == 0) {
         return false;
     }
     *out_count = 0u;
-    /* Static, not stack: this runs on core 1's fixed 4 KiB stack behind the
-     * single serialized command dispatcher (never from the audio IRQ), and a
-     * 384-byte transient on top of the caller's steps[] copy is budget the
-     * IRQ frames want more than we do. Sized to the caller's step buffer. */
-    static composer_note_event_t events[96];
-    uint8_t event_cap = step_cap < (uint8_t)(sizeof(events) / sizeof(events[0]))
-                            ? step_cap
-                            : (uint8_t)(sizeof(events) / sizeof(events[0]));
-    uint8_t tempo = 0u;
-    uint8_t count = 0u;
-    if (!composer_codec_decode(data, len, &tempo, events, event_cap, &count)) {
+    *loop_start = 0u;
+    static ringtone_event_t events[RINGTONE_EVENT_MAX];
+    ringtone_info_t info;
+    if (!ringtone_decode(data, len, &info, events, RINGTONE_EVENT_MAX)) {
         return false;
     }
-    for (uint8_t i = 0u; i < count; i++) {
-        steps[i].hz = composer_packed_pitch_hz(events[i].octave, events[i].pitch_code);
-        steps[i].duration_ms = composer_packed_duration_ms(
-            tempo, events[i].duration_code, events[i].dotted ? 1u : 0u);
+    uint16_t count = info.loop_end != 0u ? info.loop_end : info.event_count;
+    for (uint16_t i = 0u; i < count; i++) {
+        if (loop && info.loop_end != 0u && i == info.loop_start) *loop_start = *out_count;
+        const ringtone_event_t *event = &events[i];
+        uint16_t sound = event->duration_ms;
+        if (event->pitch != 0u) {
+            /* Original 0x2745d4: natural has a 20 ms gap; staccato sounds
+             * one third of short notes, capped at 60 ms for longer ones.
+             * Volume instructions are parsed but ignored, as at 0x2746fc;
+             * the user's ringing volume owns the actual buzzer level. */
+            if (event->style == 0u) sound -= sound > 20u ? 20u : sound / 2u;
+            if (event->style == 2u) sound = sound > 180u ? 60u : sound / 3u;
+        }
+        uint16_t gap = event->duration_ms - sound;
+        if (*out_count + (gap != 0u ? 2u : 1u) > step_cap) return false;
+        steps[(*out_count)++] = (audio_sequence_step_t){
+            composer_packed_pitch_hz(event->scale, event->pitch), sound};
+        if (gap != 0u) steps[(*out_count)++] = (audio_sequence_step_t){0u, gap};
     }
-    *out_count = count;
     return count != 0u;
-}
-
-static uint16_t composer_packed_duration_ms(uint8_t tempo, uint8_t duration_code, uint8_t dotted) {
-    return composer_note_ms(composer_tempo_bpm(tempo),
-                            composer_duration_denominator(duration_code),
-                            dotted == 1u);
 }
 
 static uint16_t composer_packed_pitch_hz(uint8_t octave, uint8_t pitch_code) {
@@ -1787,10 +1800,10 @@ static uint16_t composer_packed_pitch_hz(uint8_t octave, uint8_t pitch_code) {
     static const uint8_t semitone_by_pitch[] = {
         0u, 0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u,
     };
-    if (octave < 1u || octave > 3u) {
+    if (octave > 3u) {
         octave = 1u;
     }
-    uint8_t freq_index = (uint8_t)(62u + semitone_by_pitch[pitch_code] + (octave - 1u) * 12u);
+    uint8_t freq_index = (uint8_t)(50u + semitone_by_pitch[pitch_code] + octave * 12u);
     uint8_t pitch = (uint8_t)(0x40u + freq_index);
     return tone_frequency_hz(pitch);
 }

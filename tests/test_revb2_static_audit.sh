@@ -817,8 +817,8 @@ require_fixed \
     src/services/modem_service.c \
     "a call that never formed a bridge must still retire stale volume intent"
 require_fixed \
-    'static composer_note_event_t events[96];' src/audio/audio_service.c \
-    "composer decode scratch stays off the core-1 stack (measured 824 -> 440 B frame)"
+    'static ringtone_event_t events[RINGTONE_EVENT_MAX];' src/audio/audio_service.c \
+    "packed melody decode scratch stays off the core-1 stack"
 require_fixed \
     's_vibra_enabled = marker_vibra;' src/audio/audio_service.c \
     "tone-stream replacement must publish its marker-vibra owner atomically"

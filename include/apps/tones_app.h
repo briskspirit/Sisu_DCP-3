@@ -51,4 +51,10 @@ void update_tone_composer_recipient_softkey(app_t *app);
 void tone_composer_submit_recipient(app_t *app, uint32_t now);
 void tone_composer_cancel_recipient(app_t *app, uint32_t now);
 
+void open_received_tone(app_t *app);
+bool handle_received_tone_key(app_t *app, uint16_t key, uint32_t now);
+bool handle_received_tone_display_key(app_t *app, uint16_t key);
+bool tick_received_tone(app_t *app, uint32_t now);
+void render_received_tone(const app_t *app, framebuffer_t *fb);
+
 #endif

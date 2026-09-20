@@ -96,6 +96,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/audio/audio_levels.c
     src/audio/audio_service.c
     src/audio/composer_codec.c
+    src/audio/ringtone_codec.c
     src/audio/buzzer_hal.c
     src/audio/modem_i2s_hal.c
     src/audio/nau88c22_codec.c
@@ -143,6 +144,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/apps/standby_app.c
     src/apps/tones/app.c
     src/apps/tones/composer.c
+    src/apps/tones/received.c
     src/hal/accessory_hal.c
     src/services/battery_charge_logic.c
     src/hal/battery_hal.c

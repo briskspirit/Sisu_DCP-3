@@ -49,6 +49,10 @@ bool handle_call_divert_display_key(app_t *app, uint16_t key, uint32_t now) {
     (void)now;
     return false;
 }
+bool handle_received_tone_display_key(app_t *app, uint16_t key) {
+    (void)app; (void)key;
+    return false;
+}
 
 uint16_t audio_arg(uint8_t code, uint8_t level) {
     return (uint16_t)(code | ((uint16_t)level << 8u));

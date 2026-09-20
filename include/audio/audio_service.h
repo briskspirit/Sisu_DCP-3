@@ -34,6 +34,7 @@ bool audio_service_command_uses_buzzer(uint16_t command, uint16_t arg);
 void audio_service_start_composer_packed(const uint8_t *data, uint16_t len, uint8_t level);
 /* Looping variant: replays the packed melody until stopped (own-tone ring). */
 void audio_service_start_composer_packed_loop(const uint8_t *data, uint16_t len, uint8_t level);
+void audio_service_start_packed_tone_preview(const uint8_t *data, uint16_t len, uint8_t level);
 
 /* Activate/deactivate the modem<->codec voice bridge (core 1; dispatched from
  * a core1 command). The codec route + format flags are set on core 0 first. */

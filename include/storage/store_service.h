@@ -400,6 +400,17 @@ store_status_t store_own_tone_set(uint8_t slot, const store_own_tone_t *tone);
 store_status_t store_own_tone_clear(uint8_t slot);
 bool store_own_tone_used(uint8_t slot);
 
+/* Received melodies share one atomic unit with Own/Received tone. A pending
+ * melody is exposed only after commit; saving replaces slot 1, never slot 0. */
+store_status_t store_ringtone_commit_status(void);
+store_status_t store_ringtone_receive(const sms_codec_message_t *part, uint32_t now_ms);
+store_status_t store_ringtone_receive_pdu(const char *pdu, uint32_t now_ms);
+store_status_t store_ringtone_received_pdu_status(const char *pdu);
+uint32_t store_ringtone_pending_first(void);
+store_status_t store_ringtone_pending_get(uint32_t id, store_own_tone_t *out);
+store_status_t store_ringtone_pending_save(uint32_t id);
+store_status_t store_ringtone_pending_discard(uint32_t id);
+
 store_status_t store_call_divert_get(store_call_divert_state_t *out_state);
 store_status_t store_call_divert_set(const store_call_divert_state_t *state);
 

@@ -2031,16 +2031,11 @@ static void start_incoming_call_tone(void) {
         return;
     }
 
-    if (ringtone_value == 19u) {
-        /* "Own tone" (Composer melody): value 19 is a sentinel not present in the
-         * generated ringtone table, so play the stored packed melody through the
-         * composer engine -- looped for the call like a built-in ring. 1:1 with
-         * the original (value 19 rings via the same tone engine); the port
-         * previously fell through ringtone_by_value()==NULL and rang silent.
-         * Packed sequences carry no embedded vibra markers, so drive vibra with
-         * the generic pulse rather than the stream marker gate. */
+    if (ringtone_value == 18u || ringtone_value == 19u) {
+        /* Own and Received tone use the same buzzer melody engine. Packed
+         * sequences have no vibra markers, so use the generic pulse. */
         static store_own_tone_t own_tone;
-        if (store_own_tone_get(0u, &own_tone) != STORE_STATUS_OK ||
+        if (store_own_tone_get(ringtone_value == 18u ? 1u : 0u, &own_tone) != STORE_STATUS_OK ||
             !own_tone.used || own_tone.packed_len == 0u) {
             return;
         }

@@ -138,6 +138,9 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
     if (tick_tone_composer(app, now_ms)) {
         changed = true;
     }
+    if (tick_received_tone(app, now_ms)) {
+        changed = true;
+    }
     if (tick_calculator(app, now_ms)) {
         changed = true;
     }

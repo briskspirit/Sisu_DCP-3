@@ -107,6 +107,8 @@ typedef struct {
     uint32_t sms_filtered_oma_dm;
     uint32_t picture_parts_received;
     uint32_t picture_receive_errors;
+    uint32_t ringtone_parts_received;
+    uint32_t ringtone_receive_errors;
     uint32_t last_update_ms;
     uint8_t debug_state;
     uint8_t debug_active_kind;

@@ -86,6 +86,8 @@ static const display_record_meta_t DISPLAY_RECORDS[] = {
     {32u, DISPLAY_TEXT_WIN13, DISPLAY_GFX_NONE,                 DISPLAY_TONE_SILENT,  0u,  0u},
     {35u, DISPLAY_TEXT_PROGRESS, DISPLAY_GFX_ANIM_STRIPE,       DISPLAY_TONE_SILENT,  0u,  0u},
     {36u, DISPLAY_TEXT_PROGRESS, DISPLAY_GFX_ANIM_STRIPE,       DISPLAY_TONE_SILENT,  0u,  0u},
+    /* ROM 0x25: received-tone playback, stripe and Quit softkey. */
+    {37u, DISPLAY_TEXT_PROGRESS, DISPLAY_GFX_ANIM_STRIPE,       DISPLAY_TONE_SILENT,  0u,  0u},
     {CALL_DIVERT_REQUEST_RECORD_ID,
           DISPLAY_TEXT_PROGRESS, DISPLAY_GFX_ANIM_STRIPE,       DISPLAY_TONE_SILENT,  0u,  0u},
     {42u, DISPLAY_TEXT_WIN12, DISPLAY_GFX_BITMAP,               DISPLAY_TONE_SILENT,  49u, 1536u},
@@ -126,6 +128,7 @@ static const uint16_t *display_anim_frames(uint8_t gfx_kind, uint8_t *out_count)
 static void play_display_record_tone(uint8_t index);
 
 bool handle_display_message_key(app_t *app, uint16_t key, uint32_t now) {
+    if (handle_received_tone_display_key(app, key)) return true;
     bool phonebook_wait_owned = phonebook_request_display_owned(app);
     bool phonebook_erase_owned = phonebook_erase_all_display_owned(app);
     if (phonebook_wait_owned ||
@@ -196,8 +199,8 @@ void render_display_message(const app_t *app, framebuffer_t *fb) {
         for (uint8_t i = 0; i < count; i++) {
             fb_text(fb, font, lines[i], 0, 18 + i * 9, true, FB_WIDTH);
         }
-        if (app->display_record_id == CALL_DIVERT_REQUEST_RECORD_ID &&
-            app->call_divert_pending_action != 0u) {
+        if ((app->display_record_id == CALL_DIVERT_REQUEST_RECORD_ID &&
+             app->call_divert_pending_action != 0u) || app->display_record_id == 37u) {
             draw_softkey(fb, "Quit");
         }
         return;

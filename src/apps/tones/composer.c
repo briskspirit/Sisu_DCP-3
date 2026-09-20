@@ -1,6 +1,7 @@
 #include "apps/tones_app.h"
 #include "tones_internal.h"
 #include "audio/composer_codec.h"
+#include "audio/ringtone_codec.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -61,8 +62,7 @@ static const tones_label_t COMPOSER_OPTION_LABELS[] = {
     {"Play", 0x0f8u},         /* ROM 248 */
     {"Save", 0x0f9u},         /* ROM 249 */
     {"Tempo", 0x0fcu},        /* ROM 252 */
-    /* ROM 251 "Send" remains capability-gated until smart-message tone
-     * transport exists end to end; exposing it would guarantee failure. */
+    {"Send", 0x0fbu},
     {"Clear screen", 0x0e4u}, /* ROM 228 */
     {"Exit", 0x0e5u},         /* ROM 229 */
 };
@@ -96,7 +96,7 @@ static const char *const COMPOSER_DURATIONS[] = {"1", "2", "4", "8", "16", "32"}
 #define COMPOSER_MAX_TOKENS 96u
 #define COMPOSER_CURSOR_BLINK_MS 512u
 #define COMPOSER_PREVIEW_MS 180u
-#define COMPOSER_SEND_PROGRESS_MS 1000u
+#define COMPOSER_SEND_TIMEOUT_MS 180000u
 
 /* Composer actions are serialized by the core-0 app router. Reuse one token /
  * wire-event workspace instead of nesting 1-2 KiB automatic arrays while
@@ -144,7 +144,7 @@ static bool composer_build_packed_tone(const char *name,
                                        uint8_t *dst,
                                        uint16_t cap,
                                        uint16_t *out_len);
-static void composer_store_current_own_tone(app_t *app);
+static bool composer_store_current_own_tone(app_t *app);
 void open_tone_composer(app_t *app, uint32_t now) {
     composer_stop_audio(app);
     composer_load_own_tone(app, now);
@@ -266,6 +266,7 @@ bool handle_tone_composer_options_key(app_t *app, uint16_t key, uint32_t now) {
         }
         break;
     case 1:
+    case 3:
         open_editor(app,
                     ts_or(0x0e7u, "Tone name:"),
                     app->tone_composer_name[0] ? app->tone_composer_name : "Own tone",
@@ -274,13 +275,13 @@ bool handle_tone_composer_options_key(app_t *app, uint16_t key, uint32_t now) {
                     EDITOR_CONTEXT_TONE_COMPOSER_NAME,
                     true,
                     now);
-        app->tone_composer_name_action = 0u;
+        app->tone_composer_name_action = app->tone_composer_option_index == 3u ? 1u : 0u;
         break;
     case 2:
         app->route = APP_ROUTE_TONE_COMPOSER_TEMPO;
         app->dirty = true;
         break;
-    case 3:
+    case 4:
         composer_stop_audio(app);
         app->tone_composer_notes[0] = '\0';
         app->tone_composer_cursor_index = 0u;
@@ -289,7 +290,7 @@ bool handle_tone_composer_options_key(app_t *app, uint16_t key, uint32_t now) {
         app->route = APP_ROUTE_TONE_COMPOSER;
         app->dirty = true;
         break;
-    case 4:
+    case 5:
     default:
         composer_return_to_tones_menu(app);
         break;
@@ -341,8 +342,10 @@ void tone_composer_submit_name(app_t *app, uint32_t now) {
         return;
     }
 
-    composer_store_current_own_tone(app);
-    open_display_sid(app, 3u, 0x0e6u, "Tone saved", APP_ROUTE_TONE_COMPOSER, now);
+    if (composer_store_current_own_tone(app))
+        open_display_sid(app, 3u, 0x0e6u, "Tone saved", APP_ROUTE_TONE_COMPOSER, now);
+    else
+        open_display_sid(app, 0u, 0x3b3u, "Not\nsaved", APP_ROUTE_TONE_COMPOSER, now);
 }
 
 void tone_composer_cancel_name(app_t *app, uint32_t now) {
@@ -353,7 +356,7 @@ void tone_composer_cancel_name(app_t *app, uint32_t now) {
 }
 
 void open_tone_composer_recipient_editor(app_t *app, const char *value, uint32_t now) {
-    open_editor(app, "Enter number:", value, 21u, EDITOR_KIND_NUMBER, EDITOR_CONTEXT_TONE_COMPOSER_RECIPIENT, true, now);
+    open_editor(app, ts_or(0x212u, "Enter number:"), value, 21u, EDITOR_KIND_NUMBER, EDITOR_CONTEXT_TONE_COMPOSER_RECIPIENT, true, now);
     update_tone_composer_recipient_softkey(app);
 }
 
@@ -373,7 +376,21 @@ void tone_composer_submit_recipient(app_t *app, uint32_t now) {
         app->dirty = true;
         return;
     }
-    composer_store_current_own_tone(app);
+    if (app->tone_composer_send_request_id != 0u) {
+        open_display_sid(app, 0u, 0x35au, "Still\nsending\nprevious", APP_ROUTE_TONE_COMPOSER_OPTIONS, now);
+        return;
+    }
+    if (!composer_build_packed_tone(app->tone_composer_name, app->tone_composer_notes,
+            app->tone_composer_tempo_index, app->tone_composer_packed,
+            sizeof(app->tone_composer_packed), &app->tone_composer_packed_len) ||
+        !modem_service_request_send_binary_sms(app->editor_value, app->tone_composer_packed,
+            app->tone_composer_packed_len, RINGTONE_SMS_PORT, 0u,
+            &app->tone_composer_send_request_id)) {
+        open_display_sid(app, 0u, 0x210u, "Not\ndone", APP_ROUTE_TONE_COMPOSER_OPTIONS, now);
+        return;
+    }
+    (void)composer_store_current_own_tone(app);
+    close_editor(app);
     app->tone_composer_send_waiting = true;
     app->tone_composer_send_started_ms = now;
     open_display_sid(app, 46u, 0x0feu, "Sending\ntone", APP_ROUTE_TONE_COMPOSER, now);
@@ -388,11 +405,29 @@ void tone_composer_cancel_recipient(app_t *app, uint32_t now) {
 
 bool tick_tone_composer(app_t *app, uint32_t now) {
     bool changed = false;
-    if (app->tone_composer_send_waiting &&
-        time_diff_ms(now, app->tone_composer_send_started_ms + COMPOSER_SEND_PROGRESS_MS) >= 0) {
-        app->tone_composer_send_waiting = false;
-        open_display_sid(app, 0u, 0x359u, "Message\nsending\nfailed", APP_ROUTE_TONE_COMPOSER_OPTIONS, now);
-        changed = true;
+    if (app->tone_composer_send_request_id != 0u) {
+        bool owned = app->tone_composer_send_waiting && app->route == APP_ROUTE_DISPLAY_MESSAGE &&
+            app->display_record_id == 46u && app->display_return_route == APP_ROUTE_TONE_COMPOSER;
+        app->tone_composer_send_waiting = owned;
+        modem_sms_send_result_t result;
+        if (modem_service_pop_sms_send_result(app->tone_composer_send_request_id, &result)) {
+            app->tone_composer_send_request_id = 0u;
+            app->tone_composer_send_waiting = false;
+            if (owned) {
+                if (result.kind == MODEM_SMS_REQUEST_SEND_BINARY && result.outcome == MODEM_SMS_OUTCOME_OK)
+                    open_display_sid(app, 6u, 0x0fdu, "Tone sent", APP_ROUTE_TONE_COMPOSER, now);
+                else if (result.outcome == MODEM_SMS_OUTCOME_UNCERTAIN)
+                    open_display_sid(app, 0u, 0x229u, "Result\nunknown", APP_ROUTE_TONE_COMPOSER_OPTIONS, now);
+                else open_display_sid(app, 0u, 0x359u, "Message\nsending\nfailed", APP_ROUTE_TONE_COMPOSER_OPTIONS, now);
+            }
+            changed = true;
+        } else if (owned && time_diff_ms(now, app->tone_composer_send_started_ms + COMPOSER_SEND_TIMEOUT_MS) >= 0) {
+            /* Keep the request until its result is drained, even after the UI
+             * times out or a call/alarm takes over. */
+            app->tone_composer_send_waiting = false;
+            open_display_sid(app, 0u, 0x229u, "Result\nunknown", APP_ROUTE_TONE_COMPOSER_OPTIONS, now);
+            changed = true;
+        }
     }
     if (app->tone_composer_playing &&
         time_diff_ms(now, app->tone_composer_next_note_ms) >= 0) {
@@ -1119,18 +1154,18 @@ static bool composer_build_packed_tone(const char *name,
     return composer_codec_encode(name, events, count, tempo, dst, cap, out_len);
 }
 
-static void composer_store_current_own_tone(app_t *app) {
+static bool composer_store_current_own_tone(app_t *app) {
     store_own_tone_t *tone = &s_composer_scratch.tone;
     memset(tone, 0, sizeof(*tone));
     tone->used = true;
     copy_text(tone->name, sizeof(tone->name), app->tone_composer_name);
     copy_text(tone->notes, sizeof(tone->notes), app->tone_composer_notes);
     tone->tempo_index = app->tone_composer_tempo_index;
-    (void)composer_build_packed_tone(tone->name,
+    if (!composer_build_packed_tone(tone->name,
                                      tone->notes,
                                      tone->tempo_index,
                                      tone->packed,
                                      STORE_OWN_TONE_PACKED_MAX,
-                                     &tone->packed_len);
-    (void)store_own_tone_set(0u, tone);
+                                     &tone->packed_len)) return false;
+    return store_own_tone_set(0u, tone) == STORE_STATUS_OK;
 }

@@ -78,5 +78,6 @@ store_commit_result_t store_engine_commit_binding(
     size_t payload_cap);
 store_status_t store_engine_mark_dirty(store_unit_t unit);
 void store_warranty_post_load(void);
+void store_ringtone_expire(uint32_t now_ms);
 
 #endif

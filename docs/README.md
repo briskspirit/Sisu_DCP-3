@@ -49,6 +49,8 @@ claim is the current best understanding, not a measured fact.
 
 ## UI And Protocol Records
 
+- [Ringtone messages](ringtone_messages.md): native binary Composer send,
+  receive/play/save/discard, bounded persistence, and original-ROM references.
 - [Picture messages](picture_messages.md): Nokia-style receive/save/discard,
   local flash layout, migration, and Telit transport limitations.
 - [Operator names](operator_names.md): serving-PLMN database, SIM-name fallback,

@@ -358,6 +358,8 @@ static const char *s_mh_cgsn_response;
 static size_t s_mh_recovery_store_tx_count;
 bool store_service_ready(void) { return s_mh_store_ready; }
 static unsigned s_mh_picture_parts;
+static unsigned s_mh_ringtone_parts;
+static bool s_mh_ringtone_reject;
 static char s_mh_local_pdu[SMS_DELIVER_HEX_MAX];
 static unsigned s_mh_local_received, s_mh_local_sent, s_mh_local_lost;
 static bool s_mh_local_reject;
@@ -402,6 +404,18 @@ store_status_t store_picture_receive_pdu(const char *pdu, uint32_t now_ms) {
         part.dest_port != SMS_CODEC_PICTURE_PORT) return STORE_STATUS_NOT_FOUND;
     s_mh_picture_parts++;
     return STORE_STATUS_OK;
+}
+store_status_t store_ringtone_receive_pdu(const char *pdu, uint32_t now_ms) {
+    (void)now_ms;
+    sms_codec_message_t part;
+    if (!sms_pdu_decode(pdu, &part) || !part.has_ports || part.dest_port != 0x1581u)
+        return STORE_STATUS_NOT_FOUND;
+    s_mh_ringtone_parts++;
+    return s_mh_ringtone_reject ? STORE_STATUS_INVALID_ARGUMENT : STORE_STATUS_OK;
+}
+store_status_t store_ringtone_received_pdu_status(const char *pdu) {
+    (void)pdu;
+    return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : STORE_STATUS_OK;
 }
 bool store_service_flush_all(void) {
     if (!s_mh_store_flush_ok) return false;
@@ -570,6 +584,8 @@ void mh_settle(void) {
 }
 
 void mh_begin(void) {
+    s_mh_ringtone_parts = 0u;
+    s_mh_ringtone_reject = false;
     s_mh_local_pdu[0] = 0;
     s_mh_local_received = s_mh_local_sent = s_mh_local_lost = 0u;
     s_mh_local_reject = false;

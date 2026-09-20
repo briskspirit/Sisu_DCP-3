@@ -698,6 +698,34 @@ bool poll_sms(app_t *app, uint32_t now) {
     static modem_status_t status;
     modem_service_get_status(&status);
     store_status_t picture_store = store_picture_commit_status();
+    store_status_t ringtone_store = store_ringtone_commit_status();
+    bool ringtone_failed = ringtone_store == STORE_STATUS_STORAGE_ERROR;
+    app->ringtone_warning |= ringtone_failed && !app->ringtone_storage_failed;
+    app->ringtone_storage_failed = ringtone_failed;
+    if (ringtone_store == STORE_STATUS_OK && app->route != APP_ROUTE_POWER_OFF &&
+        app->route != APP_ROUTE_POWERUP) {
+        uint32_t id = store_ringtone_pending_first();
+        if (id != 0u && id != app->ringtone_last_notice_id) {
+            app->ringtone_last_notice_id = id;
+            app->ringtone_notice_id = id;
+            play_message_alert(app, &status, now);
+            changed = true;
+        } else if (id == 0u && app->ringtone_notice_id != 0u) {
+            app->ringtone_notice_id = 0u;
+            changed = true;
+        }
+    }
+    if (status.ringtone_receive_errors != app->ringtone_errors_seen) {
+        app->ringtone_warning |= status.ringtone_receive_errors > app->ringtone_errors_seen;
+        app->ringtone_errors_seen = status.ringtone_receive_errors;
+    }
+    if (app->ringtone_warning && app->route == APP_ROUTE_STANDBY &&
+        app->input_len == 0u && !app->keyguard_locked) {
+        app->ringtone_warning = false;
+        open_display_sid(app, 0u, ringtone_failed ? 0x3b3u : 0x210u,
+                         ringtone_failed ? "Not\nsaved" : "Not\ndone", APP_ROUTE_STANDBY, now);
+        changed = true;
+    }
     bool picture_failed = picture_store == STORE_STATUS_STORAGE_ERROR;
     if (picture_failed && !app->picture_storage_failed) app->picture_storage_warning = true;
     app->picture_storage_failed = picture_failed;

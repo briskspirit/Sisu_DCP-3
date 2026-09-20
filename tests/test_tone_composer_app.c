@@ -61,6 +61,12 @@ static profile_setting_kind_t s_profile_set_kind;
 static uint8_t s_profile_set_value;
 static modem_status_t s_modem_status;
 static uint32_t s_now;
+static bool s_send_result_ready;
+static modem_sms_outcome_t s_send_outcome;
+static store_own_tone_t s_received_tone;
+static uint32_t s_pending_id;
+static store_status_t s_save_status, s_commit_status;
+static unsigned s_received_saves, s_received_discards;
 
 typedef struct {
     unsigned plain_count;
@@ -119,6 +125,12 @@ static void reset_fixture(void) {
     s_list_breadcrumb[0] = '\0';
     memset(s_list_labels, 0, sizeof(s_list_labels));
     s_now = 0u;
+    s_send_result_ready = false;
+    s_send_outcome = MODEM_SMS_OUTCOME_OK;
+    memset(&s_received_tone, 0, sizeof(s_received_tone));
+    s_pending_id = 0u;
+    s_save_status = s_commit_status = STORE_STATUS_OK;
+    s_received_saves = s_received_discards = 0u;
 }
 
 static void make_capacity_score(char *dst, size_t cap) {
@@ -253,6 +265,10 @@ void core1_post_audio_composer_packed(const uint8_t *data, uint16_t len, uint8_t
     s_packed_level = level;
 }
 
+void core1_post_audio_packed_tone_preview(const uint8_t *data, uint16_t len, uint8_t level) {
+    core1_post_audio_composer_packed(data, len, level);
+}
+
 store_status_t store_own_tone_get(uint8_t slot, store_own_tone_t *out_tone) {
     check(slot == 0u, "Composer reads own-tone slot zero");
     if (!s_stored_tone_present) {
@@ -263,12 +279,14 @@ store_status_t store_own_tone_get(uint8_t slot, store_own_tone_t *out_tone) {
 }
 
 bool store_own_tone_used(uint8_t slot) {
+    if (slot == 1u) return false;
     check(slot == 0u, "Tones menu checks own-tone slot zero");
     return s_stored_tone_present && s_stored_tone.used;
 }
 
 store_status_t store_own_tone_set(uint8_t slot, const store_own_tone_t *tone) {
     check(slot == 0u, "Composer writes own-tone slot zero");
+    if (s_save_status != STORE_STATUS_OK) return s_save_status;
     s_stored_tone = *tone;
     s_stored_tone_present = true;
     s_store_sets++;
@@ -277,6 +295,43 @@ store_status_t store_own_tone_set(uint8_t slot, const store_own_tone_t *tone) {
 
 void modem_service_get_status(modem_status_t *out) {
     *out = s_modem_status;
+}
+
+uint32_t store_ringtone_pending_first(void) { return s_pending_id; }
+store_status_t store_ringtone_pending_get(uint32_t id, store_own_tone_t *tone) {
+    if (id == 0u || id != s_pending_id) return STORE_STATUS_NOT_FOUND;
+    *tone = s_received_tone;
+    return STORE_STATUS_OK;
+}
+store_status_t store_ringtone_pending_save(uint32_t id) {
+    check(id == s_pending_id, "save addresses the selected incoming ringtone");
+    s_received_saves++;
+    return s_save_status;
+}
+store_status_t store_ringtone_pending_discard(uint32_t id) {
+    check(id == s_pending_id, "discard addresses the selected incoming ringtone");
+    s_received_discards++;
+    return s_save_status;
+}
+store_status_t store_ringtone_commit_status(void) { return s_commit_status; }
+
+bool modem_service_request_send_binary_sms(const char *number, const uint8_t *payload,
+                                          uint16_t length, uint16_t port, uint16_t source,
+                                          uint32_t *id) {
+    check(strcmp(number, "+15551234567") == 0, "ringtone send uses recipient editor number");
+    check(payload != NULL && length != 0u && port == 0x1581u && source == 0u,
+          "ringtone send uses native binary port and source");
+    *id = 42u;
+    return true;
+}
+bool modem_service_pop_sms_send_result(uint32_t id, modem_sms_send_result_t *result) {
+    check(id == 42u, "ringtone result is requested by its own ID");
+    if (!s_send_result_ready) return false;
+    s_send_result_ready = false;
+    memset(result, 0, sizeof(*result));
+    result->kind = MODEM_SMS_REQUEST_SEND_BINARY;
+    result->outcome = s_send_outcome;
+    return true;
 }
 
 const char *ts_or(uint16_t sid, const char *fallback) {
@@ -345,7 +400,9 @@ void open_display(app_t *app,
                   const char *c,
                   app_route_t return_route,
                   uint32_t now) {
-    (void)app;
+    app->route = APP_ROUTE_DISPLAY_MESSAGE;
+    app->display_record_id = record_id;
+    app->display_return_route = return_route;
     (void)c;
     s_display.plain_count++;
     s_display.record_id = record_id;
@@ -355,13 +412,20 @@ void open_display(app_t *app,
     s_display.now = now;
 }
 
+void return_from_display(app_t *app) {
+    app->route = app->display_return_route;
+    app->dirty = true;
+}
+
 void open_display_sid(app_t *app,
                       uint8_t record_id,
                       uint16_t sid,
                       const char *fallback,
                       app_route_t return_route,
                       uint32_t now) {
-    (void)app;
+    app->route = APP_ROUTE_DISPLAY_MESSAGE;
+    app->display_record_id = record_id;
+    app->display_return_route = return_route;
     s_display.sid_count++;
     s_display.record_id = record_id;
     s_display.sid = sid;
@@ -778,14 +842,13 @@ static void test_option_routes_and_tempo_selection(void) {
     framebuffer_t fb;
     memset(&fb, 0, sizeof(fb));
     render_tone_composer_options(&app, &fb);
-    check(s_list_count == 5u,
-          "Composer exposes only the five implemented options");
+    check(s_list_count == 6u, "Composer exposes all six original options");
     check_str(s_list_labels[0], "Play", "Composer option 1 is Play");
     check_str(s_list_labels[1], "Save", "Composer option 2 is Save");
     check_str(s_list_labels[2], "Tempo", "Composer option 3 is Tempo");
-    check_str(s_list_labels[3], "Clear screen",
-              "Composer option 4 skips unavailable Send");
-    check_str(s_list_labels[4], "Exit", "Composer option 5 is Exit");
+    check_str(s_list_labels[3], "Send", "Composer option 4 is Send");
+    check_str(s_list_labels[4], "Clear screen", "Composer option 5 is Clear screen");
+    check_str(s_list_labels[5], "Exit", "Composer option 6 is Exit");
 
     app.route = APP_ROUTE_TONE_COMPOSER_OPTIONS;
     app.tone_composer_option_index = 1u;
@@ -800,7 +863,7 @@ static void test_option_routes_and_tempo_selection(void) {
     app.tone_composer_playing = true;
     app.tone_composer_preview_stop_ms = 9999u;
     app.route = APP_ROUTE_TONE_COMPOSER_OPTIONS;
-    app.tone_composer_option_index = 3u;
+    app.tone_composer_option_index = 4u;
     size_t posts_before = s_post_count;
     (void)handle_tone_composer_options_key(&app, KEY_NAVI, 2310u);
     check(app.route == APP_ROUTE_TONE_COMPOSER &&
@@ -810,7 +873,7 @@ static void test_option_routes_and_tempo_selection(void) {
               !app.tone_composer_dotted_armed,
           "Clear screen resets the score and returns to Composer");
     check(s_editor_opens == 1u,
-          "the unavailable Send workflow is absent from Composer options");
+          "Clear screen does not open an editor");
     check(!app.tone_composer_playing &&
               app.tone_composer_preview_stop_ms == 0u &&
               s_post_count == posts_before + 1u &&
@@ -820,7 +883,7 @@ static void test_option_routes_and_tempo_selection(void) {
     app.tone_composer_playing = true;
     app.tone_composer_preview_stop_ms = 9999u;
     app.route = APP_ROUTE_TONE_COMPOSER_OPTIONS;
-    app.tone_composer_option_index = 4u;
+    app.tone_composer_option_index = 5u;
     posts_before = s_post_count;
     (void)handle_tone_composer_options_key(&app, KEY_NAVI, 2330u);
     check(app.route == APP_ROUTE_TONES_MENU && app.tones_menu_selected == 2u,
@@ -877,17 +940,29 @@ static void test_send_timeout_and_timers(void) {
 
     memset(&s_display, 0, sizeof(s_display));
     s_modem_status.sim_ready = true;
+    strcpy(app.editor_value, "+15551234567");
     tone_composer_submit_recipient(&app, 3100u);
     check(app.tone_composer_send_waiting && app.tone_composer_send_started_ms == 3100u,
           "SIM-ready send arms its progress deadline");
     check(s_store_sets == 1u, "send persists the current tone first");
     check(s_display.sid_count == 1u && s_display.sid == 0x0feu,
           "send opens the localized Sending tone note");
-    check(!tick_tone_composer(&app, 4099u), "send remains pending before one second");
-    check(tick_tone_composer(&app, 4100u), "send deadline reports a state change");
-    check(!app.tone_composer_send_waiting, "send deadline retires the pending flag");
-    check(s_display.sid == 0x359u && s_display.return_route == APP_ROUTE_TONE_COMPOSER_OPTIONS,
-          "send deadline opens Message sending failed and returns to options");
+    check(!tick_tone_composer(&app, 4100u), "send does not invent a failure after one second");
+    s_send_result_ready = true; s_send_outcome = MODEM_SMS_OUTCOME_OK;
+    check(tick_tone_composer(&app, 4200u), "matching send result reports a state change");
+    check(!app.tone_composer_send_waiting && app.tone_composer_send_request_id == 0u,
+          "send completion releases its result slot");
+    check(s_display.sid == 0x0fdu, "accepted send opens Tone sent");
+    strcpy(app.editor_value, "+15551234567");
+    tone_composer_submit_recipient(&app, 4300u);
+    check(tick_tone_composer(&app, 184300u), "send timeout releases UI");
+    check(s_display.sid == 0x229u && app.tone_composer_send_request_id == 42u,
+          "timeout is uncertain and keeps result ownership");
+    app.route = APP_ROUTE_INCOMING_CALL;
+    s_send_result_ready = true; s_send_outcome = MODEM_SMS_OUTCOME_OK;
+    (void)tick_tone_composer(&app, 184400u);
+    check(app.route == APP_ROUTE_INCOMING_CALL && app.tone_composer_send_request_id == 0u,
+          "late success is drained without replacing a call");
 
     memset(&app, 0, sizeof(app));
     app.tones_profile_index = 0u;
@@ -1038,6 +1113,79 @@ static void test_long_score_render_reaches_tail(void) {
           "long Composer score renders the real final three rows and cursor");
 }
 
+static void test_received_tone_flow(void) {
+    reset_fixture();
+    app_t app = {0};
+    app.route = APP_ROUTE_STANDBY;
+    open_received_tone(&app);
+    check(app.route == APP_ROUTE_STANDBY, "empty pending queue does not open a phantom tone");
+    composer_note_event_t note = {.octave=1u, .pitch_code=1u, .duration_code=2u};
+    check(composer_codec_encode("Test", &note, 1u, 16u, s_received_tone.packed,
+              sizeof(s_received_tone.packed), &s_received_tone.packed_len), "incoming UI melody encodes");
+    s_pending_id = 7u;
+    open_received_tone(&app);
+    check(app.route == APP_ROUTE_RECEIVED_TONE && app.ringtone_receive_id == 7u,
+          "incoming notice opens its durable pending tone");
+    render_received_tone(&app, NULL);
+    check(s_list_count == 3u && strcmp(s_list_labels[0], "Playback") == 0 &&
+          strcmp(s_list_labels[1], "Save") == 0 && strcmp(s_list_labels[2], "Discard") == 0,
+          "incoming options preserve the original Playback / Save / Discard menu");
+    handle_received_tone_key(&app, KEY_NAVI, 100u);
+    check(s_packed_posts == 1u && s_display.record_id == 37u && app.ringtone_playing,
+          "Playback starts binary melody with the original striped Quit dialog");
+    check_str(s_display.a, "Playing tone\nTest", "Playback formats the localized title template");
+    check(handle_received_tone_display_key(&app, KEY_NAVI), "Quit owns the playback dialog");
+    check(app.route == APP_ROUTE_RECEIVED_TONE && !app.ringtone_playing &&
+          s_posts[s_post_count - 1u].cmd == CORE1_CMD_AUDIO_COMPOSER_STOP,
+          "Quit stops playback and returns to incoming options");
+    handle_received_tone_key(&app, KEY_NAVI, 200u);
+    size_t before = s_post_count;
+    app.route = APP_ROUTE_CALL;
+    tick_received_tone(&app, 300u);
+    check(!app.ringtone_playing && s_post_count == before && app.route == APP_ROUTE_CALL,
+          "call preemption never stops the new call's audio");
+    open_received_tone(&app);
+    handle_received_tone_key(&app, KEY_NAVI, 400u);
+    tick_received_tone(&app, app.ringtone_play_until_ms);
+    check(app.route == APP_ROUTE_RECEIVED_TONE && !app.ringtone_playing,
+          "finite playback returns to options at its decoded duration");
+    handle_received_tone_key(&app, KEY_DOWN, 500u);
+    s_commit_status = STORE_STATUS_NOT_READY;
+    handle_received_tone_key(&app, KEY_NAVI, 500u);
+    unsigned dialogs = s_display.sid_count;
+    tick_received_tone(&app, 600u);
+    check(s_received_saves == 1u && app.ringtone_save_action == 1u && s_display.sid_count == dialogs,
+          "Save waits for durable commit without claiming success early");
+    s_commit_status = STORE_STATUS_OK;
+    tick_received_tone(&app, 700u);
+    check(s_display.sid == 0x224u && s_display.record_id == 3u &&
+          s_display.return_route == APP_ROUTE_STANDBY, "durable Save uses the original saved note");
+    open_received_tone(&app);
+    app.ringtone_option = 1u;
+    s_save_status = STORE_STATUS_STORAGE_ERROR;
+    handle_received_tone_key(&app, KEY_NAVI, 800u);
+    check(s_display.sid == 0x3b3u && app.ringtone_save_action == 0u,
+          "failed Save reports Not saved and leaves the incoming tone retryable");
+    s_save_status = STORE_STATUS_OK;
+    open_received_tone(&app);
+    app.ringtone_option = 2u;
+    handle_received_tone_key(&app, KEY_NAVI, 900u);
+    tick_received_tone(&app, 1000u);
+    check(s_received_discards == 1u && app.route == APP_ROUTE_STANDBY,
+          "durable Discard returns to standby without a saved note");
+    open_received_tone(&app);
+    app.ringtone_option = 1u;
+    s_commit_status = STORE_STATUS_NOT_READY;
+    handle_received_tone_key(&app, KEY_NAVI, 1100u);
+    handle_received_tone_key(&app, KEY_C, 1200u);
+    check(app.route == APP_ROUTE_STANDBY, "C can leave a pending flash write without undoing it");
+    app.route = APP_ROUTE_CALL;
+    s_commit_status = STORE_STATUS_OK;
+    tick_received_tone(&app, 1300u);
+    check(app.route == APP_ROUTE_CALL && app.ringtone_save_action == 0u,
+          "late save completion cannot hijack a call");
+}
+
 int main(void) {
     test_default_open_and_note_editing();
     test_saved_tone_playback_and_persistence();
@@ -1048,6 +1196,7 @@ int main(void) {
     test_send_timeout_and_timers();
     test_capacity_edits_are_atomic();
     test_long_score_render_reaches_tail();
+    test_received_tone_flow();
 
     if (s_failures != 0) {
         fprintf(stderr, "%d failures\n", s_failures);

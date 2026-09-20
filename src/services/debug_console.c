@@ -2273,6 +2273,11 @@ static void command_status(void) {
            (unsigned long)status.picture_receive_errors,
            (unsigned long)store_picture_pending_first(),
            (unsigned)store_picture_commit_status());
+    printf("[debug] ringtones parts=%lu errors=%lu pending=%lu store=%u saved=%u\n",
+           (unsigned long)status.ringtone_parts_received,
+           (unsigned long)status.ringtone_receive_errors,
+           (unsigned long)store_ringtone_pending_first(),
+           (unsigned)store_ringtone_commit_status(), store_own_tone_used(1u) ? 1u : 0u);
     printf("[debug] sms_recovery recovered=%lu errors=%lu step=%u\n",
            (unsigned long)status.sms_recovered,
            (unsigned long)status.sms_recovery_errors,

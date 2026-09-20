@@ -153,7 +153,8 @@ typedef enum {
 
 static modem_sms_recovery_t s_sms_recovery;
 static uint32_t s_recovery_receipt;
-static bool s_recovery_admitted, s_recovery_picture, s_direct_from_storage;
+static bool s_recovery_admitted, s_direct_from_storage;
+static enum { RECOVERY_TEXT, RECOVERY_PICTURE, RECOVERY_RINGTONE } s_recovery_kind;
 static bool s_recovery_invalidated;
 static char s_recovery_header[MODEM_SMS_DIRECT_LINE_MAX];
 static void sms_recovery_reset(void);
@@ -2650,7 +2651,8 @@ static void direct_body_deadline_tick(uint32_t now_ms) {
 static void sms_recovery_release_receipt(void) {
     message_service_receive_forget(s_recovery_receipt);
     s_recovery_receipt = 0u;
-    s_recovery_admitted = s_recovery_picture = false;
+    s_recovery_admitted = false;
+    s_recovery_kind = RECOVERY_TEXT;
 }
 
 static void sms_recovery_reset(void) {
@@ -2667,9 +2669,13 @@ static bool sms_recovery_start(uint32_t now_ms) {
             if (s_sms_recovery.filtered) {
                 modem_sms_recovery_committed(&s_sms_recovery);
             } else {
-                store_status_t result = store_picture_receive_pdu(s_sms_recovery.pdu, now_ms);
-                s_recovery_picture = result != STORE_STATUS_NOT_FOUND;
-                s_recovery_admitted = s_recovery_picture ? result == STORE_STATUS_OK :
+                store_status_t result = store_ringtone_receive_pdu(s_sms_recovery.pdu, now_ms);
+                s_recovery_kind = RECOVERY_RINGTONE;
+                if (result == STORE_STATUS_NOT_FOUND) {
+                    result = store_picture_receive_pdu(s_sms_recovery.pdu, now_ms);
+                    s_recovery_kind = result == STORE_STATUS_NOT_FOUND ? RECOVERY_TEXT : RECOVERY_PICTURE;
+                }
+                s_recovery_admitted = s_recovery_kind != RECOVERY_TEXT ? result == STORE_STATUS_OK :
                     message_service_receive_tracked(s_sms_recovery.pdu, &s_recovery_receipt);
                 if (!s_recovery_admitted) {
                     LOGW("modem", "stored SMS retained: local admission unavailable index=%u", s_sms_recovery.index);
@@ -2678,9 +2684,11 @@ static bool sms_recovery_start(uint32_t now_ms) {
             }
         }
         if (s_recovery_admitted) {
-            bool committed = s_recovery_picture
-                ? store_picture_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
-                : message_service_receive_committed(s_recovery_receipt);
+            bool committed = s_recovery_kind == RECOVERY_RINGTONE
+                ? store_ringtone_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
+                : s_recovery_kind == RECOVERY_PICTURE
+                    ? store_picture_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
+                    : message_service_receive_committed(s_recovery_receipt);
             if (committed) modem_sms_recovery_committed(&s_sms_recovery);
         }
     }
@@ -2737,11 +2745,22 @@ static void direct_apply_step(modem_sms_direct_step_t step, uint8_t tpdu_len) {
         break;
     case MODEM_SMS_DIRECT_STEP_READY:
         s_direct_body_deadline_armed = false;
-        /* Pictures have their own local store and budget. Do not leak their
-         * fragments into the ordinary Inbox. */
-        store_status_t result = store_picture_receive_pdu(
-            s_direct_pdu,
-            s_now_ms);
+        /* Smart messages have their own durable stores, not ordinary Inbox
+         * entries. A recognized but rejected payload must not fall through. */
+        store_status_t result = store_ringtone_receive_pdu(s_direct_pdu, s_now_ms);
+        if (result != STORE_STATUS_NOT_FOUND) {
+            critical_section_enter_blocking(&s_status_lock);
+            uint32_t *counter = result == STORE_STATUS_OK
+                ? &s_status.ringtone_parts_received : &s_status.ringtone_receive_errors;
+            if (*counter != UINT32_MAX) (*counter)++;
+            critical_section_exit(&s_status_lock);
+            if (result != STORE_STATUS_OK) {
+                LOGW("modem", "ringtone receive failed: %u", (unsigned)result);
+                direct_count_error_locked_free();
+            }
+            break;
+        }
+        result = store_picture_receive_pdu(s_direct_pdu, s_now_ms);
         if (result != STORE_STATUS_NOT_FOUND) {
             critical_section_enter_blocking(&s_status_lock);
             uint32_t *counter = result == STORE_STATUS_OK

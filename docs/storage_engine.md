@@ -333,7 +333,8 @@ Each unit is one independently replaced record:
 - T9 user dictionary: up to 16 learned words, newest/promoted first
 - picture messages: seven shared saved slots and two pending receptions, with
   bitmap, caption, and sender metadata; see [Picture messages](picture_messages.md)
-- own tones: two composer slots for user-composed melodies
+- own tones: separate Own and Received tone slots, plus two pending ringtone
+  SMS receipts; see [Ringtone messages](ringtone_messages.md)
 - call divert: delay setting and per-condition number history; live activation
   state is always network-owned and is never restored from flash
 - service/warranty: write-once board IMEI, manufacture/repair/purchase records,

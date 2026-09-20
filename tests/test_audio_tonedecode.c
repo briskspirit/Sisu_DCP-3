@@ -1760,38 +1760,36 @@ static void test_composer_packed_decode_adapter(void) {
 
     audio_sequence_step_t steps[8];
     memset(steps, 0xa5, sizeof(steps));
-    uint8_t count = 0xffu;
+    uint16_t count = 0xffu, loop_start = 0u;
     bool ok = composer_packed_decode(packed, packed_len, steps,
-                                     (uint8_t)(sizeof(steps) / sizeof(steps[0])), &count);
+                                     (uint16_t)(sizeof(steps) / sizeof(steps[0])), &count, &loop_start, false);
     assert_true(ok, "packed decode of a valid 3-note stream succeeds");
-    assert_true(count == 3u, "packed decode yields exactly 3 steps");
-    if (!ok || count != 3u) {
+    assert_true(count == 5u, "packed decode yields two natural note/gap pairs and a rest");
+    if (!ok || count != 5u) {
         return;
     }
     /* Durations: 100 BPM -> beat 600 ms. */
-    assert_true(steps[0].duration_ms == 600u, "quarter @100BPM = 600 ms");
-    assert_true(steps[1].duration_ms == 450u, "dotted eighth @100BPM = 300 + 150 ms");
-    assert_true(steps[2].duration_ms == 2400u, "whole @100BPM = 2400 ms");
+    assert_true(steps[0].duration_ms == 580u && steps[1].duration_ms == 20u && steps[1].hz == 0u,
+                "natural quarter @100BPM = 580 ms sound plus original 20 ms gap");
+    assert_true(steps[2].duration_ms == 430u && steps[3].duration_ms == 20u && steps[3].hz == 0u,
+                "dotted eighth preserves 450 ms total including gap");
+    assert_true(steps[4].duration_ms == 2400u, "whole @100BPM = 2400 ms");
     /* Pitches: octave/pitch -> ROM note-table index, rest -> silence. */
-    assert_true(steps[2].hz == 0u, "rest (pitch_code 0) decodes to 0 Hz");
+    assert_true(steps[4].hz == 0u, "rest (pitch_code 0) decodes to 0 Hz");
     assert_true(steps[0].hz > 0u, "C1 is voiced");
-    assert_true(steps[1].hz > steps[0].hz, "E2 is higher than C1");
+    assert_true(steps[2].hz > steps[0].hz, "E2 is higher than C1");
     /* Exact mapping through the ROM table: C1 -> index 62 (0x7e), E2 -> index
      * 62 + 4 + 12 = 78 (0x8e). Table-verified: 523 Hz and 1319 Hz. */
     assert_true(steps[0].hz == tone_frequency_hz(0x7eu), "C1 maps to ROM pitch 0x7e");
-    assert_true(steps[1].hz == tone_frequency_hz(0x8eu), "E2 maps to ROM pitch 0x8e");
+    assert_true(steps[2].hz == tone_frequency_hz(0x8eu), "E2 maps to ROM pitch 0x8e");
     assert_true(steps[0].hz == 523u, "C1 = 523 Hz (ROM G_NOTE_FREQ[62])");
-    assert_true(steps[1].hz == 1319u, "E2 = 1319 Hz (ROM G_NOTE_FREQ[78])");
+    assert_true(steps[2].hz == 1319u, "E2 = 1319 Hz (ROM G_NOTE_FREQ[78])");
 
-    /* A smaller step cap truncates the sequence (extra notes dropped, not an
-     * error) and reports the truncated count. */
+    /* Never play a silently truncated incoming melody. */
     memset(steps, 0xa5, sizeof(steps));
     count = 0xffu;
-    ok = composer_packed_decode(packed, packed_len, steps, 2u, &count);
-    assert_true(ok, "packed decode with cap 2 still succeeds");
-    assert_true(count == 2u, "packed decode with cap 2 yields 2 steps");
-    assert_true(steps[0].duration_ms == 600u && steps[1].duration_ms == 450u,
-                "cap 2 keeps the first two notes in order");
+    ok = composer_packed_decode(packed, packed_len, steps, 2u, &count, &loop_start, false);
+    assert_true(!ok, "packed decode rejects insufficient capacity");
 
     /* Corrupt framing (first header byte must be 0x02) is rejected outright. */
     uint8_t corrupt[64];
@@ -1799,7 +1797,7 @@ static void test_composer_packed_decode_adapter(void) {
     corrupt[0] ^= 0xffu;
     count = 0xffu;
     ok = composer_packed_decode(corrupt, packed_len, steps,
-                                (uint8_t)(sizeof(steps) / sizeof(steps[0])), &count);
+                                (uint16_t)(sizeof(steps) / sizeof(steps[0])), &count, &loop_start, false);
     assert_true(!ok, "corrupted first byte is rejected");
     assert_true(count == 0u, "rejected stream reports zero steps");
 }

@@ -279,6 +279,7 @@ bool store_service_write_window_open(uint32_t now_ms) {
 }
 
 void store_service_tick(uint32_t now_ms) {
+    store_ringtone_expire(now_ms);
     /* Wrap-safe gates (the old signed absolute-deadline compares inverted after
      * ~24.8 days of idle, blocking ALL commits -> silent loss of call logs and
      * settings on any later reboot). Defer: honored only while the

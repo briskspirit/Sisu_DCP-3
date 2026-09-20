@@ -13,6 +13,7 @@
 #include "apps/phonebook_app.h"
 #include "apps/profiles_app.h"
 #include "apps/service_codes_app.h"
+#include "apps/tones_app.h"
 #include "services/input_keys.h"
 #include "services/key_utils.h"
 #include "ui/status_chrome.h"
@@ -172,6 +173,12 @@ bool handle_standby_key(app_t *app, const input_event_t *event) {
             }
             return true;
         }
+    }
+
+    if (app->ringtone_notice_id != 0u && app->input_len == 0u &&
+        (key == KEY_NAVI || key == KEY_C)) {
+        open_received_tone(app);
+        return true;
     }
 
     if (app->sms_received_pending && app->input_len == 0u) {
@@ -553,6 +560,8 @@ void render_standby(const app_t *app, framebuffer_t *fb) {
         draw_notice(fb, asset_font(FONT_FS2), notice);
     } else if (app->picture_notice_id != 0u) {
         messages_picture_draw_notice(fb);
+    } else if (app->ringtone_notice_id != 0u) {
+        draw_notice(fb, asset_font(FONT_FS2), ts_or(0x222u, "Ringing\ntone\nreceived"));
     } else if (app->sms_received_pending) {
         char notice[48];
         uint8_t count = app->sms_received_pending_count == 0u ? 1u : app->sms_received_pending_count;
@@ -597,6 +606,8 @@ void render_standby(const app_t *app, framebuffer_t *fb) {
         draw_softkey(fb, "Exit");
     } else if (app->picture_notice_id != 0u) {
         draw_softkey(fb, "View");
+    } else if (app->ringtone_notice_id != 0u) {
+        draw_softkey(fb, "Options");
     } else if (app->sms_received_pending) {
         draw_softkey(fb, "Read");
     } else {
