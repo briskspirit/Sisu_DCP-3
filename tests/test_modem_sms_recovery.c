@@ -83,5 +83,25 @@ int main(void) {
     modem_sms_recovery_payload(&r, MODEM_SMS_DIRECT_STEP_FILTERED, "445566");
     modem_sms_recovery_final(&r, true, false, 0);
     assert(r.step == MODEM_SMS_RECOVERY_NONE && r.recovered == 0u);
+
+    select_store(); send_command("AT+CMGR=1"); payload("INVALID RINGTONE");
+    modem_sms_recovery_rejected(&r, 0u);
+    assert(r.failures == 1u && r.remaining == 1u && r.recovered == 0u);
+    send_command("AT+CMGR=2"); payload("VALID SMS");
+    modem_sms_recovery_committed(&r);
+    send_command("AT+CMGR=2"); payload("VALID SMS");
+    send_command("AT+CMGD=2,0");
+    modem_sms_recovery_final(&r, true, false, 0u);
+    assert(r.step == MODEM_SMS_RECOVERY_NONE && r.recovered == 1u && r.failures == 1u);
+    assert(!modem_sms_recovery_command(&r, 60000u, command, sizeof(command)));
+    modem_sms_recovery_rejected(&r, 60000u);
+    assert(r.failures == 1u); /* No stale admission after a session change/end. */
+
+    select_store(); send_command("AT+CMGR=1"); payload("TEMPORARILY UNAVAILABLE");
+    modem_sms_recovery_defer(&r, 0u);
+    assert(r.remaining == 2u && r.recovered == 0u && r.pending);
+    assert(!modem_sms_recovery_command(&r, 59999u, command, sizeof(command)));
+    assert(modem_sms_recovery_command(&r, 60000u, command, sizeof(command)));
+    assert(strcmp(command, "AT+CPMS=\"ME\"") == 0);
     puts("PASS: durable modem SMS recovery sequencing");
 }

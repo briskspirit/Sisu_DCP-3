@@ -27,6 +27,7 @@ static const char SMS_PROFILE_RUNTIME[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCS
 static const char SMS_PROFILE_SET[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0";
 static bool s_recovery_test_message, s_recovery_test_changed;
 static bool s_recovery_test_ringtone;
+static bool s_recovery_bad_ringtone;
 static unsigned s_recovery_test_reads, s_recovery_test_deletes;
 static bool s_psmri_live_armed;
 static bool s_late_psmri_invalidated_latch;
@@ -536,11 +537,18 @@ static void telit_response(const char *command) {
         s_cnmi_mode = 2u; return;
     }
     if (strcmp(command, "AT+CPMS=\"ME\"") == 0) {
-        mh_rx_push(s_recovery_test_message ? "+CPMS: 1,4,1,4,1,4" : "+CPMS: 0,255,0,255,0,255");
+        unsigned used = (unsigned)s_recovery_test_message + (unsigned)s_recovery_bad_ringtone;
+        if (used == 2u) mh_rx_push("+CPMS: 2,4,2,4,2,4");
+        else mh_rx_push(used == 1u ? "+CPMS: 1,4,1,4,1,4" : "+CPMS: 0,255,0,255,0,255");
         return;
     }
-    if (s_recovery_test_message && strncmp(command, "AT+CMGR=", 8u) == 0) {
-        if (strcmp(command, "AT+CMGR=3") != 0) {
+    if (s_recovery_bad_ringtone && strcmp(command, "AT+CMGR=1") == 0) {
+        mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,64,0,245,\"\",129,10");
+        mh_rx_push("06050415810000024A00");
+        return;
+    }
+    if ((s_recovery_test_message || s_recovery_bad_ringtone) && strncmp(command, "AT+CMGR=", 8u) == 0) {
+        if (!s_recovery_test_message || strcmp(command, "AT+CMGR=3") != 0) {
             mh_rx_push("+CMS ERROR: 321"); s_mh_final = MH_FINAL_NONE;
         } else {
             s_recovery_test_reads++;
@@ -552,6 +560,10 @@ static void telit_response(const char *command) {
                 mh_rx_push(s_recovery_test_changed ? "other" : "hello");
             }
         }
+        return;
+    }
+    if (strcmp(command, "AT+CMGD=1,0") == 0 && s_recovery_bad_ringtone) {
+        s_recovery_bad_ringtone = false;
         return;
     }
     if (strcmp(command, "AT+CMGD=3,0") == 0 && s_recovery_test_message) {
@@ -1175,6 +1187,7 @@ static void begin_telit(bool rxdiv_configured) {
     s_cnmi_mode = 0u;
     s_recovery_test_message = s_recovery_test_changed = false;
     s_recovery_test_ringtone = false;
+    s_recovery_bad_ringtone = false;
     s_recovery_test_reads = s_recovery_test_deletes = 0u;
     s_psmri_live_armed = false;
     s_late_psmri_invalidated_latch = false;
@@ -5898,7 +5911,7 @@ static void test_ringtone_transport_and_recovery(void) {
     check(s_mh_ringtone_parts == 1u && mh_status().ringtone_parts_received == 1u &&
           s_mh_local_received == ordinary && s_mh_picture_parts == pictures,
           "native WEMT ringtone routes only to the ringtone store");
-    s_mh_ringtone_reject = true;
+    s_mh_ringtone_result = STORE_STATUS_INVALID_ARGUMENT;
     feed_direct("+CMT: \"12025550123\",\"\",\"20260918102441\",129,4101,1,0,10",
                 "06050415810000024A00");
     check(mh_status().ringtone_receive_errors == 1u && s_mh_local_received == ordinary,
@@ -5920,6 +5933,41 @@ static void test_ringtone_transport_and_recovery(void) {
     check(s_recovery_test_reads == 2u && s_recovery_test_deletes == 1u &&
           s_mh_ringtone_parts == 1u && mh_status().sms_recovered == 1u,
           "committed ringtone authorizes exact reread and one ME deletion without duplicate delivery");
+
+    const store_status_t rejection[] = {STORE_STATUS_INVALID_ARGUMENT, STORE_STATUS_CONFLICT,
+        STORE_STATUS_STORAGE_ERROR, STORE_STATUS_NOT_READY};
+    for (unsigned n = 0u; n < sizeof(rejection) / sizeof(rejection[0]); n++) {
+        begin_telit(true);
+        check(boot_until_ready(30000u), "rejected ME ringtone fixture boots");
+        for (unsigned i = 0u; i < 100u; i++) mh_advance(50u);
+        s_recovery_test_message = s_recovery_bad_ringtone = true;
+        s_mh_ringtone_result = rejection[n];
+        s_mh_local_commit_held = true;
+        mh_feed("+CMTI: \"ME\",1");
+        for (unsigned i = 0u; i < 100u; i++) mh_advance(50u);
+        bool permanent = n < 2u;
+        check(s_mh_ringtone_parts == 1u && mh_tx_count_exact("AT+CMGD=1,0") == 0u &&
+              s_recovery_test_deletes == 0u && mh_status().sms_recovery_errors == 1u,
+              "failed ringtone admission retains the modem copy and records the error");
+        check(s_mh_local_received == (permanent ? 1u : 0u),
+              "permanent rejection advances to text; temporary storage failure waits for retry");
+        s_mh_local_commit_held = false;
+        for (unsigned i = 0u; i < 100u; i++) mh_advance(50u);
+        check(s_recovery_test_deletes == (permanent ? 1u : 0u) &&
+              mh_tx_count_exact("AT+CMGD=1,0") == 0u,
+              "only a durably recovered later text message may be deleted");
+        if (permanent) {
+            for (unsigned i = 0u; i < 1200u; i++) mh_advance(50u);
+            check(s_mh_ringtone_parts == 1u && s_mh_local_received == 1u,
+                  "permanent rejection does not start an endless retry scan");
+        } else {
+            s_mh_ringtone_result = STORE_STATUS_OK;
+            for (unsigned i = 0u; i < 1200u; i++) mh_advance(50u);
+            check(s_mh_ringtone_parts == 2u && !s_recovery_bad_ringtone &&
+                  s_recovery_test_deletes == 1u && s_mh_local_received == 1u,
+                  "storage recovery retries the ringtone and continues to the later text");
+        }
+    }
 }
 
 static void test_unicode_send_keeps_direct_delivery(void) {

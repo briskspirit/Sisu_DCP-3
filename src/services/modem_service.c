@@ -2678,8 +2678,14 @@ static bool sms_recovery_start(uint32_t now_ms) {
                 s_recovery_admitted = s_recovery_kind != RECOVERY_TEXT ? result == STORE_STATUS_OK :
                     message_service_receive_tracked(s_sms_recovery.pdu, &s_recovery_receipt);
                 if (!s_recovery_admitted) {
-                    LOGW("modem", "stored SMS retained: local admission unavailable index=%u", s_sms_recovery.index);
-                    modem_sms_recovery_defer(&s_sms_recovery, now_ms);
+                    if (s_recovery_kind != RECOVERY_TEXT &&
+                        (result == STORE_STATUS_INVALID_ARGUMENT || result == STORE_STATUS_CONFLICT)) {
+                        LOGW("modem", "stored SMS retained: rejected content index=%u", s_sms_recovery.index);
+                        modem_sms_recovery_rejected(&s_sms_recovery, now_ms);
+                    } else {
+                        LOGW("modem", "stored SMS retained: local admission unavailable index=%u", s_sms_recovery.index);
+                        modem_sms_recovery_defer(&s_sms_recovery, now_ms);
+                    }
                 }
             }
         }

@@ -31,6 +31,8 @@ void modem_sms_recovery_payload(modem_sms_recovery_t *r,
 void modem_sms_recovery_final(modem_sms_recovery_t *r, bool ok,
                               bool empty_slot, uint32_t now);
 void modem_sms_recovery_committed(modem_sms_recovery_t *r);
+/* Retain a permanently rejected record and continue this scan without deletion. */
+void modem_sms_recovery_rejected(modem_sms_recovery_t *r, uint32_t now);
 void modem_sms_recovery_defer(modem_sms_recovery_t *r, uint32_t now);
 
 #endif

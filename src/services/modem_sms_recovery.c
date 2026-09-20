@@ -59,6 +59,12 @@ static void advance(modem_sms_recovery_t *r, uint32_t now) {
     else r->step = MODEM_SMS_RECOVERY_READ;
 }
 
+void modem_sms_recovery_rejected(modem_sms_recovery_t *r, uint32_t now) {
+    if (r->step != MODEM_SMS_RECOVERY_STORE) return;
+    r->failures++;
+    advance(r, now);
+}
+
 bool modem_sms_recovery_command(modem_sms_recovery_t *r, uint32_t now,
                                 char *command, size_t cap) {
     if (r->issued || r->step == MODEM_SMS_RECOVERY_STORE) return false;
