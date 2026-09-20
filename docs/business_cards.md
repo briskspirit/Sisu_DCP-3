@@ -93,4 +93,11 @@ encoder and port dispatcher with Unicorn; it needs the user's original image.
 Host tests cover codec bounds, multipart order, restart recovery, deduplication,
 quota exhaustion, damaged records, translated UI, scrolling, and interrupted
 receipt publication/contact saves at each flash operation boundary. These tests
-do not establish carrier delivery; that requires a live send/receive test.
+do not establish carrier delivery by themselves.
+
+Live qualification on the Rev B2 Telit/Verizon DUT on 2026-09-20 confirmed two
+port-addressed self-sends through Phonebook Send entry. Both arrived intact with
+DCS `0xF5`, port `0x00E2`, and no card-parser or storage errors. The received
+notice, Show/Save/Discard menu, preview and Saved confirmation were captured
+from the LCD framebuffer. Save added one contact; Inbox and Outbox counts did
+not change. This is not a cross-carrier or original-handset interoperability test.
