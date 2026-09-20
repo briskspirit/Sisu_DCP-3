@@ -788,6 +788,16 @@ fi
 require_fixed \
     'composer_octave_tracker_next(&octave, parts.octave)' src/apps/tones/composer.c \
     "composer rests must carry the running octave via the codec's tracker (v6.00 encoder 0x0028b2d6..0x0028b41a), not a fixed 1"
+ringtone_editor_submit="$(awk '
+    index($0, "} else if (app->editor_context == EDITOR_CONTEXT_TONE_COMPOSER_RECIPIENT) {") { capture=1 }
+    capture { print }
+    capture && index($0, "} else if (app->editor_context == EDITOR_CONTEXT_IN_CALL_NEW_CALL) {") { exit }
+' src/apps/dialogs_app.c)"
+if ! printf '%s\n' "$ringtone_editor_submit" | rg -q 'tone_composer_submit_recipient\(app, now\)' ||
+        printf '%s\n' "$ringtone_editor_submit" | rg -q 'close_editor\(app\)'; then
+    echo "FAIL: ringtone submission must receive the live recipient before its owner closes the editor"
+    fail=1
+fi
 require_fixed \
     '#define NAU_SPK_GAIN_DEFAULT NAU_ANALOG_GAIN_0DB' src/audio/nau88c22_codec.c \
     "the globally calibrated earpiece baseline must remain at 0 dB"

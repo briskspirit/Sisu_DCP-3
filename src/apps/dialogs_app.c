@@ -532,7 +532,6 @@ bool handle_editor_key(app_t *app, uint16_t key, event_type_t event_type, uint32
                 start_phonebook_list(app, PHONEBOOK_LABEL_OK, "9-3", PHONEBOOK_CONTEXT_TONE_COMPOSER_RECIPIENT, 0u, now);
             } else {
                 copy_text(app->sms_recipient_prefill, sizeof(app->sms_recipient_prefill), app->editor_value);
-                close_editor(app);
                 tone_composer_submit_recipient(app, now);
             }
         } else if (app->editor_context == EDITOR_CONTEXT_IN_CALL_NEW_CALL) {

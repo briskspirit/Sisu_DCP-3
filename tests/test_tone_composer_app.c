@@ -469,7 +469,9 @@ void open_editor(app_t *app,
 }
 
 void close_editor(app_t *app) {
-    (void)app;
+    app->editor_context = EDITOR_CONTEXT_NONE;
+    app->editor_value[0] = '\0';
+    app->editor_cursor_index = 0u;
     s_editor_closes++;
 }
 
