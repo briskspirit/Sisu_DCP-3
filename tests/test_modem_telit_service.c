@@ -29,6 +29,7 @@ static bool s_recovery_test_message, s_recovery_test_changed;
 static bool s_recovery_test_ringtone;
 static bool s_recovery_test_logo;
 static bool s_recovery_bad_ringtone;
+static uint16_t s_recovery_early_smart_port;
 static unsigned s_recovery_test_reads, s_recovery_test_deletes;
 static bool s_psmri_live_armed;
 static bool s_late_psmri_invalidated_latch;
@@ -538,7 +539,8 @@ static void telit_response(const char *command) {
         s_cnmi_mode = 2u; return;
     }
     if (strcmp(command, "AT+CPMS=\"ME\"") == 0) {
-        unsigned used = (unsigned)s_recovery_test_message + (unsigned)s_recovery_bad_ringtone;
+        unsigned used = (unsigned)s_recovery_test_message + (unsigned)s_recovery_bad_ringtone +
+                        (s_recovery_early_smart_port != 0u);
         if (used == 2u) mh_rx_push("+CPMS: 2,4,2,4,2,4");
         else mh_rx_push(used == 1u ? "+CPMS: 1,4,1,4,1,4" : "+CPMS: 0,255,0,255,0,255");
         return;
@@ -548,7 +550,15 @@ static void telit_response(const char *command) {
         mh_rx_push("06050415810000024A00");
         return;
     }
-    if ((s_recovery_test_message || s_recovery_bad_ringtone) && strncmp(command, "AT+CMGR=", 8u) == 0) {
+    if (s_recovery_early_smart_port != 0u && strcmp(command, "AT+CMGR=1") == 0) {
+        char body[40];
+        snprintf(body, sizeof(body), "060504%04X000013018400000001", s_recovery_early_smart_port);
+        mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,64,0,245,\"\",129,14");
+        mh_rx_push(body);
+        return;
+    }
+    if ((s_recovery_test_message || s_recovery_bad_ringtone || s_recovery_early_smart_port != 0u) &&
+        strncmp(command, "AT+CMGR=", 8u) == 0) {
         if (!s_recovery_test_message || strcmp(command, "AT+CMGR=3") != 0) {
             mh_rx_push("+CMS ERROR: 321"); s_mh_final = MH_FINAL_NONE;
         } else {
@@ -568,6 +578,10 @@ static void telit_response(const char *command) {
     }
     if (strcmp(command, "AT+CMGD=1,0") == 0 && s_recovery_bad_ringtone) {
         s_recovery_bad_ringtone = false;
+        return;
+    }
+    if (strcmp(command, "AT+CMGD=1,0") == 0 && s_recovery_early_smart_port != 0u) {
+        s_recovery_early_smart_port = 0u;
         return;
     }
     if (strcmp(command, "AT+CMGD=3,0") == 0 && s_recovery_test_message) {
@@ -1194,6 +1208,7 @@ static void begin_telit(bool rxdiv_configured) {
     s_recovery_test_ringtone = false;
     s_recovery_test_logo = false;
     s_recovery_bad_ringtone = false;
+    s_recovery_early_smart_port = 0u;
     s_recovery_test_reads = s_recovery_test_deletes = 0u;
     s_psmri_live_armed = false;
     s_late_psmri_invalidated_latch = false;
@@ -6030,6 +6045,48 @@ static void test_operator_logo_transport_and_recovery(void) {
           "committed logo authorizes exact reread and one ME deletion without redelivery");
 }
 
+static void test_smart_recovery_receipt_failures(void) {
+    const uint16_t ports[] = {0x1582u, 0x1581u, 0x158au};
+    const store_status_t failures[] = {STORE_STATUS_CONFLICT, STORE_STATUS_INVALID_ARGUMENT,
+        STORE_STATUS_TYPE_MISMATCH, STORE_STATUS_NOT_FOUND, STORE_STATUS_STORAGE_ERROR};
+    for (unsigned kind = 0u; kind < 3u; kind++) {
+        for (unsigned n = 0u; n < sizeof(failures) / sizeof(failures[0]); n++) {
+            begin_telit(true);
+            check(boot_until_ready(30000u), "smart receipt failure fixture boots");
+            for (unsigned i = 0u; i < 100u; i++) mh_advance(50u);
+            unsigned admitted_before = s_mh_logo_parts + s_mh_ringtone_parts + s_mh_picture_parts;
+            s_recovery_early_smart_port = ports[kind];
+            s_recovery_test_message = true;
+            s_mh_local_commit_held = true;
+            mh_feed("+CMTI: \"ME\",1");
+            for (unsigned i = 0u; i < 100u && mh_status().sms_recovery_step != MODEM_SMS_RECOVERY_STORE; i++)
+                mh_advance(50u);
+            check(mh_status().sms_recovery_step == MODEM_SMS_RECOVERY_STORE &&
+                  s_mh_logo_parts + s_mh_ringtone_parts + s_mh_picture_parts == admitted_before + 1u,
+                  "smart receipt admitted before failure");
+            store_status_t *receipt = kind == 0u ? &s_mh_logo_receipt_result :
+                kind == 1u ? &s_mh_ringtone_receipt_result : &s_mh_picture_receipt_result;
+            *receipt = failures[n];
+            s_mh_local_commit_held = false;
+            for (unsigned i = 0u; i < 100u; i++) mh_advance(50u);
+            bool permanent = n < 3u;
+            check(mh_tx_count_exact("AT+CMGD=1,0") == 0u && mh_status().sms_recovery_errors == 1u,
+                  "lost or failed receipt never deletes its ME copy");
+            check(s_mh_local_received == (permanent ? 1u : 0u) &&
+                  s_recovery_test_deletes == (permanent ? 1u : 0u),
+                  "permanent receipt rejection advances to later text; retryable failure defers");
+            *receipt = STORE_STATUS_OK;
+            for (unsigned i = 0u; i < 1200u; i++) mh_advance(50u);
+            check(s_mh_logo_parts + s_mh_ringtone_parts + s_mh_picture_parts ==
+                  admitted_before + (permanent ? 1u : 2u),
+                  "retryable receipt failure re-admits once; rejection does not loop");
+            check(mh_tx_count_exact("AT+CMGD=1,0") == (permanent ? 0u : 1u) &&
+                  s_recovery_test_deletes == 1u && s_mh_local_received == 1u,
+                  "only exact durable recovery authorizes deletion and the later text still arrives");
+        }
+    }
+}
+
 static void test_unicode_send_keeps_direct_delivery(void) {
     if (!begin_sms_operation_fixture("Unicode text-send fixture boots")) return;
     s_hold_final_command = "AT+CMGF=1;+CSMP=17,167,0,8";
@@ -6967,6 +7024,7 @@ int main(void) {
     test_newer_call_forward_result_survives_old_final();
     test_ringtone_transport_and_recovery();
     test_operator_logo_transport_and_recovery();
+    test_smart_recovery_receipt_failures();
 
     if (s_failures == 0) {
         printf("test_modem_telit_service: OK\n");

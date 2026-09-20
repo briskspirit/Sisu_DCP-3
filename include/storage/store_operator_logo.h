@@ -6,6 +6,8 @@
 
 store_status_t store_operator_logo_receive(const sms_codec_message_t *part, uint32_t now_ms);
 store_status_t store_operator_logo_receive_pdu(const char *pdu, uint32_t now_ms);
+/* OK proves this exact part is durable; CONFLICT marks an invalidated receipt,
+ * while NOT_FOUND requires re-admission. Neither permits deleting the ME copy. */
 store_status_t store_operator_logo_received_pdu_status(const char *pdu);
 store_status_t store_operator_logo_commit_status(void);
 void store_operator_logo_expire(uint32_t now_ms);

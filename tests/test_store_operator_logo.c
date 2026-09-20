@@ -48,7 +48,7 @@ static void make_part(const uint8_t *data, size_t len, unsigned seq, unsigned to
     memcpy(part.binary_data, data, len);
 }
 
-int main(void) {
+static void test_baseline(void) {
     diag.ready = true;
     g_store_operator_logo_unit_ops.reset_ram(0u);
     commit();
@@ -153,6 +153,134 @@ int main(void) {
     assert(store_operator_logo_receive_pdu(pdu, ++now) == STORE_STATUS_OK);
     assert(store_operator_logo_pending_first() == 0u);
     assert(store_operator_logo_receive_pdu("bad", ++now) == STORE_STATUS_NOT_FOUND);
+}
+
+static void fresh(void) {
+    memset(&diag, 0, sizeof(diag));
+    diag.ready = true;
+    fail_admission = false;
+    now = 0u;
+    g_store_operator_logo_unit_ops.reset_ram(0u);
+    commit();
+}
+
+static void test_saved_cache_before_mutations(void) {
+    for (unsigned mutation = 0u; mutation < 4u; mutation++) {
+        fresh();
+        uint8_t payload[133] = {0x13,0x01,0x84,0,72,14,1,0xa5};
+        make_part(payload, sizeof(payload), 1u, 1u, 0u);
+        assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK); commit();
+        uint32_t first = store_operator_logo_pending_first();
+        if (mutation == 1u || mutation == 3u) {
+            make_part(payload, mutation == 1u ? sizeof(payload) : 128u,
+                      1u, mutation == 1u ? 1u : 2u, 1u);
+            assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK); commit();
+        }
+        assert(store_operator_logo_pending_save(first) == STORE_STATUS_OK); commit();
+        /* No getter runs between the successful save and the next mutation. */
+        if (mutation == 0u) {
+            make_part(payload, 128u, 1u, 2u, 1u);
+            assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK);
+        } else if (mutation == 1u) {
+            assert(store_operator_logo_pending_discard(store_operator_logo_pending_first()) == STORE_STATUS_OK);
+        } else if (mutation == 2u) {
+            now += 1800001u;
+            store_operator_logo_expire(now);
+        } else {
+            part.binary_data[0] ^= 1u;
+            assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_CONFLICT);
+        }
+        assert(diag.dirty_mask != 0u);
+        operator_logo_t logo;
+        assert(store_operator_logo_get(&logo) == STORE_STATUS_OK && logo.pixels[0] == 0xa5u);
+        diag.degraded_mask = 1u << STORE_UNIT_OPERATOR_LOGO;
+        assert(store_operator_logo_get(&logo) == STORE_STATUS_OK && logo.pixels[0] == 0xa5u);
+        diag.degraded_mask = 0u;
+        reboot();
+        assert(store_operator_logo_get(&logo) == STORE_STATUS_OK && logo.pixels[0] == 0xa5u);
+    }
+}
+
+static void test_rejected_receipts_reusable(void) {
+    for (unsigned durable = 0u; durable < 2u; durable++) {
+        fresh();
+        uint8_t payload[133] = {0x13,0x01,0x84,0,72,14,2};
+        for (unsigned i = 0u; i < 2u; i++) {
+            make_part(payload, sizeof(payload), 1u, 1u, i);
+            assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_INVALID_ARGUMENT);
+            if (durable) { commit(); reboot(); }
+        }
+        payload[6] = 1u;
+        make_part(payload, sizeof(payload), 1u, 1u, 2u);
+        assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK); commit();
+        uint32_t first = store_operator_logo_pending_first();
+        assert(first != 0u);
+        payload[6] = 2u;
+        make_part(payload, sizeof(payload), 1u, 1u, 3u);
+        assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_INVALID_ARGUMENT); commit();
+        payload[6] = 1u;
+        make_part(payload, sizeof(payload), 1u, 1u, 4u);
+        assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK); commit();
+        assert(store_operator_logo_pending_first() == first);
+        make_part(payload, sizeof(payload), 1u, 1u, 5u);
+        assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_STORAGE_ERROR);
+        assert(store_operator_logo_pending_first() == first);
+    }
+}
+
+static void test_invalidated_recovery_receipt(void) {
+    fresh();
+    uint8_t payload[133] = {0x13,0x01,0x84,0,72,14,2};
+    sms_deliver_t deliver = {.dcs = 0xf5u, .udhi = true, .udl = 140u, .ud_len = 140u};
+    strcpy(deliver.address, "+15551234567");
+    assert(sms_deliver_scts_encode(2026u, 9u, 20u, 12u, 0u, 0u, 0, deliver.scts));
+    const uint8_t udh[] = {11u,5u,4u,0x15u,0x82u,0u,0u,0u,3u,11u,2u,1u};
+    memcpy(deliver.ud, udh, sizeof(udh));
+    memcpy(deliver.ud + sizeof(udh), payload, 128u);
+    char pdu[SMS_DELIVER_HEX_MAX];
+    uint8_t tpdu_len;
+    assert(sms_deliver_build(&deliver, pdu, sizeof(pdu), &tpdu_len));
+    assert(store_operator_logo_receive_pdu(pdu, ++now) == STORE_STATUS_OK);
+    assert(store_operator_logo_received_pdu_status(pdu) == STORE_STATUS_NOT_READY);
+    make_part(payload + 128u, 5u, 2u, 2u, 0u);
+    assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_INVALID_ARGUMENT);
+    commit(); reboot();
+    assert(store_operator_logo_received_pdu_status(pdu) == STORE_STATUS_CONFLICT);
+    now += 1800001u;
+    store_operator_logo_expire(now); commit();
+    assert(store_operator_logo_received_pdu_status(pdu) == STORE_STATUS_NOT_FOUND);
+}
+
+static void test_exact_recovery_receipt_wins(void) {
+    fresh();
+    uint8_t payload[133] = {0x13,0x01,0x84,0,72,14,1};
+    sms_deliver_t deliver = {.dcs = 0xf5u, .udhi = true, .udl = 140u, .ud_len = 140u};
+    strcpy(deliver.address, "+15551234567");
+    assert(sms_deliver_scts_encode(2026u, 9u, 20u, 12u, 0u, 0u, 0, deliver.scts));
+    const uint8_t udh[] = {11u,5u,4u,0x15u,0x82u,0u,0u,0u,3u,11u,2u,1u};
+    memcpy(deliver.ud, udh, sizeof(udh));
+    memcpy(deliver.ud + sizeof(udh), payload, 128u);
+    char pdu[SMS_DELIVER_HEX_MAX];
+    uint8_t tpdu_len;
+    assert(sms_deliver_build(&deliver, pdu, sizeof(pdu), &tpdu_len));
+    assert(store_operator_logo_receive_pdu(pdu, ++now) == STORE_STATUS_OK);
+    make_part(payload + 128u, 5u, 2u, 2u, 0u);
+    assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK); commit();
+    payload[6] = 2u;
+    make_part(payload, 128u, 1u, 2u, 1u);
+    assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK);
+    make_part(payload + 128u, 5u, 2u, 2u, 1u);
+    assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_INVALID_ARGUMENT); commit();
+    /* The earlier array slot is invalid, but the later exact receipt is valid. */
+    assert(store_operator_logo_received_pdu_status(pdu) == STORE_STATUS_OK);
+}
+
+int main(void) {
+    test_baseline();
+    test_saved_cache_before_mutations();
+    test_rejected_receipts_reusable();
+    test_invalidated_recovery_receipt();
+    test_exact_recovery_receipt_wins();
     puts("operator logo store passed");
     return 0;
 }

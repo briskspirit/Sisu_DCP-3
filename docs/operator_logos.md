@@ -82,8 +82,11 @@ pending or its write has failed.
 
 Partial, invalid and consumed receipts expire after 30 minutes of awake time
 since the latest new part, rebased on boot. Completed unread receipts do not
-expire. Consumed receipts may be reused sooner. Modem recovery requires an
-exact committed receipt and an unchanged reread before deleting the ME copy.
+expire. Invalid receipts can be reused immediately; consumed receipts can be
+reused once committed. Neither can displace an unread completed logo.
+Modem recovery requires an exact committed receipt and an unchanged reread
+before deleting the ME copy. Invalidated receipts retain that copy and let the
+scan continue; missing receipts or failed writes retry after a bounded delay.
 Rejected logos never become ordinary Data messages.
 
 The CDC `status` snapshot reports receive-part/error counts, pending receipt ID

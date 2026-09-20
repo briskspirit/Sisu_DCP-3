@@ -2695,14 +2695,25 @@ static bool sms_recovery_start(uint32_t now_ms) {
             }
         }
         if (s_recovery_admitted) {
-            bool committed = s_recovery_kind == RECOVERY_RINGTONE
-                ? store_ringtone_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
+            store_status_t status = s_recovery_kind == RECOVERY_RINGTONE
+                ? store_ringtone_received_pdu_status(s_sms_recovery.pdu)
                 : s_recovery_kind == RECOVERY_LOGO
-                    ? store_operator_logo_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
+                    ? store_operator_logo_received_pdu_status(s_sms_recovery.pdu)
                 : s_recovery_kind == RECOVERY_PICTURE
-                    ? store_picture_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
-                    : message_service_receive_committed(s_recovery_receipt);
-            if (committed) modem_sms_recovery_committed(&s_sms_recovery);
+                    ? store_picture_received_pdu_status(s_sms_recovery.pdu)
+                    : message_service_receive_committed(s_recovery_receipt)
+                        ? STORE_STATUS_OK : STORE_STATUS_NOT_READY;
+            if (status == STORE_STATUS_OK) modem_sms_recovery_committed(&s_sms_recovery);
+            else if (status == STORE_STATUS_INVALID_ARGUMENT || status == STORE_STATUS_CONFLICT ||
+                     status == STORE_STATUS_TYPE_MISMATCH) {
+                LOGW("modem", "stored SMS retained: receipt invalidated index=%u", s_sms_recovery.index);
+                modem_sms_recovery_rejected(&s_sms_recovery, now_ms);
+            } else if (status != STORE_STATUS_NOT_READY) {
+                /* A failed write or evicted receipt needs bounded re-admission,
+                 * not an endless wait for a receipt that can no longer commit. */
+                LOGW("modem", "stored SMS retained: receipt unavailable index=%u", s_sms_recovery.index);
+                modem_sms_recovery_defer(&s_sms_recovery, now_ms);
+            }
         }
     }
     if (s_sms_recovery.step != MODEM_SMS_RECOVERY_STORE &&

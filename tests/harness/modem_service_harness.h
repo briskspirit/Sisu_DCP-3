@@ -362,6 +362,7 @@ static unsigned s_mh_ringtone_parts;
 static store_status_t s_mh_ringtone_result;
 static unsigned s_mh_logo_parts;
 static store_status_t s_mh_logo_result;
+static store_status_t s_mh_picture_receipt_result, s_mh_ringtone_receipt_result, s_mh_logo_receipt_result;
 static char s_mh_local_pdu[SMS_DELIVER_HEX_MAX];
 static unsigned s_mh_local_received, s_mh_local_sent, s_mh_local_lost;
 static bool s_mh_local_reject;
@@ -384,7 +385,7 @@ bool message_service_receive_committed(uint32_t receipt) {
 void message_service_receive_forget(uint32_t receipt) { (void)receipt; }
 store_status_t store_picture_received_pdu_status(const char *pdu) {
     (void)pdu;
-    return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : STORE_STATUS_OK;
+    return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : s_mh_picture_receipt_result;
 }
 bool message_service_sent(const char *address, const char *text) {
     (void)address; (void)text;
@@ -417,7 +418,7 @@ store_status_t store_ringtone_receive_pdu(const char *pdu, uint32_t now_ms) {
 }
 store_status_t store_ringtone_received_pdu_status(const char *pdu) {
     (void)pdu;
-    return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : STORE_STATUS_OK;
+    return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : s_mh_ringtone_receipt_result;
 }
 store_status_t store_operator_logo_receive_pdu(const char *pdu, uint32_t now_ms) {
     (void)now_ms;
@@ -429,7 +430,7 @@ store_status_t store_operator_logo_receive_pdu(const char *pdu, uint32_t now_ms)
 }
 store_status_t store_operator_logo_received_pdu_status(const char *pdu) {
     (void)pdu;
-    return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : STORE_STATUS_OK;
+    return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : s_mh_logo_receipt_result;
 }
 bool store_service_flush_all(void) {
     if (!s_mh_store_flush_ok) return false;
@@ -602,6 +603,7 @@ void mh_begin(void) {
     s_mh_logo_parts = 0u;
     s_mh_logo_result = STORE_STATUS_OK;
     s_mh_ringtone_result = STORE_STATUS_OK;
+    s_mh_picture_receipt_result = s_mh_ringtone_receipt_result = s_mh_logo_receipt_result = STORE_STATUS_OK;
     s_mh_local_pdu[0] = 0;
     s_mh_local_received = s_mh_local_sent = s_mh_local_lost = 0u;
     s_mh_local_reject = false;

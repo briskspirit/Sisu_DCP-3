@@ -58,13 +58,26 @@ store_status_t store_operator_logo_commit_status(void) {
     return diag.dirty_mask & mask ? STORE_STATUS_NOT_READY : STORE_STATUS_OK;
 }
 
+static void refresh_committed_logo(void) {
+    if (store_operator_logo_commit_status() == STORE_STATUS_OK) {
+        s_committed_logo = s_logos.logo;
+        s_committed_saved = s_logos.saved;
+    }
+}
+
+static store_status_t mark_dirty(void) {
+    /* A successful save may not have been read before the next receipt arrives. */
+    refresh_committed_logo();
+    return store_engine_mark_dirty(STORE_UNIT_OPERATOR_LOGO);
+}
+
 void store_operator_logo_expire(uint32_t now_ms) {
     for (unsigned i = 0u; i < PENDING_COUNT; i++) {
         pending_logo_t *p = &s_logos.pending[i];
         if (p->state != LOGO_FREE && p->state != LOGO_READY &&
             (uint32_t)(now_ms - s_touched[i]) >= RECEIVE_TTL_MS &&
             store_operator_logo_commit_status() == STORE_STATUS_OK &&
-            store_engine_mark_dirty(STORE_UNIT_OPERATOR_LOGO) == STORE_STATUS_OK)
+            mark_dirty() == STORE_STATUS_OK)
             memset(p, 0, sizeof(*p));
     }
 }
@@ -117,6 +130,8 @@ store_status_t store_operator_logo_receive(const sms_codec_message_t *part, uint
         if (candidate_rank > rank) { p = candidate; rank = candidate_rank; }
         if (rank == 2u) break;
         if (candidate->state == LOGO_FREE ||
+            (candidate->state == LOGO_INVALID &&
+                (available == NULL || available->state == LOGO_CONSUMED)) ||
             (available == NULL && candidate->state == LOGO_CONSUMED &&
                 store_operator_logo_commit_status() == STORE_STATUS_OK))
             available = candidate;
@@ -131,7 +146,7 @@ store_status_t store_operator_logo_receive(const sms_codec_message_t *part, uint
         if (p->total != total || p->dcs != part->dcs ||
             (duplicate && (p->lengths[seq - 1u] != part->binary_len ||
                 memcmp(p->data + offset, part->binary_data, part->binary_len) != 0))) {
-            if (p->state == LOGO_PARTIAL && store_engine_mark_dirty(STORE_UNIT_OPERATOR_LOGO) == STORE_STATUS_OK)
+            if (p->state == LOGO_PARTIAL && mark_dirty() == STORE_STATUS_OK)
                 p->state = LOGO_INVALID;
             return STORE_STATUS_CONFLICT;
         }
@@ -139,7 +154,7 @@ store_status_t store_operator_logo_receive(const sms_codec_message_t *part, uint
     }
     if (size + part->binary_len > OPERATOR_LOGO_PAYLOAD_MAX) return STORE_STATUS_INVALID_ARGUMENT;
     if (p == NULL && available == NULL) return STORE_STATUS_STORAGE_ERROR;
-    store_status_t status = store_engine_mark_dirty(STORE_UNIT_OPERATOR_LOGO);
+    store_status_t status = mark_dirty();
     if (status != STORE_STATUS_OK) return status;
     if (p == NULL) {
         p = available;
@@ -186,15 +201,21 @@ store_status_t store_operator_logo_received_pdu_status(const char *pdu) {
     if (status != STORE_STATUS_OK) return status;
     uint8_t total = s_part.has_concat ? s_part.concat_total : 1u;
     uint8_t seq = s_part.has_concat ? s_part.concat_seq : 1u;
+    const pending_logo_t *p = NULL;
+    unsigned rank = 0u;
     for (unsigned i = 0u; i < PENDING_COUNT; i++) {
-        const pending_logo_t *p = &s_logos.pending[i];
-        if (identity_match_rank(p, &s_part) == 0u || p->state == LOGO_INVALID || p->total != total ||
-            p->dcs != s_part.dcs || !(p->seen & (1u << (seq - 1u)))) continue;
-        uint16_t offset = 0u;
-        for (unsigned j = 0u; j + 1u < seq; j++) offset += p->lengths[j];
-        if (p->lengths[seq - 1u] == s_part.binary_len &&
-            memcmp(p->data + offset, s_part.binary_data, s_part.binary_len) == 0) return STORE_STATUS_OK;
+        const pending_logo_t *candidate = &s_logos.pending[i];
+        unsigned candidate_rank = identity_match_rank(candidate, &s_part);
+        if (candidate_rank > rank) { p = candidate; rank = candidate_rank; }
+        if (rank == 2u) break;
     }
+    if (p == NULL || p->total != total || p->dcs != s_part.dcs ||
+        !(p->seen & (1u << (seq - 1u)))) return STORE_STATUS_NOT_FOUND;
+    if (p->state == LOGO_INVALID) return STORE_STATUS_CONFLICT;
+    uint16_t offset = 0u;
+    for (unsigned j = 0u; j + 1u < seq; j++) offset += p->lengths[j];
+    if (p->lengths[seq - 1u] == s_part.binary_len &&
+        memcmp(p->data + offset, s_part.binary_data, s_part.binary_len) == 0) return STORE_STATUS_OK;
     return STORE_STATUS_NOT_FOUND;
 }
 
@@ -227,10 +248,7 @@ store_status_t store_operator_logo_pending_get(uint32_t id, operator_logo_t *out
 store_status_t store_operator_logo_get(operator_logo_t *out) {
     if (out == NULL) return STORE_STATUS_INVALID_ARGUMENT;
     if (!store_service_unit_ready(STORE_UNIT_OPERATOR_LOGO)) return STORE_STATUS_NOT_READY;
-    if (store_operator_logo_commit_status() == STORE_STATUS_OK) {
-        s_committed_logo = s_logos.logo;
-        s_committed_saved = s_logos.saved;
-    }
+    refresh_committed_logo();
     if (!s_committed_saved) return STORE_STATUS_NOT_FOUND;
     *out = s_committed_logo;
     return STORE_STATUS_OK;
@@ -240,10 +258,7 @@ store_status_t store_operator_logo_pending_save(uint32_t id) {
     operator_logo_t logo;
     store_status_t status = store_operator_logo_pending_get(id, &logo);
     if (status != STORE_STATUS_OK) return status;
-    /* Retain the old durable image if this write fails. */
-    operator_logo_t previous;
-    (void)store_operator_logo_get(&previous);
-    status = store_engine_mark_dirty(STORE_UNIT_OPERATOR_LOGO);
+    status = mark_dirty();
     if (status != STORE_STATUS_OK) return status;
     s_logos.logo = logo;
     s_logos.saved = true;
@@ -254,7 +269,7 @@ store_status_t store_operator_logo_pending_save(uint32_t id) {
 store_status_t store_operator_logo_pending_discard(uint32_t id) {
     pending_logo_t *p = pending_by_id(id);
     if (p == NULL) return STORE_STATUS_NOT_FOUND;
-    store_status_t status = store_engine_mark_dirty(STORE_UNIT_OPERATOR_LOGO);
+    store_status_t status = mark_dirty();
     if (status == STORE_STATUS_OK) p->state = LOGO_CONSUMED;
     return status;
 }
