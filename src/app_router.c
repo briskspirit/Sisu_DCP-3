@@ -25,6 +25,7 @@
 #include "apps/standby_app.h"
 #include "apps/tones_app.h"
 #include "apps/operator_logo_app.h"
+#include "apps/business_card_app.h"
 #include "services/input_keys.h"
 
 bool app_router_handle_event(app_t *app, const input_event_t *event) {
@@ -204,6 +205,8 @@ bool app_router_handle_event(app_t *app, const input_event_t *event) {
         return handle_received_tone_key(app, key, now);
     case APP_ROUTE_OPERATOR_LOGO:
         return handle_operator_logo_key(app, key, now);
+    case APP_ROUTE_BUSINESS_CARD:
+        return handle_business_card_key(app, key, now);
     case APP_ROUTE_SETTINGS_MENU:
         return handle_settings_menu_key(app, key, now);
     case APP_ROUTE_SETTINGS_VALUE:
@@ -493,6 +496,9 @@ void app_router_render(const app_t *app, framebuffer_t *fb) {
         break;
     case APP_ROUTE_OPERATOR_LOGO:
         render_operator_logo(app, fb);
+        break;
+    case APP_ROUTE_BUSINESS_CARD:
+        render_business_card(app, fb);
         break;
     case APP_ROUTE_SETTINGS_MENU:
         render_settings_menu(app, fb);

@@ -5,6 +5,7 @@
 #include "services/message_types.h"
 #include "services/datetime_types.h"
 #include "services/sms_control_filter.h"
+#include "services/sms_picture_codec.h"
 
 /* Normal messages contain at most eight parts. Extra slots retain conflicting
  * duplicates as one quarantined object instead of splicing unrelated text. */
@@ -51,6 +52,7 @@ bool message_file_encode(const message_file_t *file, uint8_t *dst, size_t cap, s
 bool message_file_decode(message_file_t *file, const uint8_t *src, size_t len);
 bool message_file_metadata(const message_file_t *file, message_metadata_t *out);
 bool message_file_content(const message_file_t *file, message_content_t *out);
+bool message_file_part_decode(const message_file_part_t *part, sms_codec_message_t *out);
 /* Seconds since 2000-01-01, ignoring the display timestamp's absent zone.
  * Used only for ordering and a bounded same-SMSC concatenation window. */
 uint32_t message_timestamp_seconds(const char *timestamp);

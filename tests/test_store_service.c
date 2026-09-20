@@ -1541,7 +1541,7 @@ static const wire_expectation_t WIRE_EXPECTED[STORE_UNIT_COUNT] = {
     [STORE_UNIT_BATTERY_LEARNING] = {96u, UINT64_C(0x3c6dd9f41c1206b2)},
     [STORE_UNIT_BATTERY_CHARGE_SUPERVISOR] = {
         128u, UINT64_C(0x08158b2f629793cb)},
-    [STORE_UNIT_STORAGE_HEALTH] = {24u, UINT64_C(0xc05c645ae8186054)},
+    [STORE_UNIT_STORAGE_HEALTH] = {28u, UINT64_C(0xfe5549f785f03f94)},
     [STORE_UNIT_OPERATOR_LOGO] = {1386u, UINT64_C(0x08f8339c0877e459)},
 };
 
@@ -2137,6 +2137,7 @@ static void test_storage_health_persistence(void) {
     assert(store_service_init() == STORE_STATUS_OK);
     store_health_note_corrupt(STORAGE_OBJECT_CONTACT, 99u);
     assert(store_health_get_counts(counts) && counts[0] == UINT32_MAX);
+    assert(counts[STORAGE_OBJECT_BUSINESS_CARD] == 0u);
     assert(write_unit_fixture(STORE_UNIT_STORAGE_HEALTH, payload, 1u));
     assert(store_service_init() == STORE_STATUS_STORAGE_ERROR);
     assert(!store_health_get_counts(counts));

@@ -29,7 +29,8 @@ static uint32_t s_used_bytes, s_limit_bytes;
 static bool s_space_valid;
 
 static void refresh_space(void) {
-    storage_user_usage_t usage;
+    /* All phonebook mutations run on the single core0 storage owner. */
+    static storage_user_usage_t usage;
     s_space_valid = storage_user_get_usage(&usage) == STORAGE_RECORD_OK;
     if (s_space_valid) {
         s_used_bytes = usage.pools[STORAGE_USER_CONTACTS].allocated_bytes;
@@ -238,4 +239,46 @@ bool phonebook_service_entry(uint16_t position, phonebook_entry_t *out) {
     if (!s_ready || out == NULL || position >= s_count) return false;
     *out = s_contacts[position];
     return true;
+}
+
+phonebook_outcome_t phonebook_service_import(uint32_t id, const phonebook_entry_t *entry) {
+    if (id == 0u || entry == NULL || memchr(entry->name, 0, sizeof(entry->name)) == NULL ||
+        memchr(entry->number, 0, sizeof(entry->number)) == NULL || entry->number[0] == '\0')
+        return PHONEBOOK_OUTCOME_ERROR;
+    if (!phonebook_service_idle()) return PHONEBOOK_OUTCOME_NONE;
+    storage_record_result_t rc = s_ready ? STORAGE_RECORD_OK : reload();
+    if (rc != STORAGE_RECORD_OK) return rc == STORAGE_RECORD_BUSY
+        ? PHONEBOOK_OUTCOME_NONE : PHONEBOOK_OUTCOME_ERROR;
+    /* Read physical media too: damaged contacts are intentionally absent from
+     * the cache and must never be overwritten by an import/retry. */
+    static uint8_t wire[CONTACT_WIRE_MAX];
+    size_t len = 0u;
+    static phonebook_entry_t existing;
+    rc = storage_object_read(STORAGE_OBJECT_CONTACT, id, wire, sizeof(wire), &len);
+    if (rc == STORAGE_RECORD_OK) {
+        if (!decode(id, wire, len, &existing)) {
+            store_health_note_corrupt(STORAGE_OBJECT_CONTACT, id);
+            return PHONEBOOK_OUTCOME_ERROR;
+        }
+        if (strcmp(existing.name, entry->name) != 0 ||
+            strcmp(existing.number, entry->number) != 0) return PHONEBOOK_OUTCOME_ERROR;
+        return PHONEBOOK_OUTCOME_OK;
+    }
+    if (rc == STORAGE_RECORD_NOT_FOUND) {
+        if (s_count == PHONEBOOK_MAX_RECORDS) return PHONEBOOK_OUTCOME_FULL;
+        len = encode(entry, wire);
+        rc = storage_object_write(STORAGE_OBJECT_CONTACT, id, wire, len);
+        if (rc == STORAGE_RECORD_OK) {
+            int position = find(id);
+            if (position < 0) position = s_count++;
+            s_contacts[position] = *entry;
+            s_contacts[position].index = id;
+        }
+    }
+    if (rc != STORAGE_RECORD_OK) s_ready = false;
+    if (rc == STORAGE_RECORD_CORRUPT) store_health_note_corrupt(STORAGE_OBJECT_CONTACT, id);
+    refresh_space();
+    return rc == STORAGE_RECORD_OK ? PHONEBOOK_OUTCOME_OK :
+        rc == STORAGE_RECORD_BUSY ? PHONEBOOK_OUTCOME_NONE :
+        rc == STORAGE_RECORD_FULL ? PHONEBOOK_OUTCOME_FULL : PHONEBOOK_OUTCOME_ERROR;
 }

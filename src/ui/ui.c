@@ -33,7 +33,7 @@ typedef struct {
     char text[UI_MARQUEE_TEXT_MAX];
 } ui_marquee_state_t;
 
-static ui_marquee_state_t s_marquee;
+static ui_marquee_state_t s_marquees[2];
 
 static size_t marquee_fit_end(const font_t *font, const char *text, size_t start, int max_width);
 static uint8_t flat_list_view_start(const char *const *labels,
@@ -634,7 +634,10 @@ static size_t marquee_fit_end(const font_t *font, const char *text, size_t start
     return (size_t)(p - text);
 }
 
-const char *ui_marquee_text(const font_t *font, const char *text, int max_width, char *buf, size_t cap) {
+const char *ui_marquee_text_line(uint8_t line, const font_t *font, const char *text,
+                               int max_width, char *buf, size_t cap) {
+    if (line >= 2u) return "";
+    ui_marquee_state_t *state = &s_marquees[line];
     if (text == 0 || buf == 0 || cap == 0u) {
         return "";
     }
@@ -646,24 +649,24 @@ const char *ui_marquee_text(const font_t *font, const char *text, int max_width,
     clean[clean_len] = '\0';
 
     if (asset_text_width(font, clean) <= max_width) {
-        if (s_marquee.active && strncmp(s_marquee.text, clean, sizeof(s_marquee.text)) == 0) {
-            s_marquee.active = false;
+        if (state->active && strncmp(state->text, clean, sizeof(state->text)) == 0) {
+            state->active = false;
         }
         copy_text(buf, cap, clean);
         return buf;
     }
 
-    bool same = s_marquee.active &&
-                s_marquee.font == font &&
-                s_marquee.width == max_width &&
-                strncmp(s_marquee.text, clean, sizeof(s_marquee.text)) == 0;
+    bool same = state->active &&
+                state->font == font &&
+                state->width == max_width &&
+                strncmp(state->text, clean, sizeof(state->text)) == 0;
     if (!same) {
-        memset(&s_marquee, 0, sizeof(s_marquee));
-        copy_text(s_marquee.text, sizeof(s_marquee.text), clean);
-        s_marquee.font = font;
-        s_marquee.width = max_width;
-        s_marquee.active = true;
-        s_marquee.last_step_ms = time_ms();
+        memset(state, 0, sizeof(*state));
+        copy_text(state->text, sizeof(state->text), clean);
+        state->font = font;
+        state->width = max_width;
+        state->active = true;
+        state->last_step_ms = time_ms();
     }
 
     uint8_t count = 0u;
@@ -690,20 +693,20 @@ const char *ui_marquee_text(const font_t *font, const char *text, int max_width,
         }
         starts[count - 1u] = (uint8_t)s;
     }
-    s_marquee.chunk_count = count;
-    memcpy(s_marquee.starts, starts, sizeof(starts));
-    s_marquee.seen = true;
-    if (s_marquee.step >= count) {
-        s_marquee.step = 0u;
+    state->chunk_count = count;
+    memcpy(state->starts, starts, sizeof(starts));
+    state->seen = true;
+    if (state->step >= count) {
+        state->step = 0u;
     }
 
-    if (s_marquee.step == 0u) {
+    if (state->step == 0u) {
         /* Static fit from index 0: hand the whole cleaned label to fb_text, which
          * clips to the window on a glyph boundary (the ROM shows no ellipsis). */
         copy_text(buf, cap, clean);
         return buf;
     }
-    size_t chunk_start = s_marquee.starts[s_marquee.step];
+    size_t chunk_start = state->starts[state->step];
     size_t chunk_end = marquee_fit_end(font, clean, chunk_start, max_width);
     size_t n = chunk_end - chunk_start;
     if (n >= cap) {
@@ -714,29 +717,38 @@ const char *ui_marquee_text(const font_t *font, const char *text, int max_width,
     return buf;
 }
 
-bool ui_marquee_tick(uint32_t now) {
-    if (!s_marquee.active) {
+const char *ui_marquee_text(const font_t *font, const char *text, int max_width, char *buf, size_t cap) {
+    return ui_marquee_text_line(0u, font, text, max_width, buf, cap);
+}
+
+static bool marquee_tick(ui_marquee_state_t *state, uint32_t now) {
+    if (!state->active) {
         return false;
     }
-    if (s_marquee.check_pending) {
-        s_marquee.check_pending = false;
-        if (!s_marquee.seen) {
+    if (state->check_pending) {
+        state->check_pending = false;
+        if (!state->seen) {
             /* The marquee row left the screen without a key change. */
-            s_marquee.active = false;
+            state->active = false;
             return false;
         }
     }
-    if (s_marquee.chunk_count <= 1u) {
+    if (state->chunk_count <= 1u) {
         return false;
     }
-    if (time_diff_ms(now, s_marquee.last_step_ms + UI_MARQUEE_DELAY_MS) < 0) {
+    if (time_diff_ms(now, state->last_step_ms + UI_MARQUEE_DELAY_MS) < 0) {
         return false;
     }
-    s_marquee.step = (uint8_t)((s_marquee.step + 1u) % s_marquee.chunk_count);
-    s_marquee.last_step_ms = now;
-    s_marquee.seen = false;
-    s_marquee.check_pending = true;
+    state->step = (uint8_t)((state->step + 1u) % state->chunk_count);
+    state->last_step_ms = now;
+    state->seen = false;
+    state->check_pending = true;
     return true;
+}
+
+bool ui_marquee_tick(uint32_t now) {
+    bool changed = marquee_tick(&s_marquees[0], now);
+    return marquee_tick(&s_marquees[1], now) || changed;
 }
 
 static const char UI_BREADCRUMB_NONE_VALUE[] = "";

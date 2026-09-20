@@ -106,8 +106,10 @@ are also excluded from expiry cleanup. Contact-binding pruning is suppressed
 when damaged contacts exist. Filesystem/I/O errors are not treated as individual
 bad records: an incomplete scan cannot masquerade as a healthy empty list.
 
-System record `3220` holds four saturating 32-bit corruption-detection counters:
-contacts, inbox, outbox and incomplete SMS. A given collection/object ID counts
+System record `3220` holds five saturating 32-bit corruption-detection counters:
+contacts, inbox, outbox, incomplete SMS and business cards. The previous
+four-counter payload remains readable, with zero initial card detections.
+A given collection/object ID counts
 once per boot, including repeated scans; a later boot detecting the same damage
 counts another observation. This is not a count of unique lifetime failures.
 Deduplication uses 10 KiB of bounded RAM. Exhausting that diagnostic bound also
@@ -347,7 +349,7 @@ Each unit is one independently replaced record:
 - charge supervisor: frozen charge-generation accounting, policy/factor trust,
   latest terminal summary, qualified-FULL authority, and durable `/CE` stop and
   attached-maintenance latches
-- storage health: corruption-detection counters for contacts and three SMS collections
+- storage health: corruption-detection counters for contacts, three SMS collections and business cards
 
 The non-resettable Life timer lives in the settings/calls unit beside the four
 ordinary duration counters. This matches v6.00's call-accounting ownership and

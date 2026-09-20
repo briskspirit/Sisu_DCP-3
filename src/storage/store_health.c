@@ -55,10 +55,12 @@ static bool serialize(uint8_t instance, uint8_t *dst, size_t cap, size_t *len) {
 
 static bool apply(uint8_t instance, const uint8_t *src, size_t len) {
     (void)instance;
-    if (len != HEALTH_WIRE_SIZE || read_u32(src) != HEALTH_MAGIC ||
+    /* Older records predate the cards collection; its counter starts at zero. */
+    if ((len != HEALTH_WIRE_SIZE && len != 24u) || read_u32(src) != HEALTH_MAGIC ||
         read_u32(src + 4u) != STORE_PAYLOAD_VERSION) return false;
+    memset(s_counts, 0, sizeof(s_counts));
     for (unsigned i = 0; i < STORAGE_OBJECT_COLLECTION_COUNT; i++)
-        s_counts[i] = read_u32(src + 8u + i * 4u);
+        if (8u + (i + 1u) * 4u <= len) s_counts[i] = read_u32(src + 8u + i * 4u);
     return true;
 }
 

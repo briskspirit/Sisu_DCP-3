@@ -131,6 +131,9 @@ static inline void ui_circular_list_step_3rows(uint8_t count,
  * ui_marquee_text for the selected/overflowing label; ui_marquee_tick runs
  * from the app tick and reports when a redraw is needed. */
 const char *ui_marquee_text(const font_t *font, const char *text, int max_width, char *buf, size_t cap);
+/* Two independent text windows may scroll on the same screen (lines 0/1). */
+const char *ui_marquee_text_line(uint8_t line, const font_t *font, const char *text,
+                               int max_width, char *buf, size_t cap);
 bool ui_marquee_tick(uint32_t now);
 void draw_text_right(framebuffer_t *fb, const font_t *font, const char *text, int y, int width);
 

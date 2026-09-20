@@ -16,6 +16,7 @@
 #include "services/log.h"
 #include "services/modem_service.h"
 #include "services/message_service.h"
+#include "services/business_card_service.h"
 #include "services/sms_picture_codec.h"
 #include "storage/store_service.h"
 #include "storage/store_operator_logo.h"
@@ -787,6 +788,29 @@ bool poll_sms(app_t *app, uint32_t now) {
     }
     message_status_t local;
     message_service_get_status(&local);
+    if (business_card_service_ready() && app->route != APP_ROUTE_POWER_OFF &&
+        app->route != APP_ROUTE_POWERUP) {
+        uint32_t id = business_card_service_pending_first();
+        if (id != 0u && id != app->business_card_last_notice_id) {
+            app->business_card_last_notice_id = id;
+            app->business_card_notice_id = id;
+            play_message_alert(app, &status, now);
+            changed = true;
+        } else if (id == 0u && app->business_card_notice_id != 0u) {
+            app->business_card_notice_id = 0u;
+            changed = true;
+        }
+    }
+    if (local.business_card_errors != app->business_card_errors_seen) {
+        app->business_card_warning |= local.business_card_errors > app->business_card_errors_seen;
+        app->business_card_errors_seen = local.business_card_errors;
+    }
+    if (app->business_card_warning && app->route == APP_ROUTE_STANDBY &&
+        app->input_len == 0u && !app->keyguard_locked) {
+        app->business_card_warning = false;
+        open_display_sid(app, 0u, 0x210u, "Not\ndone", APP_ROUTE_STANDBY, now);
+        changed = true;
+    }
     if (local.ready && app->sms_unread_count != local.unread) {
         app->sms_unread_count = local.unread;
         changed = true;

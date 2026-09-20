@@ -49,6 +49,8 @@ claim is the current best understanding, not a measured fact.
 
 ## UI And Protocol Records
 
+- [Business cards](business_cards.md): native Send entry, received-card menus,
+  vCard decoding, and restart-safe contact saves.
 - [Operator logos](operator_logos.md): binary receive/show/save/discard,
   full PLMN matching, system-partition storage, and original-ROM probes.
 - [Ringtone messages](ringtone_messages.md): native binary Composer send,

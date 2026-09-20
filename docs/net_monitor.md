@@ -207,19 +207,19 @@ to distinguish selected policy from page 3's serving-network identity.
 | 80-81 | soft-off subsystem state and retained wake evidence |
 | 82-88 | sleep readiness, entry, aborts, POWMAN evidence, clocks, blockers, and boot/wake timing |
 
-Page 76 has ten frames. The first shows system/user allocated versus total
+Page 76 has eleven frames. The first shows system/user allocated versus total
 KiB, physical user free space, and the recovery reserve. The next five show
 contacts, inbox, outbox, incomplete SMS and OTHER: allocated/budget KiB, file
 count, and rounded-up file-data KiB (including record envelopes). Filesystem
 metadata makes allocated space larger than file data. Free space includes the
 reserve and does not override category budgets. OTHER includes the existing
-call logs, pictures, tones, dictionary and divert records.
+call logs, pictures, tones, dictionary, divert records and business-card receipts.
 
 The next two frames show mailbox/pending/queue counts, SMS readiness/full state,
 retention-clock validity, and boot-local expiry/filter/loss counters (`E/F/L`). `F`
 counts controls consumed by the local message store; modem-side filters retain
-their separate counters. The final two frames show persistent corruption
-detections: contacts/inbox/outbox (`C/I/O`), pending SMS (`P`), counter save state,
+their separate counters. The final three frames show persistent corruption
+detections: contacts/inbox/outbox (`C/I/O`), pending SMS (`P`), business cards (`B`), counter save state,
 and startup-fault bits. Each damaged collection/object counts once per boot,
 not once per rescan. `SAVE PENDING` is not yet durable; `SAVE FAILED` is a parked
 commit failure; `UNAVAILABLE` means the health record could not be loaded.

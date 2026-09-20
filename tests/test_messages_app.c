@@ -315,6 +315,8 @@ store_status_t store_ringtone_commit_status(void) { return STORE_STATUS_OK; }
 uint32_t store_ringtone_pending_first(void) { return 0u; }
 store_status_t store_operator_logo_commit_status(void) { return STORE_STATUS_OK; }
 uint32_t store_operator_logo_pending_first(void) { return 0u; }
+uint32_t business_card_service_pending_first(void) { return 0u; }
+bool business_card_service_ready(void) { return true; }
 uint32_t store_picture_pending_first(void) {
     return s_picture_commit_status == STORE_STATUS_OK && !s_pending_picture_consumed
         ? s_pending_picture_id : 0u;

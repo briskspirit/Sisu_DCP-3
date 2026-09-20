@@ -15,6 +15,7 @@
 #include "apps/service_codes_app.h"
 #include "apps/tones_app.h"
 #include "apps/operator_logo_app.h"
+#include "apps/business_card_app.h"
 #include "services/input_keys.h"
 #include "services/key_utils.h"
 #include "ui/status_chrome.h"
@@ -181,6 +182,14 @@ bool handle_standby_key(app_t *app, const input_event_t *event) {
         open_received_operator_logo(app);
         if (key == KEY_C && app->route == APP_ROUTE_OPERATOR_LOGO)
             (void)handle_operator_logo_key(app, KEY_C, now);
+        return true;
+    }
+
+    if (app->business_card_notice_id != 0u && app->input_len == 0u &&
+        (key == KEY_NAVI || key == KEY_C)) {
+        open_received_business_card(app);
+        if (key == KEY_C && app->route == APP_ROUTE_BUSINESS_CARD)
+            (void)handle_business_card_key(app, KEY_C, now);
         return true;
     }
 
@@ -571,6 +580,8 @@ void render_standby(const app_t *app, framebuffer_t *fb) {
         messages_picture_draw_notice(fb);
     } else if (app->operator_logo_notice_id != 0u) {
         draw_notice(fb, asset_font(FONT_FS2), ts_or(0x21bu, "Operator\nlogo\nreceived"));
+    } else if (app->business_card_notice_id != 0u) {
+        draw_notice(fb, asset_font(FONT_FS2), ts_or(0x64u, "Business card\nreceived"));
     } else if (app->ringtone_notice_id != 0u) {
         draw_notice(fb, asset_font(FONT_FS2), ts_or(0x222u, "Ringing\ntone\nreceived"));
     } else if (app->sms_received_pending) {
@@ -621,6 +632,8 @@ void render_standby(const app_t *app, framebuffer_t *fb) {
     } else if (app->picture_notice_id != 0u) {
         draw_softkey(fb, "View");
     } else if (app->operator_logo_notice_id != 0u) {
+        draw_softkey(fb, "Options");
+    } else if (app->business_card_notice_id != 0u) {
         draw_softkey(fb, "Options");
     } else if (app->ringtone_notice_id != 0u) {
         draw_softkey(fb, "Options");

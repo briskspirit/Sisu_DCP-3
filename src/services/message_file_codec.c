@@ -47,6 +47,10 @@ static bool part_decode(const message_file_part_t *part, sms_codec_message_t *ou
     return sms_pdu_decode(hex, out);
 }
 
+bool message_file_part_decode(const message_file_part_t *part, sms_codec_message_t *out) {
+    return part != NULL && out != NULL && part_decode(part, out);
+}
+
 static bool quarantined(const sms_codec_message_t *part) {
     return part->submit || part->udh_unhandled || part->trailing_data ||
         (part->has_concat && (part->concat_total == 0u ||

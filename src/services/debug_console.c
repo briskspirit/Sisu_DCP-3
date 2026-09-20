@@ -33,6 +33,7 @@
 #include "hardware/structs/powman.h"
 #include "hardware/structs/sysinfo.h"
 #include "services/sms_picture_codec.h"
+#include "services/business_card_service.h"
 #include "services/message_service.h"
 #include "services/phonebook_service.h"
 #include "services/board_diag_service.h"
@@ -234,6 +235,9 @@ void debug_console_tick(app_t *app) {
 static void command_storeinfo(void) {
     message_status_t messages;
     message_service_get_status(&messages);
+    printf("[store] business-cards ready=%u pending=%lu errors=%lu\n",
+           business_card_service_ready(), (unsigned long)business_card_service_pending_first(),
+           (unsigned long)messages.business_card_errors);
     printf("[store] contacts ready=%u count=%u messages ready=%u error=%u full=%u inbox=%u outbox=%u unread=%u pending=%u queued=%u lost=%lu filtered=%lu expired=%lu clock=%u\n",
            phonebook_service_cache_valid(), (unsigned)phonebook_service_count(),
            messages.ready, messages.storage_error, messages.full,
@@ -252,11 +256,12 @@ static void command_storeinfo(void) {
            (unsigned)health.boot_faults, (unsigned long)health.unavailable_mask,
            (unsigned)info.system_status, (unsigned)info.user_status, (unsigned)info.objects_status);
     if (store_health_get_counts(counts)) {
-        printf("[store] corruption-detections contacts=%lu inbox=%lu outbox=%lu pending=%lu save=%s\n",
+        printf("[store] corruption-detections contacts=%lu inbox=%lu outbox=%lu pending=%lu cards=%lu save=%s\n",
                (unsigned long)counts[STORAGE_OBJECT_CONTACT],
                (unsigned long)counts[STORAGE_OBJECT_INBOX],
                (unsigned long)counts[STORAGE_OBJECT_OUTBOX],
                (unsigned long)counts[STORAGE_OBJECT_PENDING_SMS],
+               (unsigned long)counts[STORAGE_OBJECT_BUSINESS_CARD],
                (health.degraded_mask & health_bit) ? "failed" :
                (health.dirty_mask & health_bit) ? "pending" : "durable");
     } else printf("[store] corruption-detections unavailable\n");

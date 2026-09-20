@@ -635,8 +635,11 @@ void netmon_render_local(uint8_t id, uint8_t frame_index,
             netmon_render_linef(out, 2u, "I %lu", (unsigned long)s->corrupt[STORAGE_OBJECT_INBOX]);
             netmon_render_linef(out, 3u, "O %lu", (unsigned long)s->corrupt[STORAGE_OBJECT_OUTBOX]);
         } else {
-            netmon_render_linef(out, 0u, "PART ERRORS");
-            netmon_render_linef(out, 1u, "P %lu", (unsigned long)s->corrupt[STORAGE_OBJECT_PENDING_SMS]);
+            netmon_render_linef(out, 0u, frame_index == 9u ? "PART ERRORS" : "CARD ERRORS");
+            if (frame_index == 9u)
+                netmon_render_linef(out, 1u, "P %lu", (unsigned long)s->corrupt[STORAGE_OBJECT_PENDING_SMS]);
+            else
+                netmon_render_linef(out, 1u, "B %lu", (unsigned long)s->corrupt[STORAGE_OBJECT_BUSINESS_CARD]);
             netmon_render_linef(out, 2u, "SAVE %s", s->health_failed ? "FAILED" :
                                 s->health_dirty ? "PENDING" : "OK");
             netmon_render_linef(out, 3u, "BOOT %02X", (unsigned)s->boot_faults);

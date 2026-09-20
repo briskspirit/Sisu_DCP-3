@@ -19,5 +19,8 @@ bool phonebook_service_pop_result(phonebook_result_t *out);
 bool phonebook_service_cache_valid(void);
 uint16_t phonebook_service_count(void);
 bool phonebook_service_entry(uint16_t position, phonebook_entry_t *out);
+/* Storage-owner window only. Imports an already allocated receipt ID without
+ * replacing a different contact. NONE means busy; retry with the same ID. */
+phonebook_outcome_t phonebook_service_import(uint32_t id, const phonebook_entry_t *entry);
 
 #endif

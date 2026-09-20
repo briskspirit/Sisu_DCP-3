@@ -67,6 +67,7 @@ typedef enum {
     APP_ROUTE_TONE_COMPOSER_TEMPO,
     APP_ROUTE_RECEIVED_TONE,
     APP_ROUTE_OPERATOR_LOGO,
+    APP_ROUTE_BUSINESS_CARD,
     APP_ROUTE_SETTINGS_MENU,
     APP_ROUTE_SETTINGS_VALUE,
     APP_ROUTE_SETTINGS_WELCOME_OPTIONS,
@@ -506,6 +507,14 @@ typedef struct {
     uint32_t tone_composer_send_request_id;
     uint32_t ringtone_notice_id;
     uint32_t operator_logo_notice_id;
+    uint32_t business_card_notice_id;
+    uint32_t business_card_last_notice_id;
+    uint32_t business_card_receive_id;
+    uint32_t business_card_errors_seen;
+    uint8_t business_card_option;
+    bool business_card_preview;
+    bool business_card_action_pending;
+    bool business_card_warning;
     uint32_t operator_logo_last_notice_id;
     uint32_t operator_logo_receive_id;
     uint32_t operator_logo_errors_seen;

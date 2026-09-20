@@ -32,14 +32,14 @@ static lfs_dir_t s_object_dir;
 static bool s_object_scan_open;
 static bool s_objects_ready;
 static uint32_t s_next_object;
-static const char *const OBJECT_DIRS[] = {"contacts", "inbox", "outbox", "pending"};
+static const char *const OBJECT_DIRS[] = {"contacts", "inbox", "outbox", "pending", "cards"};
 _Static_assert(sizeof(OBJECT_DIRS) / sizeof(OBJECT_DIRS[0]) ==
                STORAGE_OBJECT_COLLECTION_COUNT, "object collection paths");
 _Static_assert((unsigned)STORAGE_OBJECT_CONTACT == (unsigned)STORAGE_USER_CONTACTS &&
                (unsigned)STORAGE_OBJECT_INBOX == (unsigned)STORAGE_USER_INBOX &&
                (unsigned)STORAGE_OBJECT_OUTBOX == (unsigned)STORAGE_USER_OUTBOX &&
                (unsigned)STORAGE_OBJECT_PENDING_SMS == (unsigned)STORAGE_USER_PENDING &&
-               (unsigned)STORAGE_OBJECT_COLLECTION_COUNT == (unsigned)STORAGE_USER_OTHER,
+               (unsigned)STORAGE_OBJECT_BUSINESS_CARD == (unsigned)STORAGE_USER_OTHER,
                "object collections must map to their user-space pools");
 #define OBJECT_MAGIC 0x314a424fu
 #define OBJECT_HEADER 20u
@@ -481,7 +481,7 @@ static int usage_files(record_fs_t *fs, const char *path, unsigned pool) {
     struct lfs_info info;
     while ((rc = lfs_dir_read(&fs->fs, &dir, &info)) > 0) {
         if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) continue;
-        if (info.type == LFS_TYPE_DIR && pool == STORAGE_USER_OTHER) continue;
+        if (info.type == LFS_TYPE_DIR && strcmp(path, "/") == 0) continue;
         if (info.type != LFS_TYPE_REG) {
             rc = LFS_ERR_CORRUPT;
             break;
@@ -489,7 +489,7 @@ static int usage_files(record_fs_t *fs, const char *path, unsigned pool) {
         if (temporary_name(info.name)) continue;
         s_usage.pools[pool].contents.files++;
         s_usage.pools[pool].contents.file_bytes += info.size;
-        int category = pool == STORAGE_USER_OTHER ? legacy_category(info.name) : -1;
+        int category = strcmp(path, "/") == 0 ? legacy_category(info.name) : -1;
         if (category >= 0) {
             s_usage.legacy[category].files++;
             s_usage.legacy[category].file_bytes += info.size;

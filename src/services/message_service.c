@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include "services/message_file_codec.h"
+#include "services/business_card_service.h"
 #include "storage/storage_objects.h"
 #include "storage/store_health.h"
 #include "storage/store_service.h"
@@ -15,6 +16,7 @@
 #define INDEX_QUARANTINED 4u
 #define INDEX_CONTROL 8u
 #define INDEX_PUBLICATION_BLOCKED 16u
+#define INDEX_CARD 32u
 
 typedef struct { uint32_t id, time; uint8_t flags; } index_t;
 typedef struct {
@@ -94,6 +96,10 @@ static storage_record_result_t index_current(storage_object_collection_t c, uint
         .flags=(uint8_t)((pending ? 0u : state) | (message_file_complete(&s_file) ? INDEX_COMPLETE : 0u) |
             (pending && message_file_control(&s_file) != SMS_CONTROL_KEEP ? INDEX_CONTROL : 0u) |
             (meta.quarantined ? INDEX_QUARANTINED : 0u))};
+    if (pending && (entry->flags & INDEX_COMPLETE)) {
+        phonebook_entry_t card;
+        if (business_card_file_decode(&s_file, &card) != BUSINESS_CARD_NONE) entry->flags |= INDEX_CARD;
+    }
     return STORAGE_RECORD_OK;
 }
 
@@ -185,6 +191,7 @@ static void failure(storage_record_result_t rc, uint32_t now) {
 }
 
 void message_service_init(void) {
+    business_card_service_init();
     s_receipt_active = 0u;
     s_receipt_committed = false;
     memset(&s_status, 0, sizeof(s_status));
@@ -369,6 +376,8 @@ void message_service_receive_forget(uint32_t receipt) {
 }
 
 bool message_service_sent(const char *address, const char *text) {
+    /* Send entry is a contact exchange, not a user-composed Outbox message. */
+    if (business_card_text_envelope(text)) return true;
     if (address == NULL || text == NULL || strlen(address) > MODEM_SMS_SENDER_MAX ||
         strlen(text) > MODEM_SMS_TEXT_MAX || s_queued == RECEIVE_LIMIT) {
         s_status.receive_errors++; return false;
@@ -407,6 +416,9 @@ static storage_record_result_t receive_one(void) {
         }
         return rc;
     }
+    bool duplicate;
+    rc = business_card_service_duplicate(r->pdu, &duplicate);
+    if (rc != STORAGE_RECORD_OK || duplicate) return rc;
     /* Completed inbox messages only suppress byte-identical retransmissions.
      * A reused concatenation reference must not splice a new message into one
      * already shown to the user. */
@@ -453,6 +465,24 @@ static storage_record_result_t publish(unsigned pos) {
     int existing = find(s_index[MESSAGE_INBOX], s_count[MESSAGE_INBOX], id);
     storage_record_result_t rc = load(STORAGE_OBJECT_PENDING_SMS, id);
     if (rc != STORAGE_RECORD_OK) return rc;
+
+    phonebook_entry_t card;
+    business_card_result_t card_result = business_card_file_decode(&s_file, &card);
+    if (card_result != BUSINESS_CARD_NONE) {
+        if (card_result == BUSINESS_CARD_VALID) {
+            rc = business_card_service_publish(id, &s_file);
+            if (rc == STORAGE_RECORD_CORRUPT)
+                return block_publication(pos, STORAGE_OBJECT_BUSINESS_CARD);
+            if (rc != STORAGE_RECORD_OK) return rc;
+        }
+        rc = storage_object_remove(STORAGE_OBJECT_PENDING_SMS, id);
+        if (rc == STORAGE_RECORD_OK || rc == STORAGE_RECORD_NOT_FOUND) {
+            erase_index(s_pending, &s_pending_count, pos);
+            if (card_result == BUSINESS_CARD_INVALID) s_status.business_card_errors++;
+            return STORAGE_RECORD_OK;
+        }
+        return rc;
+    }
 
     /* The healthy index deliberately omits corrupt files. Only the physical
      * destination can prove absence or authorize removal of a duplicate. */
@@ -540,6 +570,12 @@ static void rotate_receive(void) {
 }
 
 void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
+    /* Card actions use this same audio/DMA-safe flash window, even while the
+     * ordinary message queue is backing off after a full Inbox. */
+    if (!business_card_service_idle()) {
+        business_card_service_tick();
+        return;
+    }
     uint32_t wall = message_datetime_seconds(wall_time);
     s_status.retention_clock_valid = wall != 0u;
     if (s_retry_pending && (int32_t)(now - s_retry_at) < 0) return;
@@ -574,7 +610,7 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
     for (unsigned i = 0; i < s_pending_count; i++) {
         if (s_pending[i].flags & INDEX_PUBLICATION_BLOCKED) continue;
         if (!(s_pending[i].flags & (INDEX_COMPLETE | INDEX_CONTROL))) continue;
-        if (publication_full && !(s_pending[i].flags & INDEX_CONTROL) &&
+        if (publication_full && !(s_pending[i].flags & (INDEX_CONTROL | INDEX_CARD)) &&
             find(s_index[MESSAGE_INBOX], s_count[MESSAGE_INBOX], s_pending[i].id) < 0) continue;
         rc = publish(i);
         if (rc == STORAGE_RECORD_CORRUPT && (s_pending[i].flags & INDEX_PUBLICATION_BLOCKED)) continue;
@@ -582,7 +618,7 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
         if (rc == STORAGE_RECORD_OK) { s_io_failures = 0u; recount(); return; }
         if (!s_status.full) s_status.full_events++;
         s_status.full = true;
-        publication_full = true;
+        if (!(s_pending[i].flags & INDEX_CARD)) publication_full = true;
         /* A full inbox must not strand a filtered control or a post-cut
          * duplicate behind the message waiting for publication. */
     }
@@ -616,12 +652,13 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
 }
 
 bool message_service_idle(void) {
-    if (s_queued != 0u) return false;
+    if (s_queued != 0u || !business_card_service_idle()) return false;
     for (unsigned i = 0; i < MESSAGE_OP_COUNT; i++)
         if (s_requests[i].result.request_id != 0u && !s_requests[i].done) return false;
     return true;
 }
 bool message_service_sleep_ready(void) {
+    if (!business_card_service_idle()) return false;
     for (unsigned i = 0; i < MESSAGE_OP_COUNT; i++)
         if (s_requests[i].result.request_id != 0u && !s_requests[i].done) return false;
     if (s_io_deferred) return true;

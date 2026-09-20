@@ -143,6 +143,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/apps/snake_app.c
     src/apps/standby_app.c
     src/apps/operator_logo_app.c
+    src/apps/business_card_app.c
     src/apps/tones/app.c
     src/apps/tones/composer.c
     src/apps/tones/received.c
@@ -196,6 +197,8 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/modem_maintenance.c
     src/services/phonebook_service.c
     src/services/message_service.c
+    src/services/business_card_codec.c
+    src/services/business_card_service.c
     src/services/message_file_codec.c
     src/services/modem_sms_direct.c
     src/services/modem_sms_recovery.c

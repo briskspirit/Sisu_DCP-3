@@ -25,6 +25,7 @@ typedef struct {
     uint8_t queued;
     uint32_t revision, received, full_events, receive_errors, filtered_controls;
     uint32_t expired_incomplete;
+    uint32_t business_card_errors;
     bool retention_clock_valid;
 } message_status_t;
 

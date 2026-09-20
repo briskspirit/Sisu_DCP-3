@@ -4,6 +4,8 @@
 #include <string.h>
 #include "services/message_service.h"
 #include "services/message_file_codec.h"
+#include "services/business_card_service.h"
+#include "services/phonebook_service.h"
 #include "services/sms_deliver_codec.h"
 #include "sms_control_fixtures.h"
 #include "storage/storage_lfs.h"
@@ -20,6 +22,7 @@ void store_health_note_corrupt(storage_object_collection_t collection, uint32_t 
     corrupt_detections[collection]++;
 }
 void store_service_require_service(uint8_t faults) { boot_faults |= faults; }
+void store_phonebook_prune_bindings(bool (*exists)(uint32_t)) { (void)exists; }
 
 static uint8_t media[STORAGE_USER_BYTES], baseline[STORAGE_USER_BYTES];
 static unsigned operations, cut_at, tear;
@@ -66,6 +69,7 @@ static void reopen(void) {
     storage_lfs_deinit();
     assert(storage_lfs_init(&backend, &hal) == STORAGE_RECORD_OK);
     assert(storage_objects_open() == STORAGE_RECORD_OK);
+    phonebook_service_init();
     message_service_init();
 }
 static void fresh(void) {
@@ -644,11 +648,199 @@ static void test_durable_receive_receipts(void) {
     message_service_receive_forget(next);
 }
 
+static const char card_text[] = "//SCKE2 BEGIN:VCARD\r\nN:Alice\r\nTEL:+123456789\r\nEND:VCARD\r\n";
+
+static uint32_t receive_card(unsigned second) {
+    make_pdu(pdu[0], 1, 1, 0, second, card_text);
+    assert(message_service_receive(pdu[0])); drain();
+    assert(status().inbox == 0u && status().pending == 0u);
+    uint32_t id = business_card_service_pending_first();
+    assert(id != 0u); return id;
+}
+
+static business_card_action_result_t card_action(uint32_t id, bool save) {
+    assert(business_card_service_request(id, save));
+    drain();
+    business_card_action_result_t r;
+    assert(business_card_service_pop_result(&r) && r.id == id && r.save == save);
+    assert(!business_card_service_pop_result(&r)); return r;
+}
+
+static void test_business_cards(void) {
+    fresh();
+    uint32_t id = receive_card(1);
+    phonebook_entry_t contact;
+    assert(business_card_service_get(id, &contact) && strcmp(contact.name, "Alice") == 0);
+    assert(phonebook_service_count() == 0u);
+    assert(message_service_receive(pdu[0])); drain();
+    assert(business_card_service_pending_first() == id && status().pending == 0u);
+    reopen(); assert(business_card_service_pending_first() == id);
+    assert(business_card_service_request(id, true));
+    busy = true; tick();
+    business_card_action_result_t r;
+    assert(!business_card_service_pop_result(&r) && !message_service_sleep_ready());
+    busy = false; drain();
+    assert(business_card_service_pop_result(&r) && r.outcome == PHONEBOOK_OUTCOME_OK);
+    assert(phonebook_service_count() == 1u && business_card_service_pending_first() == 0u);
+    assert(phonebook_service_entry(0, &contact) && contact.index == id);
+    reopen();
+    assert(message_service_receive(pdu[0])); drain();
+    assert(business_card_service_pending_first() == 0u && phonebook_service_count() == 1u);
+    assert(card_action(id, true).outcome == PHONEBOOK_OUTCOME_OK && phonebook_service_count() == 1u);
+
+    id = receive_card(2);
+    assert(card_action(id, false).outcome == PHONEBOOK_OUTCOME_OK);
+    assert(card_action(id, true).outcome == PHONEBOOK_OUTCOME_ERROR);
+    reopen(); assert(message_service_receive(pdu[0])); drain();
+    assert(business_card_service_pending_first() == 0u && phonebook_service_count() == 1u);
+
+    make_pdu(pdu[0], 2, 1, 32, 3, "//SCK");
+    make_pdu(pdu[1], 2, 2, 32, 4, card_text + 5);
+    assert(message_service_receive(pdu[1])); drain(); reopen();
+    assert(status().pending == 1u && business_card_service_pending_first() == 0u);
+    assert(message_service_receive(pdu[0])); drain();
+    id = business_card_service_pending_first();
+    assert(id != 0u && status().pending == 0u && status().inbox == 0u);
+    write_error = true;
+    assert(card_action(id, true).outcome == PHONEBOOK_OUTCOME_ERROR);
+    write_error = false; reopen();
+    assert(business_card_service_pending_first() == id);
+    assert(card_action(id, true).outcome == PHONEBOOK_OUTCOME_OK && phonebook_service_count() == 2u);
+
+    make_pdu(pdu[0], 1, 1, 0, 5, "//SCKE2 BEGIN:VCARD\r\nTEL:123\r\n");
+    assert(message_service_receive(pdu[0])); drain();
+    assert(status().business_card_errors == 1u && status().inbox == 0u && status().pending == 0u);
+    assert(message_service_sent("123", card_text)); drain();
+    assert(status().outbox == 0u);
+}
+
+static void test_card_save_power_cuts(void) {
+    fresh(); uint32_t id = receive_card(1);
+    memcpy(baseline, media, sizeof(media));
+    operations = 0;
+    assert(card_action(id, true).outcome == PHONEBOOK_OUTCOME_OK);
+    unsigned count = operations;
+    assert(count > 0);
+    for (unsigned point = 1; point <= count; point++) {
+        for (tear = 0; tear < 3; tear++) {
+            storage_lfs_deinit(); memcpy(media, baseline, sizeof(media)); reopen();
+            operations = 0; cut_at = point;
+            if (setjmp(cut) == 0) { (void)card_action(id, true); assert(false); }
+            cut_at = 0; reopen(); drain();
+            assert(phonebook_service_cache_valid() && phonebook_service_count() <= 1u);
+            assert(card_action(id, true).outcome == PHONEBOOK_OUTCOME_OK);
+            assert(phonebook_service_count() == 1u && business_card_service_pending_first() == 0u);
+            phonebook_entry_t saved;
+            assert(phonebook_service_entry(0, &saved) && saved.index == id);
+            assert(strcmp(saved.name, "Alice") == 0 && strcmp(saved.number, "+123456789") == 0);
+        }
+    }
+    printf("business-card save: %u torn-write cases passed\n", count * 3u);
+}
+
+static void test_card_publication_power_cuts(void) {
+    fresh();
+    make_pdu(pdu[0], 1, 1, 0, 1, card_text);
+    assert(message_service_receive(pdu[0])); tick(); /* durable pending receipt */
+    assert(status().pending == 1u);
+    memcpy(baseline, media, sizeof(media));
+    operations = 0; drain();
+    unsigned count = operations;
+    uint32_t id = business_card_service_pending_first();
+    assert(count > 0u && id != 0u);
+    for (unsigned point = 1; point <= count; point++) {
+        for (tear = 0; tear < 3; tear++) {
+            storage_lfs_deinit(); memcpy(media, baseline, sizeof(media)); reopen();
+            operations = 0; cut_at = point;
+            if (setjmp(cut) == 0) { drain(); assert(false); }
+            cut_at = 0; reopen(); drain();
+            assert(status().ready && !status().storage_error && status().inbox == 0u && status().pending == 0u);
+            assert(business_card_service_pending_first() == id);
+            assert(message_service_receive(pdu[0])); drain();
+            assert(business_card_service_pending_first() == id && status().pending == 0u);
+        }
+    }
+    printf("business-card publication: %u torn-write cases passed\n", count * 3u);
+}
+
+static void test_card_limits_and_corruption(void) {
+    fresh();
+    uint32_t first = receive_card(1);
+    for (unsigned i = 2; i <= BUSINESS_CARD_LIMIT; i++) receive_card(i);
+    make_pdu(pdu[0], 1, 1, 0, 20, card_text);
+    assert(message_service_receive(pdu[0])); drain();
+    assert(status().pending == 1u && status().full && business_card_service_pending_first() == first);
+    /* Card capacity cannot block ordinary SMS publication. */
+    make_pdu(pdu[1], 1, 1, 0, 21, "Ordinary SMS");
+    assert(message_service_receive(pdu[1])); drain();
+    assert(status().inbox == 1u);
+    assert(card_action(first, false).outcome == PHONEBOOK_OUTCOME_OK);
+    drain(); assert(status().pending == 0u && business_card_service_pending_first() != first);
+    assert(!business_card_service_get(first, &((phonebook_entry_t){0})));
+
+    fresh(); first = receive_card(1);
+    const uint8_t bad[] = {0};
+    assert(storage_object_write(STORAGE_OBJECT_CONTACT, first, bad, sizeof(bad)) == STORAGE_RECORD_OK);
+    assert(card_action(first, true).outcome == PHONEBOOK_OUTCOME_ERROR);
+    size_t n;
+    assert(storage_object_read(STORAGE_OBJECT_CONTACT, first, wire, sizeof(wire), &n) == STORAGE_RECORD_OK);
+    assert(n == sizeof(bad) && wire[0] == 0u && business_card_service_pending_first() == first);
+    assert(storage_object_write(STORAGE_OBJECT_BUSINESS_CARD, first, bad, sizeof(bad)) == STORAGE_RECORD_OK);
+    reopen();
+    assert(business_card_service_ready() && business_card_service_pending_first() == 0u);
+    assert(corrupt_detections[STORAGE_OBJECT_BUSINESS_CARD] > 0u);
+    assert(storage_object_read(STORAGE_OBJECT_BUSINESS_CARD, first, wire, sizeof(wire), &n) == STORAGE_RECORD_OK);
+    assert(n == sizeof(bad) && wire[0] == 0u);
+}
+
+static void test_card_budget_reclaims_consumed(void) {
+    fresh();
+    static uint8_t padding[4000];
+    for (unsigned i = 0u; i < 7u; i++)
+        assert(backend.write(&backend, (uint16_t)(0x7700u + i), padding, sizeof(padding)) == STORAGE_RECORD_OK);
+    static char body[900];
+    const char *head = "BEGIN:VCARD\r\nN:Alice\r\nTEL:123\r\nNOTE:";
+    strcpy(body, head);
+    memset(body + strlen(head), 'A', 800u - strlen(head));
+    strcpy(body + 800u, "\r\nEND:VCARD\r\n");
+    uint32_t first = 0u;
+    for (unsigned card = 0u; card < 12u; card++) {
+        memset(&file, 0, sizeof(file));
+        size_t len = strlen(body), count = (len + 119u) / 120u;
+        for (unsigned seq = 0u; seq < count; seq++) {
+            sms_deliver_t d = {.udhi=true, .dcs=0xf5};
+            strcpy(d.address, "+18135550123");
+            assert(sms_deliver_scts_encode(2026, 9, 19, 12, 0, (uint8_t)card, 0, d.scts));
+            uint8_t header[] = {11,0,3,(uint8_t)card,(uint8_t)count,(uint8_t)(seq+1u),5,4,0,0xe2,0,0};
+            memcpy(d.ud, header, sizeof(header));
+            size_t n = len - seq * 120u; if (n > 120u) n = 120u;
+            memcpy(d.ud + sizeof(header), body + seq * 120u, n);
+            d.udl = d.ud_len = (uint8_t)(sizeof(header) + n);
+            uint8_t tpdu;
+            assert(sms_deliver_build(&d, pdu[0], sizeof(pdu[0]), &tpdu));
+            if (seq == 0u) assert(message_file_receive(&file, pdu[0]));
+            else assert(message_file_merge(&file, pdu[0]) == MESSAGE_MERGE_ADDED);
+        }
+        uint32_t id;
+        assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);
+        assert(business_card_service_publish(id, &file) == STORAGE_RECORD_OK);
+        if (card == 0u) first = id;
+        assert(card_action(id, false).outcome == PHONEBOOK_OUTCOME_OK);
+    }
+    assert(!business_card_service_get(first, &((phonebook_entry_t){0})));
+    storage_user_usage_t usage;
+    assert(storage_user_get_usage(&usage) == STORAGE_RECORD_OK);
+    assert(usage.pools[STORAGE_USER_OTHER].allocated_bytes <= usage.pools[STORAGE_USER_OTHER].limit_bytes);
+}
+
 int main(void) {
     test_codec(); test_mailboxes(); test_multipart(); test_power_cuts(); test_busy_and_full();
     test_sent_copy_and_category_isolation(); test_failed_queue_sleep();
     test_io_retry_and_corrupt_record(); test_publication_conflict_isolation(); test_delete_power_cuts();
     test_expiry(); test_expiry_power_cuts(); test_control_admission();
     test_durable_receive_receipts();
+    test_business_cards(); test_card_save_power_cuts(); test_card_publication_power_cuts();
+    test_card_limits_and_corruption();
+    test_card_budget_reclaims_consumed();
     storage_lfs_deinit(); puts("PASS: local messages");
 }

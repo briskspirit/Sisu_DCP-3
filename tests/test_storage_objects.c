@@ -236,10 +236,10 @@ static storage_user_usage_t check_usage(void) {
 static void test_accounting(void) {
     fresh();
     storage_user_usage_t usage = check_usage();
-    assert(usage.allocated_bytes == 10u * 4096u);
+    assert(usage.allocated_bytes == 12u * 4096u);
     for (unsigned i = 0; i < STORAGE_OBJECT_COLLECTION_COUNT; i++) {
-        assert(usage.pools[i].allocated_bytes == 8192u);
-        assert(usage.pools[i].contents.files == 0u);
+        assert(usage.pools[i].allocated_bytes == (i == STORAGE_USER_OTHER ? 16384u : 8192u));
+        assert(usage.pools[i].contents.files == (i == STORAGE_USER_OTHER ? 1u : 0u));
     }
     uint32_t id;
     assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);

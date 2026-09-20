@@ -598,7 +598,7 @@ static void test_state_and_absence_rendering(void) {
           "cross-core heartbeat skew cannot wrap into a false huge age");
 
     const netmon_page_descriptor_t *storage = netmon_registry_find(76u);
-    check(netmon_frame_count(storage, &modem) == 10u, "partition page has ten frames");
+    check(netmon_frame_count(storage, &modem) == 11u, "partition page has eleven frames");
     netmon_format_frame(storage, 0u, caps, 1200u, &local, &modem, &control, &frame);
     check_lines(&frame, "SYS 12/64K", "USR 120/384K", "FREE 264K", "RSV 32K",
                 "partition totals and physical free space");
@@ -625,6 +625,9 @@ static void test_state_and_absence_rendering(void) {
     netmon_format_frame(storage, 9u, caps, 1200u, &local, &modem, &control, &frame);
     check_lines(&frame, "PART ERRORS", "P 4294967295", "SAVE PENDING", "BOOT 00",
                 "counter durability remains visible");
+    netmon_format_frame(storage, 10u, caps, 1200u, &local, &modem, &control, &frame);
+    check_lines(&frame, "CARD ERRORS", "B 4294967295", "SAVE PENDING", "BOOT 00",
+                "business-card corruption counter remains visible");
     local.partitions.health_valid = false;
     netmon_format_frame(storage, 8u, caps, 1200u, &local, &modem, &control, &frame);
     check(strcmp(frame.lines[1], "UNAVAILABLE") == 0, "unreadable health record is not zero errors");
