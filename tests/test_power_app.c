@@ -107,7 +107,7 @@ void draw_text_block(framebuffer_t *fb,
 }
 
 static void test_held_wake_waits_for_battery_samples(uint32_t release_ms) {
-    app_t app = {.route = APP_ROUTE_POWER_OFF};
+    app_t app = {.route = APP_ROUTE_POWER_OFF, .backlight_force_active = true};
     power_button_t button;
     event_queue_t queue;
     power_button_init(&button);
@@ -140,16 +140,24 @@ static void test_held_wake_waits_for_battery_samples(uint32_t release_ms) {
         if (now < 1450u) {
             check(s_modem_starts == starts,
                   "wake does not start modem before battery qualification");
+            check(app.backlight_force_active && !app.backlight_force_on &&
+                      power_off_display_should_sleep(&app),
+                  "wake keeps display and backlight asleep before battery qualification");
         }
     }
     if (release_ms > POWER_BUTTON_POWER_ON_HOLD_MS) {
         check(holds == 1u, "qualifying Power hold produces just one hold event");
         check(app.route == APP_ROUTE_POWERUP && s_modem_starts == starts + 1u,
               "held wake starts once when battery qualification completes without a second press");
+        check(!app.backlight_force_active && !power_off_display_should_sleep(&app),
+              "accepted wake releases the display and backlight");
     } else {
         check(holds == 0u && app.route == APP_ROUTE_POWER_OFF &&
                   !app.power_on_pending && s_modem_starts == starts,
               "short wake press never starts after battery samples become ready");
+        check(app.backlight_force_active && !app.backlight_force_on &&
+                  power_off_display_should_sleep(&app),
+              "short wake remains dark even after samples become ready");
     }
     s_use_qualifier = false;
 }

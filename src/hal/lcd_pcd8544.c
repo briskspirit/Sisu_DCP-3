@@ -22,6 +22,11 @@ static bool s_initialized;
 static bool s_powered_down;
 
 void lcd_init(lcd_pcd8544_t *lcd) {
+    lcd_init_powered_down(lcd);
+    lcd_power_up();
+}
+
+void lcd_init_powered_down(lcd_pcd8544_t *lcd) {
     lcd->rotate_180 = LCD_ROTATE_180 != 0u;
 
     gpio_init(LCD_PIN_CS);
@@ -42,7 +47,9 @@ void lcd_init(lcd_pcd8544_t *lcd) {
     s_temperature_coefficient =
         LCD_TEMPERATURE_COEFFICIENT & LCD_PCD8544_TEMP_COEFFICIENT_MAX;
     s_bias_system = LCD_BIAS_SYSTEM & LCD_PCD8544_BIAS_SYSTEM_MAX;
-    s_powered_down = false;
+    /* Reset leaves PD asserted. Keep it set while configuring and clearing
+     * undefined RAM, so an off-state wake cannot briefly activate the panel. */
+    s_powered_down = true;
     s_initialized = true;
     lcd_apply_configuration();
 

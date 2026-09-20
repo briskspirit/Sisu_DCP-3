@@ -169,12 +169,14 @@ int main(void) {
         power_button_seed_held(&s_power_button, 0u);
     }
     backlight_service_init(time_ms());
+    backlight_service_force_level(false);
     rtc_alarm_hal_init();
     power_sleep_boot_probe(); /* AF/TF snapshot BEFORE app_init re-arms the alarm */
-    lcd_init(&s_lcd);
+    lcd_init_powered_down(&s_lcd);
     modem_service_init();
     core1_services_start(modem_service_voice_transport_available());
 #if SISU_STORAGE_POWERCUT_BENCH
+    lcd_power_up();
     storage_powercut_bench_run(&s_lcd, &s_fb);
 #endif
     store_service_init();
@@ -217,6 +219,7 @@ int main(void) {
     standby_sleep_init(time_ms64());
 
 #if PROFILE_BOOT
+    lcd_power_up();
     run_profile_once(&s_lcd, &s_app, &s_fb);
 #endif
 
@@ -558,6 +561,11 @@ static void sync_display_power(app_t *app, lcd_pcd8544_t *lcd,
 
 static bool should_wake_backlight_for_event(const app_t *app, const input_event_t *event) {
     if (app == 0 || event == 0) {
+        return false;
+    }
+    /* A wake edge is not a power-on request. The accepted power-on or alarm
+     * path releases the app's forced-off level after its own admission. */
+    if (app->route == APP_ROUTE_POWER_OFF) {
         return false;
     }
     if (event->type != EVENT_KEY_DOWN && event->type != EVENT_KEY_HOLD) {

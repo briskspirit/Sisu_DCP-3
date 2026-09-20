@@ -934,6 +934,18 @@ require_fixed \
 require_fixed \
     'runtime_bootsel_hold_active' src/main.c \
     "the release BOOTSEL gesture must survive the rollbackable soft-off window"
+require_fixed \
+    'lcd_init_powered_down(&s_lcd);' src/main.c \
+    "application boot must initialize the LCD without activating its outputs"
+if ! rg -q -U 'backlight_service_init\(time_ms\(\)\);\s*backlight_service_force_level\(false\);' src/main.c; then
+    echo "FAIL: boot backlight must be forced off before settings or input can enable it"
+    fail=1
+fi
+backlight_event_policy="$(sed -n '/^static bool should_wake_backlight_for_event.* {$/,/^}/p' src/main.c)"
+if ! printf '%s\n' "$backlight_event_policy" | rg -q -U 'if \(app->route == APP_ROUTE_POWER_OFF\) \{\s*return false;'; then
+    echo "FAIL: off-route key events must not momentarily enable the backlight"
+    fail=1
+fi
 
 require_fixed \
     'PICO_USE_STACK_GUARDS=1' CMakeLists.txt \

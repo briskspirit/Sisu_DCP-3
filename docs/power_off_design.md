@@ -47,6 +47,15 @@ to start the modem. A completed refusal or timeout clears the request. Releasing
 after the qualified hold does not cancel it, but a short tap never creates one.
 Deep-sleep entry is deferred only while this bounded request remains pending.
 
+Wake initialization keeps the LCD in power-down while applying calibration and
+clearing its RAM. Key activity in the off route cannot enable the backlight;
+accepted power-on and alarm paths own that transition. A short Power tap or a
+pending/refused battery qualification therefore remains dark. Charging can
+still wake the LCD for its existing off-state animation without lighting it.
+The controller's serial interface remains usable in power-down
+([PCD8544 datasheet](https://cdn-shop.adafruit.com/datasheets/pcd8544.pdf),
+sections 8.2-8.3).
+
 ## Entry Sequence
 
 The production sequence is fallible-first:

@@ -886,6 +886,7 @@ run test_shared_3v8_service  src/services/shared_3v8_service.c
 check_revb2_static_audit
 run test_backlight_calibration src/services/backlight_calibration.c
 run test_lcd_calibration     src/services/lcd_calibration.c
+run test_lcd_pcd8544         src/hal/lcd_pcd8544.c src/ui/framebuffer.c "${DEAD_CODE_FLAGS[@]}"
 check_call_model_boundary    # transitive include graph must stay HAL/vendor/service-free
 check_sms_submit_boundary    # pure PDU codec must not depend on the root service
 check_sms_module_boundary    # every SMS leaf stays root/vendor/app/HAL/storage independent

@@ -16,6 +16,8 @@ typedef struct {
 #define LCD_PCD8544_BIAS_SYSTEM_MAX 7u
 
 void lcd_init(lcd_pcd8544_t *lcd);
+/* Initialize and clear display RAM without enabling the panel. */
+void lcd_init_powered_down(lcd_pcd8544_t *lcd);
 void lcd_show(lcd_pcd8544_t *lcd, const framebuffer_t *fb);
 void lcd_power_down(void);
 void lcd_power_up(void);
