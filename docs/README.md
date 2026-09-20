@@ -49,6 +49,8 @@ claim is the current best understanding, not a measured fact.
 
 ## UI And Protocol Records
 
+- [Operator logos](operator_logos.md): binary receive/show/save/discard,
+  full PLMN matching, system-partition storage, and original-ROM probes.
 - [Ringtone messages](ringtone_messages.md): native binary Composer send,
   receive/play/save/discard, bounded persistence, and original-ROM references.
 - [Picture messages](picture_messages.md): Nokia-style receive/save/discard,

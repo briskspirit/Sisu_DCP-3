@@ -15,7 +15,7 @@ static partitions_t s_partitions;
 
 static bool system_id(uint16_t id) {
     return (id >= 0x3210u && id <= 0x3215u) ||
-           (id >= 0x321du && id <= 0x3220u);
+           (id >= 0x321du && id <= 0x3221u);
 }
 
 static storage_backend_t *target(partitions_t *partitions, uint16_t id) {

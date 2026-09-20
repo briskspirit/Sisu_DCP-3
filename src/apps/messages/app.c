@@ -18,6 +18,7 @@
 #include "services/message_service.h"
 #include "services/sms_picture_codec.h"
 #include "storage/store_service.h"
+#include "storage/store_operator_logo.h"
 #include "services/strings.h"
 #include "services/timebase.h"
 
@@ -698,6 +699,34 @@ bool poll_sms(app_t *app, uint32_t now) {
     static modem_status_t status;
     modem_service_get_status(&status);
     store_status_t picture_store = store_picture_commit_status();
+    store_status_t logo_store = store_operator_logo_commit_status();
+    bool logo_failed = logo_store == STORE_STATUS_STORAGE_ERROR;
+    app->operator_logo_warning |= logo_failed && !app->operator_logo_storage_failed;
+    app->operator_logo_storage_failed = logo_failed;
+    if (logo_store == STORE_STATUS_OK && app->route != APP_ROUTE_POWER_OFF &&
+        app->route != APP_ROUTE_POWERUP) {
+        uint32_t id = store_operator_logo_pending_first();
+        if (id != 0u && id != app->operator_logo_last_notice_id) {
+            app->operator_logo_last_notice_id = id;
+            app->operator_logo_notice_id = id;
+            play_message_alert(app, &status, now);
+            changed = true;
+        } else if (id == 0u && app->operator_logo_notice_id != 0u) {
+            app->operator_logo_notice_id = 0u;
+            changed = true;
+        }
+    }
+    if (status.operator_logo_receive_errors != app->operator_logo_errors_seen) {
+        app->operator_logo_warning |= status.operator_logo_receive_errors > app->operator_logo_errors_seen;
+        app->operator_logo_errors_seen = status.operator_logo_receive_errors;
+    }
+    if (app->operator_logo_warning && app->route == APP_ROUTE_STANDBY &&
+        app->input_len == 0u && !app->keyguard_locked) {
+        app->operator_logo_warning = false;
+        open_display_sid(app, 0u, logo_failed ? 0x3b3u : 0x210u,
+                         logo_failed ? "Not\nsaved" : "Not\ndone", APP_ROUTE_STANDBY, now);
+        changed = true;
+    }
     store_status_t ringtone_store = store_ringtone_commit_status();
     bool ringtone_failed = ringtone_store == STORE_STATUS_STORAGE_ERROR;
     app->ringtone_warning |= ringtone_failed && !app->ringtone_storage_failed;

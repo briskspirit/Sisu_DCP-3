@@ -1,4 +1,5 @@
 #include "storage/store_service.h"
+#include "storage/store_operator_logo.h"
 
 #include "store_service_internal.h"
 
@@ -34,6 +35,7 @@ static const store_unit_binding_t STORE_UNIT_BINDINGS[STORE_UNIT_COUNT] = {
     [STORE_UNIT_BATTERY_CHARGE_SUPERVISOR] = {
         &g_store_battery_charge_supervisor_unit_ops, 0u},
     [STORE_UNIT_STORAGE_HEALTH] = {&g_store_health_unit_ops, 0u},
+    [STORE_UNIT_OPERATOR_LOGO] = {&g_store_operator_logo_unit_ops, 0u},
 };
 
 _Static_assert(sizeof(STORE_UNIT_BINDINGS) / sizeof(STORE_UNIT_BINDINGS[0]) ==
@@ -280,6 +282,7 @@ bool store_service_write_window_open(uint32_t now_ms) {
 
 void store_service_tick(uint32_t now_ms) {
     store_ringtone_expire(now_ms);
+    store_operator_logo_expire(now_ms);
     /* Wrap-safe gates (the old signed absolute-deadline compares inverted after
      * ~24.8 days of idle, blocking ALL commits -> silent loss of call logs and
      * settings on any later reboot). Defer: honored only while the

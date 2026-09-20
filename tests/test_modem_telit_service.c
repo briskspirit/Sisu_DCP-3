@@ -27,6 +27,7 @@ static const char SMS_PROFILE_RUNTIME[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCS
 static const char SMS_PROFILE_SET[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0";
 static bool s_recovery_test_message, s_recovery_test_changed;
 static bool s_recovery_test_ringtone;
+static bool s_recovery_test_logo;
 static bool s_recovery_bad_ringtone;
 static unsigned s_recovery_test_reads, s_recovery_test_deletes;
 static bool s_psmri_live_armed;
@@ -555,6 +556,9 @@ static void telit_response(const char *command) {
             if (s_recovery_test_ringtone) {
                 mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,64,0,245,\"\",129,10");
                 mh_rx_push("06050415810000024A00");
+            } else if (s_recovery_test_logo) {
+                mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,64,0,245,\"\",129,14");
+                mh_rx_push("0605041582000013018400000001");
             } else {
                 mh_rx_push("+CMGR: \"REC UNREAD\",\"+15551234567\",\"\",\"26/09/19,12:00:00+00\",145,0,0,0,\"\",129,5");
                 mh_rx_push(s_recovery_test_changed ? "other" : "hello");
@@ -1188,6 +1192,7 @@ static void begin_telit(bool rxdiv_configured) {
     s_cnmi_mode = 0u;
     s_recovery_test_message = s_recovery_test_changed = false;
     s_recovery_test_ringtone = false;
+    s_recovery_test_logo = false;
     s_recovery_bad_ringtone = false;
     s_recovery_test_reads = s_recovery_test_deletes = 0u;
     s_psmri_live_armed = false;
@@ -5992,6 +5997,39 @@ static void test_ringtone_transport_and_recovery(void) {
     }
 }
 
+static void test_operator_logo_transport_and_recovery(void) {
+    if (!begin_sms_operation_fixture("operator logo transport fixture boots")) return;
+    unsigned ordinary = s_mh_local_received, pictures = s_mh_picture_parts;
+    feed_direct("+CMT: \"12025550123\",\"\",\"20260918102440\",129,4101,1,0,14",
+                "0605041582000013018400000001");
+    check(s_mh_logo_parts == 1u && mh_status().operator_logo_parts_received == 1u &&
+          s_mh_local_received == ordinary && s_mh_picture_parts == pictures &&
+          s_mh_ringtone_parts == 0u,
+          "native WEMT operator logo routes only to its own store");
+    s_mh_logo_result = STORE_STATUS_INVALID_ARGUMENT;
+    feed_direct("+CMT: \"12025550123\",\"\",\"20260918102441\",129,4101,1,0,14",
+                "0605041582000013018400000001");
+    check(mh_status().operator_logo_receive_errors == 1u && s_mh_local_received == ordinary,
+          "a rejected operator logo reports failure without filling Inbox");
+
+    begin_telit(true);
+    check(boot_until_ready(30000u), "operator logo recovery fixture boots");
+    s_recovery_test_message = s_recovery_test_logo = true;
+    s_mh_local_commit_held = true;
+    mh_feed("+CMTI: \"ME\",3");
+    for (unsigned i = 0u; i < 100u && s_mh_logo_parts == 0u; i++) mh_advance(50u);
+    check(s_mh_logo_parts == 1u && s_mh_local_received == 0u &&
+          s_recovery_test_reads == 1u && s_recovery_test_deletes == 0u,
+          "ME logo recovery waits for durable system storage");
+    mh_advance(1000u);
+    check(s_recovery_test_deletes == 0u, "uncommitted logo cannot release its ME copy");
+    s_mh_local_commit_held = false;
+    for (unsigned i = 0u; i < 100u && s_recovery_test_deletes == 0u; i++) mh_advance(50u);
+    check(s_recovery_test_reads == 2u && s_recovery_test_deletes == 1u &&
+          s_mh_logo_parts == 1u && mh_status().sms_recovered == 1u,
+          "committed logo authorizes exact reread and one ME deletion without redelivery");
+}
+
 static void test_unicode_send_keeps_direct_delivery(void) {
     if (!begin_sms_operation_fixture("Unicode text-send fixture boots")) return;
     s_hold_final_command = "AT+CMGF=1;+CSMP=17,167,0,8";
@@ -6928,6 +6966,7 @@ int main(void) {
     test_call_forward_queue_cancellation();
     test_newer_call_forward_result_survives_old_final();
     test_ringtone_transport_and_recovery();
+    test_operator_logo_transport_and_recovery();
 
     if (s_failures == 0) {
         printf("test_modem_telit_service: OK\n");

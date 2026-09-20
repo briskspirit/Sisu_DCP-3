@@ -3,6 +3,7 @@
 
 #include "services/phonebook_types.h"
 #include "services/message_types.h"
+#include "services/operator_logo_codec.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -65,6 +66,7 @@ typedef enum {
     APP_ROUTE_TONE_COMPOSER_OPTIONS,
     APP_ROUTE_TONE_COMPOSER_TEMPO,
     APP_ROUTE_RECEIVED_TONE,
+    APP_ROUTE_OPERATOR_LOGO,
     APP_ROUTE_SETTINGS_MENU,
     APP_ROUTE_SETTINGS_VALUE,
     APP_ROUTE_SETTINGS_WELCOME_OPTIONS,
@@ -169,6 +171,8 @@ typedef struct {
     char standby_message[33];
     uint32_t standby_message_until_ms;
     char operator_name[MODEM_OPERATOR_NAME_CAPACITY];
+    operator_logo_t operator_logo;
+    bool operator_logo_visible;
     bool sim_missing;
     sim_presence_ui_state_t sim_presence_ui;
     uint16_t modem_provision_version_recorded;
@@ -501,6 +505,15 @@ typedef struct {
     uint32_t tone_composer_send_started_ms;
     uint32_t tone_composer_send_request_id;
     uint32_t ringtone_notice_id;
+    uint32_t operator_logo_notice_id;
+    uint32_t operator_logo_last_notice_id;
+    uint32_t operator_logo_receive_id;
+    uint32_t operator_logo_errors_seen;
+    uint8_t operator_logo_option;
+    uint8_t operator_logo_save_action;
+    bool operator_logo_preview;
+    bool operator_logo_warning;
+    bool operator_logo_storage_failed;
     uint32_t ringtone_last_notice_id;
     uint32_t ringtone_receive_id;
     uint32_t ringtone_errors_seen;

@@ -24,6 +24,7 @@
 #include "apps/snake_app.h"
 #include "apps/standby_app.h"
 #include "apps/tones_app.h"
+#include "apps/operator_logo_app.h"
 #include "services/core1_services.h"
 #include "services/timebase.h"
 #include "ui/ui.h"
@@ -137,6 +138,9 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
         changed = true;
     }
     if (tick_tone_composer(app, now_ms)) {
+        changed = true;
+    }
+    if (tick_operator_logo(app, now_ms)) {
         changed = true;
     }
     if (tick_received_tone(app, now_ms)) {

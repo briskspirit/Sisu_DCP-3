@@ -775,6 +775,13 @@ static void test_context_labels_and_local_units(void) {
     populate_snapshots(&local, &modem, &control);
     uint32_t caps = supported_caps();
 
+    const netmon_page_descriptor_t *storage = netmon_registry_find(73u);
+    netmon_format_frame(storage, STORE_UNIT_OPERATOR_LOGO, caps, 1200u,
+                        &local, &modem, &control, &frame);
+    check(strcmp(frame.lines[0], "U17 OP LOGO") == 0 &&
+              netmon_frame_count(storage, &modem) == STORE_UNIT_COUNT,
+          "operator logo has a named storage-health frame");
+
     strcpy(modem.radio_policy.cops_operator, "Dark Star Mobile");
     netmon_format_frame(netmon_registry_find(7u), 0u, caps, 1200u,
                         &local, &modem, &control, &frame);

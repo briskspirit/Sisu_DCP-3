@@ -284,7 +284,7 @@ flashed onto this layout. Its retained results describe that earlier test only.
 The C firmware exposes a typed local NVM service backed by littlefs.
 Contacts and SMS are local objects. Preferences, profile state,
 clock/alarm preferences, speed dials, call-register lists, T9 learned words,
-saved and pending picture messages, own-tone/composer drafts, call-divert editing
+saved and pending picture messages and operator logos, own-tone/composer drafts, call-divert editing
 history, and per-pack battery health/SOC evidence are stored through this layer.
 
 ## Layers
@@ -310,11 +310,11 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
 - `store_settings.c` and `store_calls.c`: the keyed settings/default table and
   call-accounting records respectively. The call owner also contains the sole
   storage-side RTC dependency and the non-resettable Life timer policy.
-- `store_t9.c`, `store_pictures.c`, `store_tones.c`, `store_divert.c`,
+- `store_t9.c`, `store_pictures.c`, `store_operator_logo.c`, `store_tones.c`, `store_divert.c`,
   `store_warranty.c`, `store_battery_learning.c`, and
   `store_battery_charge_supervisor.c`: one state owner and wire codec per
   semantic persistence unit.
-  All domains publish the same typed application API from `store_service.h` and
+  Domains publish typed application APIs under `include/storage/` and
   register private reset/serialize/apply operations with the engine.
 
 ## Storage Units
@@ -335,6 +335,8 @@ Each unit is one independently replaced record:
   bitmap, caption, and sender metadata; see [Picture messages](picture_messages.md)
 - own tones: separate Own and Received tone slots, plus two pending ringtone
   SMS receipts; see [Ringtone messages](ringtone_messages.md)
+- operator logo: one saved image/PLMN and two pending receipts in the system
+  partition; see [Operator logos](operator_logos.md)
 - call divert: delay setting and per-condition number history; live activation
   state is always network-owned and is never restored from flash
 - service/warranty: write-once board IMEI, manufacture/repair/purchase records,

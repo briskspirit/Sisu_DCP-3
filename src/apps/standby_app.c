@@ -14,6 +14,7 @@
 #include "apps/profiles_app.h"
 #include "apps/service_codes_app.h"
 #include "apps/tones_app.h"
+#include "apps/operator_logo_app.h"
 #include "services/input_keys.h"
 #include "services/key_utils.h"
 #include "ui/status_chrome.h"
@@ -173,6 +174,14 @@ bool handle_standby_key(app_t *app, const input_event_t *event) {
             }
             return true;
         }
+    }
+
+    if (app->operator_logo_notice_id != 0u && app->input_len == 0u &&
+        (key == KEY_NAVI || key == KEY_C)) {
+        open_received_operator_logo(app);
+        if (key == KEY_C && app->route == APP_ROUTE_OPERATOR_LOGO)
+            (void)handle_operator_logo_key(app, KEY_C, now);
+        return true;
     }
 
     if (app->ringtone_notice_id != 0u && app->input_len == 0u &&
@@ -560,6 +569,8 @@ void render_standby(const app_t *app, framebuffer_t *fb) {
         draw_notice(fb, asset_font(FONT_FS2), notice);
     } else if (app->picture_notice_id != 0u) {
         messages_picture_draw_notice(fb);
+    } else if (app->operator_logo_notice_id != 0u) {
+        draw_notice(fb, asset_font(FONT_FS2), ts_or(0x21bu, "Operator\nlogo\nreceived"));
     } else if (app->ringtone_notice_id != 0u) {
         draw_notice(fb, asset_font(FONT_FS2), ts_or(0x222u, "Ringing\ntone\nreceived"));
     } else if (app->sms_received_pending) {
@@ -579,9 +590,12 @@ void render_standby(const app_t *app, framebuffer_t *fb) {
          * SID 0x2b2 is "Insert\nSIM card" (ENGL record index 632). */
         draw_notice(fb, asset_font(FONT_FS2),
                     ts_or(0x2b2u, "Insert\nSIM card"));
-    } else if (app->signal_bars > 0u && app->operator_name[0] != '\0') {
-        draw_center_text_box(fb, asset_font(FONT_FS2), app->operator_name, 6, 12, 72);
+    } else if (app->signal_bars > 0u &&
+               (app->operator_logo_visible || app->operator_name[0] != '\0')) {
         const char *profile_label_text = profile_active_standby_label();
+        if (app->operator_logo_visible)
+            draw_operator_logo(fb, &app->operator_logo, 7);
+        else draw_center_text_box(fb, asset_font(FONT_FS2), app->operator_name, 6, 12, 72);
         if (profile_label_text[0] != '\0') {
             /* Real-3210 check 2026-07-10: the standby profile name ("Headset")
              * renders in the small BOLD face -- FS2, same as the operator name
@@ -606,6 +620,8 @@ void render_standby(const app_t *app, framebuffer_t *fb) {
         draw_softkey(fb, "Exit");
     } else if (app->picture_notice_id != 0u) {
         draw_softkey(fb, "View");
+    } else if (app->operator_logo_notice_id != 0u) {
+        draw_softkey(fb, "Options");
     } else if (app->ringtone_notice_id != 0u) {
         draw_softkey(fb, "Options");
     } else if (app->sms_received_pending) {

@@ -37,6 +37,7 @@
 #include "services/phonebook_service.h"
 #include "services/board_diag_service.h"
 #include "storage/store_service.h"
+#include "storage/store_operator_logo.h"
 #include "storage/storage_lfs.h"
 #include "storage/storage_partitions.h"
 #include "storage/store_health.h"
@@ -152,6 +153,7 @@ static void command_binary_f5(char *args);
 static void command_port(char *args);
 /* Do not carry the picture payload buffer through unrelated command paths. */
 static void command_picture(char *args) __attribute__((noinline));
+static void command_operator_logo(char *args) __attribute__((noinline));
 static bool build_debug_picture_payload(uint8_t *payload, size_t cap, uint16_t *out_len, uint8_t *out_chunks);
 static void fill_fallback_picture(store_picture_message_t *picture);
 
@@ -687,6 +689,8 @@ static void handle_line(app_t *app, char *line) {
         command_port(cursor);
     } else if (strcmp(cmd, "pic") == 0) {
         command_picture(cursor);
+    } else if (strcmp(cmd, "logo") == 0) {
+        command_operator_logo(cursor);
     } else {
         printf("[debug] unknown command: %s\n", cmd);
     }
@@ -773,6 +777,7 @@ static void print_help(void) {
     printf("[debug]   port <number>             ; 8-bit DCS 04, port UDH 158A/0000\n");
     printf("[debug]   pic <number> <mode>       ; 0 dcs04 port-first, 1 dcs04 concat-first,\n");
     printf("[debug]                              2 f5 port-first, 3 old f5 concat-first+VP\n");
+    printf("[debug]   logo <number> <mcc> <mnc> <compact|versioned|small|clear|invalid> ; send test logo\n");
 }
 
 static char *skip_spaces(char *text) {
@@ -2279,6 +2284,11 @@ static void command_status(void) {
            (unsigned long)status.ringtone_receive_errors,
            (unsigned long)store_ringtone_pending_first(),
            (unsigned)store_ringtone_commit_status(), store_own_tone_used(1u) ? 1u : 0u);
+    printf("[debug] operator_logo parts=%lu errors=%lu pending=%lu store=%u\n",
+           (unsigned long)status.operator_logo_parts_received,
+           (unsigned long)status.operator_logo_receive_errors,
+           (unsigned long)store_operator_logo_pending_first(),
+           (unsigned)store_operator_logo_commit_status());
     printf("[debug] sms_recovery recovered=%lu errors=%lu step=%u\n",
            (unsigned long)status.sms_recovered,
            (unsigned long)status.sms_recovery_errors,
@@ -2940,6 +2950,66 @@ static void command_picture(char *args) {
            (unsigned)payload_len,
            (unsigned)chunks,
            (unsigned)source_port);
+}
+
+static void command_operator_logo(char *args) {
+    char *number = next_token(&args);
+    char *mcc = next_token(&args);
+    char *mnc = next_token(&args);
+    char *format = next_token(&args);
+    uint8_t network[3];
+    if (number == NULL || mcc == NULL || mnc == NULL || format == NULL ||
+        next_token(&args) != NULL || !operator_logo_network_encode(mcc, mnc, network) ||
+        (strcmp(format, "compact") != 0 && strcmp(format, "versioned") != 0 &&
+         strcmp(format, "small") != 0 &&
+         strcmp(format, "clear") != 0 && strcmp(format, "invalid") != 0)) {
+        printf("[debug] usage: logo <number> <mcc> <mnc> <compact|versioned|small|clear|invalid>\n");
+        return;
+    }
+    static uint8_t payload[OPERATOR_LOGO_BYTES + 9u];
+    memset(payload, 0, sizeof(payload));
+    uint16_t len = 0u;
+    bool versioned = strcmp(format, "versioned") == 0;
+    bool clear = strcmp(format, "clear") == 0;
+    unsigned width = strcmp(format, "small") == 0 ? 64u : OPERATOR_LOGO_WIDTH;
+    if (versioned) payload[len++] = 0x30u;
+    memcpy(&payload[len], network, sizeof(network));
+    len += sizeof(network);
+    if (versioned) payload[len++] = 0x0au;
+    payload[len++] = 0u;
+    payload[len++] = clear ? 0u : (uint8_t)width;
+    payload[len++] = clear ? 0u : OPERATOR_LOGO_HEIGHT;
+    payload[len++] = strcmp(format, "invalid") == 0 ? 2u : 1u;
+    if (!clear) {
+        /* Asymmetric frame plus SISU lettering makes crop/orientation visible. */
+        static const uint8_t letters[] = {
+            0x46, 0x49, 0x49, 0x49, 0x31, 0,
+            0, 0x41, 0x7f, 0x41, 0, 0,
+            0x46, 0x49, 0x49, 0x49, 0x31, 0,
+            0x3f, 0x40, 0x40, 0x40, 0x3f,
+        };
+        for (unsigned y = 0u; y < OPERATOR_LOGO_HEIGHT; y++) {
+            for (unsigned x = 0u; x < width; x++) {
+                bool ink = y == 0u || y + 1u == OPERATOR_LOGO_HEIGHT ||
+                           x == 0u || x + 1u == width ||
+                           (x == 3u && y < 5u);
+                if (x >= 24u && x < 24u + sizeof(letters) && y >= 3u && y < 10u) {
+                    ink = (letters[x - 24u] & (1u << (y - 3u))) != 0u;
+                }
+                if (ink) payload[len + y * (width / 8u) + x / 8u] |= (uint8_t)(0x80u >> (x & 7u));
+            }
+        }
+        len += (uint16_t)(width / 8u * OPERATOR_LOGO_HEIGHT);
+    }
+    uint32_t request_id = 0u;
+    bool ok = modem_service_request_send_binary_sms(number, payload, len,
+                                                    OPERATOR_LOGO_PORT, 0u, &request_id);
+    if (ok) {
+        s_waiting_sms_result = true;
+        s_waiting_sms_request_id = request_id;
+    }
+    printf("[debug] queued operator logo ok=%u network=%s/%s format=%s bytes=%u\n",
+           ok ? 1u : 0u, mcc, mnc, format, (unsigned)len);
 }
 
 static bool build_debug_picture_payload(uint8_t *payload, size_t cap, uint16_t *out_len, uint8_t *out_chunks) {

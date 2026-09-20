@@ -18,6 +18,7 @@
 #include "storage/store_service.h"
 #include "ui/status_chrome.h"
 #include "ui/signal_bars.h"
+#include "apps/operator_logo_app.h"
 #include "services/timebase.h"
 #include "ui/ui.h"
 
@@ -53,6 +54,7 @@ void app_status_runtime_init(app_t *app) {
     battery_charge_supervisor_service_init();
     battery_charge_transition_init(&s_charge_transition_state);
     app->operator_name[0] = '\0';
+    app->operator_logo_visible = false;
     sim_presence_ui_init(&app->sim_presence_ui);
     app->sim_missing = false;
     app->modem_provision_version_recorded = 0u;
@@ -491,6 +493,7 @@ bool poll_app_status(app_t *app, uint32_t now_ms) {
     }
     bool network_identity_available =
         status.at_ready && !sim_missing && status.network_registered;
+    changed |= operator_logo_update_network(app, &status);
     if (!network_identity_available) {
         /* A vanished PWRMON/AT channel invalidates the last serving network
          * immediately. Keeping the app cache here makes a failed or powered-off

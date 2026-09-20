@@ -27,6 +27,7 @@
 #include "services/modem_supplementary_state.h"
 #include "services/shared_3v8_service.h"
 #include "storage/store_service.h"
+#include "storage/store_operator_logo.h"
 #include "services/modem_vendor.h"
 #include "pico/sync.h"
 
@@ -154,7 +155,7 @@ typedef enum {
 static modem_sms_recovery_t s_sms_recovery;
 static uint32_t s_recovery_receipt;
 static bool s_recovery_admitted, s_direct_from_storage;
-static enum { RECOVERY_TEXT, RECOVERY_PICTURE, RECOVERY_RINGTONE } s_recovery_kind;
+static enum { RECOVERY_TEXT, RECOVERY_PICTURE, RECOVERY_RINGTONE, RECOVERY_LOGO } s_recovery_kind;
 static bool s_recovery_invalidated;
 static char s_recovery_header[MODEM_SMS_DIRECT_LINE_MAX];
 static void sms_recovery_reset(void);
@@ -2672,6 +2673,10 @@ static bool sms_recovery_start(uint32_t now_ms) {
                 store_status_t result = store_ringtone_receive_pdu(s_sms_recovery.pdu, now_ms);
                 s_recovery_kind = RECOVERY_RINGTONE;
                 if (result == STORE_STATUS_NOT_FOUND) {
+                    result = store_operator_logo_receive_pdu(s_sms_recovery.pdu, now_ms);
+                    s_recovery_kind = RECOVERY_LOGO;
+                }
+                if (result == STORE_STATUS_NOT_FOUND) {
                     result = store_picture_receive_pdu(s_sms_recovery.pdu, now_ms);
                     s_recovery_kind = result == STORE_STATUS_NOT_FOUND ? RECOVERY_TEXT : RECOVERY_PICTURE;
                 }
@@ -2692,6 +2697,8 @@ static bool sms_recovery_start(uint32_t now_ms) {
         if (s_recovery_admitted) {
             bool committed = s_recovery_kind == RECOVERY_RINGTONE
                 ? store_ringtone_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
+                : s_recovery_kind == RECOVERY_LOGO
+                    ? store_operator_logo_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
                 : s_recovery_kind == RECOVERY_PICTURE
                     ? store_picture_received_pdu_status(s_sms_recovery.pdu) == STORE_STATUS_OK
                     : message_service_receive_committed(s_recovery_receipt);
@@ -2762,6 +2769,19 @@ static void direct_apply_step(modem_sms_direct_step_t step, uint8_t tpdu_len) {
             critical_section_exit(&s_status_lock);
             if (result != STORE_STATUS_OK) {
                 LOGW("modem", "ringtone receive failed: %u", (unsigned)result);
+                direct_count_error_locked_free();
+            }
+            break;
+        }
+        result = store_operator_logo_receive_pdu(s_direct_pdu, s_now_ms);
+        if (result != STORE_STATUS_NOT_FOUND) {
+            critical_section_enter_blocking(&s_status_lock);
+            uint32_t *counter = result == STORE_STATUS_OK
+                ? &s_status.operator_logo_parts_received : &s_status.operator_logo_receive_errors;
+            if (*counter != UINT32_MAX) (*counter)++;
+            critical_section_exit(&s_status_lock);
+            if (result != STORE_STATUS_OK) {
+                LOGW("modem", "operator logo receive failed: %u", (unsigned)result);
                 direct_count_error_locked_free();
             }
             break;

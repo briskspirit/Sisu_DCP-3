@@ -61,9 +61,11 @@ static nvm_hal_t user_hal = {
     .erase_block = 4096u, .write_block = 256u, .erase_required = true,
     .read = read_media, .erase = erase_media, .write = prog_media,
 };
-static const uint16_t sizes[16] = {
+static const uint16_t sizes[] = {
     75, 52, 98, 228, 64, 187, 678, 1492, 1492, 8, 3824, 1120, 178, 47, 96, 128,
+    24, 1386,
 };
+#define RECORD_COUNT (sizeof(sizes) / sizeof(sizes[0]))
 
 static void fill(unsigned id, size_t len) {
     for (size_t i = 0; i < len; i++) {
@@ -83,7 +85,7 @@ static void verify_record(storage_backend_t *backend, uint16_t id,
 }
 
 static void verify_all(void) {
-    for (unsigned i = 0; i < 16; i++) {
+    for (unsigned i = 0; i < RECORD_COUNT; i++) {
         fill(i, sizes[i]);
         verify_record(&router, (uint16_t)(0x3210u + i), data, sizes[i]);
     }
@@ -96,7 +98,7 @@ static void seed(void) {
     storage_lfs_deinit();
     memset(media, 0xff, sizeof(media));
     open_ok();
-    for (unsigned i = 0; i < 16u; i++) {
+    for (unsigned i = 0; i < RECORD_COUNT; i++) {
         fill(i, sizes[i]);
         assert(router.write(&router, (uint16_t)(0x3210u + i), data, sizes[i]) == STORAGE_RECORD_OK);
     }
@@ -230,6 +232,10 @@ static void test_full_and_isolation(void) {
     }
     open_ok();
     verify_record(&router, 0x3210u, data, 128u);
+    fill(17u, sizes[17]);
+    assert(router.write(&router, 0x3221u, data, sizes[17]) == STORAGE_RECORD_OK);
+    open_ok();
+    verify_record(&router, 0x3221u, data, sizes[17]);
     assert(storage_lfs_init_volume(&raw, &system_hal, STORAGE_LFS_SYSTEM,
                                   STORAGE_SYSTEM_BYTES) == STORAGE_RECORD_OK);
     unsigned system_count = fill_volume(&raw);
@@ -273,9 +279,9 @@ static void test_split_update_cuts(void) {
     open_ok();
     storage_lfs_deinit();
     memcpy(saved, media, sizeof(media));
-    static const uint16_t ids[] = {0x3210u, 0x3216u};
+    static const uint16_t ids[] = {0x3210u, 0x3216u, 0x3221u};
     unsigned cases = 0u;
-    for (unsigned volume = 0; volume < 2u; volume++) {
+    for (unsigned volume = 0; volume < sizeof(ids) / sizeof(ids[0]); volume++) {
         uint16_t id = ids[volume];
         open_ok();
         fill(99u, sizeof(data));
@@ -298,7 +304,7 @@ static void test_split_update_cuts(void) {
                 cut_at = 0u;
                 storage_lfs_deinit();
                 open_ok();
-                for (unsigned i = 0; i < 16u; i++) {
+                for (unsigned i = 0; i < RECORD_COUNT; i++) {
                     size_t len;
                     uint16_t record = (uint16_t)(0x3210u + i);
                     assert(router.read(&router, record, readback, sizeof(readback), &len)
@@ -308,7 +314,7 @@ static void test_split_update_cuts(void) {
                     assert(len == (new_record ? sizeof(data) : sizes[i]));
                     assert(memcmp(data, readback, len) == 0);
                 }
-                if (volume == 0u) {
+                if (id != 0x3216u) {
                     assert(memcmp(media + STORAGE_SYSTEM_BYTES, saved + STORAGE_SYSTEM_BYTES,
                                   STORAGE_USER_BYTES) == 0);
                 } else {

@@ -360,6 +360,8 @@ bool store_service_ready(void) { return s_mh_store_ready; }
 static unsigned s_mh_picture_parts;
 static unsigned s_mh_ringtone_parts;
 static store_status_t s_mh_ringtone_result;
+static unsigned s_mh_logo_parts;
+static store_status_t s_mh_logo_result;
 static char s_mh_local_pdu[SMS_DELIVER_HEX_MAX];
 static unsigned s_mh_local_received, s_mh_local_sent, s_mh_local_lost;
 static bool s_mh_local_reject;
@@ -414,6 +416,18 @@ store_status_t store_ringtone_receive_pdu(const char *pdu, uint32_t now_ms) {
     return s_mh_ringtone_result;
 }
 store_status_t store_ringtone_received_pdu_status(const char *pdu) {
+    (void)pdu;
+    return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : STORE_STATUS_OK;
+}
+store_status_t store_operator_logo_receive_pdu(const char *pdu, uint32_t now_ms) {
+    (void)now_ms;
+    sms_codec_message_t part;
+    if (!sms_pdu_decode(pdu, &part) || !part.has_ports || part.dest_port != 0x1582u)
+        return STORE_STATUS_NOT_FOUND;
+    s_mh_logo_parts++;
+    return s_mh_logo_result;
+}
+store_status_t store_operator_logo_received_pdu_status(const char *pdu) {
     (void)pdu;
     return s_mh_local_commit_held ? STORE_STATUS_NOT_READY : STORE_STATUS_OK;
 }
@@ -585,6 +599,8 @@ void mh_settle(void) {
 
 void mh_begin(void) {
     s_mh_ringtone_parts = 0u;
+    s_mh_logo_parts = 0u;
+    s_mh_logo_result = STORE_STATUS_OK;
     s_mh_ringtone_result = STORE_STATUS_OK;
     s_mh_local_pdu[0] = 0;
     s_mh_local_received = s_mh_local_sent = s_mh_local_lost = 0u;

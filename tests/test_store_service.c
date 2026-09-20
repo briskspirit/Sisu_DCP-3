@@ -22,6 +22,7 @@
 #include "services/sms_deliver_codec.h"
 #include "storage/nvm_hal.h"
 #include "storage/store_service.h"
+#include "storage/store_operator_logo.h"
 #include "storage/store_health.h"
 #define TEST_LOGICAL_SLOT_SIZE 4096u
 #include "storage/storage_lfs.h"
@@ -347,6 +348,14 @@ static store_status_t dirty_exact_unit(store_unit_t unit) {
         case STORE_UNIT_STORAGE_HEALTH:
             store_health_note_corrupt(STORAGE_OBJECT_CONTACT, 42u);
             return STORE_STATUS_OK;
+        case STORE_UNIT_OPERATOR_LOGO: {
+            sms_codec_message_t logo = {.binary=true, .has_ports=true,
+                .dest_port=OPERATOR_LOGO_PORT, .dcs=0xf5u, .binary_len=7u,
+                .binary_data={0x13,0x01,0x84,0,0,0,1}};
+            strcpy(logo.address, "+15550000000");
+            strcpy(logo.timestamp, "26/09/20,12:00:00");
+            return store_operator_logo_receive(&logo, 0u);
+        }
         default:
             return STORE_STATUS_INVALID_ARGUMENT;
     }
@@ -385,6 +394,7 @@ static void test_unit_handler_registry(void) {
         &g_store_battery_learning_unit_ops,
         &g_store_battery_charge_supervisor_unit_ops,
         &g_store_health_unit_ops,
+        &g_store_operator_logo_unit_ops,
     };
     static const uint8_t expected_instances[STORE_UNIT_COUNT] = {
         0u, 1u, 2u, 3u, 4u, 5u,
@@ -1532,6 +1542,7 @@ static const wire_expectation_t WIRE_EXPECTED[STORE_UNIT_COUNT] = {
     [STORE_UNIT_BATTERY_CHARGE_SUPERVISOR] = {
         128u, UINT64_C(0x08158b2f629793cb)},
     [STORE_UNIT_STORAGE_HEALTH] = {24u, UINT64_C(0xc05c645ae8186054)},
+    [STORE_UNIT_OPERATOR_LOGO] = {1386u, UINT64_C(0x08f8339c0877e459)},
 };
 
 static void test_battery_learning_payload_and_persistence(void) {
