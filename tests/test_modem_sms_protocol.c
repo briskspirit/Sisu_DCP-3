@@ -473,11 +473,11 @@ static void test_picture_text_send(void) {
         .request_id = 99u, .operation = MODEM_SMS_PROTOCOL_SEND_BINARY,
         .number = "5550100", .binary = payload, .binary_len = sizeof(payload),
         .dest_port = 0x158au, .source_port = 0u,
-        .binary_mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
+        .binary_mode = MODEM_BINARY_SMS_MODE_F5_PORT_FIRST,
     };
     check(modem_sms_protocol_begin(&request, &s_hooks, 100u), "picture text send begins");
-    check_command(0u, MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, "AT+CMGF=1;+CSMP=81,167,0,4",
-                  5000u, false, false, "picture send keeps native reception in text mode");
+    check_command(0u, MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, "AT+CMGF=1;+CSMP=81,167,0,245",
+                  5000u, false, false, "F5 picture send keeps native reception in text mode");
     check(modem_sms_protocol_text_parameters_dirty(), "dispatched CSMP needs cleanup");
     clear_actions();
     modem_sms_protocol_on_final(MODEM_SMS_COMMAND_BINARY_TEXT_SETUP, true, &request, &s_hooks, 110u);

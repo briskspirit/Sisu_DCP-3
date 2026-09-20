@@ -2745,7 +2745,7 @@ static void test_sms_binary_send_contract(void) {
         .payload_len = sizeof(payload),
         .dest_port = 0x1234u,
         .source_port = 0u,
-        .mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
+        .mode = MODEM_BINARY_SMS_MODE_F5_PORT_FIRST,
         .segment = 1u,
         .segment_total = 1u,
         .reference = 1u,
@@ -2760,7 +2760,7 @@ static void test_sms_binary_send_contract(void) {
     mh_settle();
     char cmgs[48];
     sms_submit_format_text_command(cmgs, sizeof(cmgs), "AT+CMGS", number, false);
-    size_t setup_event = tx_event_cstr("AT+CMGF=1;+CSMP=81,167,0,4", 0u);
+    size_t setup_event = tx_event_cstr("AT+CMGF=1;+CSMP=81,167,0,245", 0u);
     size_t cmgs_event = tx_event_cstr(cmgs, setup_event + 1u);
     size_t body_event = tx_event_raw(expected_body, strlen(expected_body),
                                     cmgs_event + 1u);
@@ -2791,7 +2791,7 @@ static void test_sms_binary_send_contract(void) {
         .payload_len = sizeof(multipart),
         .dest_port = 0x1234u,
         .source_port = 0u,
-        .mode = MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
+        .mode = MODEM_BINARY_SMS_MODE_F5_PORT_FIRST,
         .segment = 1u,
         .segment_total = 2u,
         .reference = 2u,
@@ -2812,7 +2812,7 @@ static void test_sms_binary_send_contract(void) {
     char cmgs2[48];
     sms_submit_format_text_command(cmgs1, sizeof(cmgs1), "AT+CMGS", number, false);
     sms_submit_format_text_command(cmgs2, sizeof(cmgs2), "AT+CMGS", number, false);
-    setup_event = tx_event_cstr("AT+CMGF=1;+CSMP=81,167,0,4", 0u);
+    setup_event = tx_event_cstr("AT+CMGF=1;+CSMP=81,167,0,245", 0u);
     size_t cmgs1_event = tx_event_cstr(cmgs1, setup_event + 1u);
     size_t body1_event = tx_event_raw(body1, strlen(body1), cmgs1_event + 1u);
     size_t sub1_event = tx_event_raw(&sub, 1u, body1_event + 1u);
@@ -5857,10 +5857,11 @@ static void test_picture_text_send_and_local_receive(void) {
     modem_sms_send_result_t result;
     check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_OK &&
               mh_tx_count_exact("AT+CMGF=0") == 0u &&
-              mh_tx_count_exact("AT+CMGF=1;+CSMP=81,167,0,4") == 1u &&
+              mh_tx_count_exact("AT+CMGF=1;+CSMP=81,167,0,245") == 1u &&
+              mh_tx_count_exact("AT+CMGF=1;+CSMP=81,167,0,4") == 0u &&
               mh_tx_count_exact("AT+CMGS=\"5550101\"") == 3u &&
               mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0") == 1u,
-          "three picture parts send without entering lossy native PDU receive mode");
+          "default picture send uses F5 for all parts without entering native PDU receive mode");
     mh_clear_tx_capture();
     unsigned received = s_mh_picture_parts;
     uint32_t ordinary_received = mh_status().sms_received_count;

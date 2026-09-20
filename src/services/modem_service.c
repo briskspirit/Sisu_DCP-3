@@ -2403,12 +2403,13 @@ bool modem_service_request_send_binary_sms(const char *number,
                                            uint16_t dest_port,
                                            uint16_t source_port,
                                            uint32_t *request_id_out) {
+    /* Class-1 binary preserves picture bytes on the tested T-Mobile/Verizon route. */
     return modem_service_request_send_binary_sms_mode(number,
                                                       payload,
                                                       payload_len,
                                                       dest_port,
                                                       source_port,
-                                                      MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST,
+                                                      MODEM_BINARY_SMS_MODE_F5_PORT_FIRST,
                                                       request_id_out);
 }
 
