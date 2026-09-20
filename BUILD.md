@@ -118,12 +118,15 @@ park, DMA/PIO ownership, and standby policy. It does not adopt `pico_low_power`
 or change the compiler. SDK 2.3.0 is not supported because of its RP2350 sleep
 regression; 2.3.1 includes the [upstream fix](https://github.com/raspberrypi/pico-sdk/pull/3127).
 
-Validation completed on the upgrade branch (firmware built with Arm GCC 15.3.1;
-hardware tests on Rev B2/A4):
+Builds were checked with Arm GCC 15.3.1; hardware tests ran on Rev B2/A4:
 
 - Service, release, and optional diagnostic builds; flash-boundary and stack gates; release
   exclusion of USB CDC and the privileged console.
-- Host suites with original assets (137 tests) and synthetic assets (136 tests).
+- Host suites with original and synthetic assets under ASan/UBSan.
+- Fresh-checkout SDK download, original-firmware asset extraction, byte-for-byte
+  comparison of regenerated assets, and the incremental no-change path.
+  An English-only build checks isolated language outputs; missing-firmware and
+  existing-generated-asset fallback paths are checked separately.
 - All six upstream timer/synchronization tests on hardware, covering software
   and hardware spinlocks, plus 400 POWMAN XOSC/LPOSC handoff cycles and rollover.
 - 512 scratch-record replacements/remounts, including codec playback and
@@ -131,13 +134,21 @@ hardware tests on Rev B2/A4):
 - USB output backpressure and 30 CDC reopen cycles; no spontaneous reset.
 - Network registration, self-sent text and three-part picture reception, local
   storage, and recovery from intentional main-loop and flash-watchdog hangs.
+- Unplugged standby SMS/calls and power-on/power-off, followed by an LTC-counted
+  standby window and an approximately one-hour powered-off P1.7 soak.
+- Retained wake evidence for service-USB and Power-button wakes, storage
+  recovery, and physical confirmation that a short Power tap stays dark while
+  one continuous hold starts the phone. The hold now waits for battery
+  qualification instead of being lost if fresh LTC samples are still pending.
 
 The reproducible standalone hardware tests are in
 [`tools/sdk_qualification`](tools/sdk_qualification/README.md). They are separate
 test images, not code added to the phone runtime.
 
-Before merging the upgrade, repeat unplugged dormant wake by keypad and incoming
-SMS/call, and power-off/wake. Check real bidirectional call audio as part of that
-call test. The USB-connected bridge exercise had no modem DVI clock and does not
-prove voice quality. Release firmware has been built, not bench-qualified, on
-2.3.1. The previously measured standby-current figures have not been remeasured.
+Release firmware has been built, not separately bench-qualified, on 2.3.1.
+The USB-connected bridge exercise had no modem DVI clock and does not itself
+prove voice quality; unplugged calls were checked on the handset. The new LTC
+windows are regression checks, not controlled comparisons proving SDK power
+savings. In particular, the powered-off counter includes connection/wake
+overhead and suppresses sub-deadband current, so it does not replace the
+historical externally measured 0.84 mA floor.

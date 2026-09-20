@@ -22,7 +22,7 @@ The project uses CMake and pins Raspberry Pi Pico SDK 2.3.1 to commit
 `.pico-sdk/pico_sdk-src` is selected automatically; an explicit
 `PICO_SDK_PATH` overrides the path but must identify that same clean commit.
 See [SDK regression checks](BUILD.md#sdk-regression-checks) for qualification
-coverage and the remaining physical checks on the upgrade branch.
+coverage and its limits.
 
 ```sh
 cmake -S . -B build
