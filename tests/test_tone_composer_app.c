@@ -16,6 +16,7 @@
 #include "apps/tones_app.h"
 #include "audio/audio_levels.h"
 #include "audio/composer_codec.h"
+#include "audio/ringtone_codec.h"
 #include "services/core1_services.h"
 #include "services/feature_gates.h"
 #include "services/input_keys.h"
@@ -1115,6 +1116,23 @@ static void test_long_score_render_reaches_tail(void) {
           "long Composer score renders the real final three rows and cursor");
 }
 
+static void test_legacy_editor_title(void) {
+    reset_fixture();
+    app_t app = {0};
+    strcpy(app.tone_composer_notes, "4c1");
+    strcpy(app.editor_value, "Caf\xe9 \x80");
+    tone_composer_submit_name(&app, 100u);
+    ringtone_info_t info = {0};
+    check(s_store_sets == 1u && ringtone_decode(s_stored_tone.packed,
+          s_stored_tone.packed_len, &info, NULL, 0u), "legacy keypad accents save as a valid packed melody");
+    check_str(info.name, "Caf\xc3\xa9 \xe2\x82\xac", "legacy editor title becomes proper Latin-1/UCS-2 wire characters");
+    s_save_status = STORE_STATUS_STORAGE_ERROR;
+    strcpy(app.editor_value, "Failed");
+    tone_composer_submit_name(&app, 200u);
+    check(s_store_sets == 1u && s_display.sid == 0x3b3u,
+          "failed Composer persistence does not claim Tone saved");
+}
+
 static void test_received_tone_flow(void) {
     reset_fixture();
     app_t app = {0};
@@ -1199,6 +1217,7 @@ int main(void) {
     test_capacity_edits_are_atomic();
     test_long_score_render_reaches_tail();
     test_received_tone_flow();
+    test_legacy_editor_title();
 
     if (s_failures != 0) {
         fprintf(stderr, "%d failures\n", s_failures);

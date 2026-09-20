@@ -1151,7 +1151,25 @@ static bool composer_build_packed_tone(const char *name,
         events[i].duration_code = composer_duration_code(&parts);
         events[i].dotted = parts.dotted;
     }
-    return composer_codec_encode(name, events, count, tempo, dst, cap, out_len);
+    /* Editors accept legacy CP1252 as well as UTF-8. Normalize at the app
+     * boundary; the wire codec remains independent of UI character rules. */
+    char title[COMPOSER_CODEC_NAME_MAX * 3u + 1u];
+    const char *cursor = name != NULL ? name : "";
+    size_t used = 0u;
+    for (unsigned i = 0u; *cursor != '\0' && i < COMPOSER_CODEC_NAME_MAX; i++) {
+        uint16_t cp = asset_next_codepoint(&cursor);
+        if (cp < 0x80u) title[used++] = (char)cp;
+        else if (cp < 0x800u) {
+            title[used++] = (char)(0xc0u | (cp >> 6u));
+            title[used++] = (char)(0x80u | (cp & 63u));
+        } else {
+            title[used++] = (char)(0xe0u | (cp >> 12u));
+            title[used++] = (char)(0x80u | ((cp >> 6u) & 63u));
+            title[used++] = (char)(0x80u | (cp & 63u));
+        }
+    }
+    title[used] = '\0';
+    return composer_codec_encode(title, events, count, tempo, dst, cap, out_len);
 }
 
 static bool composer_store_current_own_tone(app_t *app) {
