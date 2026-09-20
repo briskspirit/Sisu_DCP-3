@@ -1,19 +1,26 @@
 # Business Cards
 
-Phonebook **Send entry** sends Nokia's text Smart Messaging envelope, followed
-by a small vCard:
+Phonebook **Send entry** sends a small vCard to Smart Messaging port `0x00E2`:
 
 ```text
-//SCKE2 BEGIN:VCARD<CR><LF>
+BEGIN:VCARD<CR><LF>
 N:Alice<CR><LF>
 TEL:+123456789<CR><LF>
 END:VCARD<CR><LF>
 ```
 
-The name line is omitted for a number-only entry. This is the original 3210
-Send entry format, not the `0xF5` binary transport used by pictures and ringtones.
-The ordinary SMS sender chooses GSM-7 or UCS-2 and handles segmentation. It
-does not change Telit's receive mode. Sent business cards do not occupy Outbox.
+The name line is omitted for a number-only entry. The body matches the original
+3210 encoder's bare/port-addressed form. Names use Latin-1 where representable;
+other names use an explicit `CHARSET=UTF-8` property. Sending uses the same `0xF5`
+binary transport as pictures and ringtones, without changing Telit's receive
+mode. Sent business cards do not occupy Outbox.
+
+The original Send entry caller selects the `//SCKE2 ` text envelope. A live
+Verizon self-send of that envelope arrived port-addressed but missing the first
+seven vCard characters, already absent in the modem's raw UART output. Whether
+the modem or network performed that lossy conversion is not established. Our
+sender therefore supplies the port and bare payload explicitly; the receiver
+continues to reject truncated cards rather than attempting to repair them.
 
 ## Receiving And UI
 

@@ -39,6 +39,15 @@ static uint16_t s_phonebook_count = 1u;
 static bool s_phonebook_cache_valid;
 static modem_status_t s_modem_status;
 static unsigned s_phonebook_list_requests;
+static modem_sms_send_result_t s_send_result;
+static bool s_send_ready;
+
+bool modem_service_pop_sms_send_result(uint32_t id, modem_sms_send_result_t *out) {
+    if (!s_send_ready || id != s_send_result.request_id) return false;
+    *out = s_send_result;
+    s_send_ready = false;
+    return true;
+}
 
 static void check(bool condition, const char *message) {
     if (!condition) {
@@ -564,6 +573,31 @@ static void test_phonebook_preload_retry_is_bounded(void) {
     s_phonebook_cache_valid = false;
 }
 
+static void test_business_card_send_completion(void) {
+    const modem_sms_request_kind_t kinds[] = {
+        MODEM_SMS_REQUEST_SEND_BINARY, MODEM_SMS_REQUEST_SEND_TEXT,
+    };
+    for (unsigned i = 0; i < 2; i++) {
+        app_t app = {0};
+        app.route = APP_ROUTE_DISPLAY_MESSAGE;
+        app.display_record_id = 46u;
+        app.display_return_route = APP_ROUTE_PHONEBOOK_LIST;
+        app.phonebook_send_waiting = true;
+        app.phonebook_send_request_id = 42u;
+        s_send_result = (modem_sms_send_result_t){
+            .request_id = 41u, .kind = kinds[i], .outcome = MODEM_SMS_OUTCOME_OK,
+        };
+        s_send_ready = true;
+        check(!tick_phonebook_send(&app, 0u), "unrelated SMS cannot finish card send");
+        s_send_result.request_id = 42u;
+        check(tick_phonebook_send(&app, 0u), "card send consumes matching result");
+        check(strcmp(s_display_text, i == 0 ? "Message\nsent" : "Message\nsending\nfailed") == 0,
+              "card send accepts only the binary operation result");
+        check(app.phonebook_send_request_id == 0u && !app.phonebook_send_waiting,
+              "card send releases its request after completion");
+    }
+}
+
 int main(void) {
     test_options_call_uses_calls_app();
     test_high_list_selection_is_not_narrowed();
@@ -576,6 +610,7 @@ int main(void) {
     test_memory_status_reports_local_budget();
     test_local_phonebook_preloads_without_sim();
     test_phonebook_preload_retry_is_bounded();
+    test_business_card_send_completion();
     if (s_failures != 0) {
         fprintf(stderr, "%d phonebook speed-call test(s) failed\n", s_failures);
         return 1;

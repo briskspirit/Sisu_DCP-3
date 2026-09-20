@@ -28,12 +28,25 @@ static void part(const char *text, uint8_t total, uint8_t seq, uint16_t port, ui
         }
         d.ud[0] = d.ud_len - 1u;
     }
-    for (size_t i = 0u; text[i]; i++) {
-        if (dcs == 8u) d.ud[d.ud_len++] = 0u;
-        assert(d.ud_len < sizeof(d.ud));
-        d.ud[d.ud_len++] = (uint8_t)text[i];
+    if (dcs == 0u) {
+        size_t septets = (d.ud_len * 8u + 6u) / 7u;
+        for (size_t i = 0u; text[i]; i++, septets++) {
+            size_t bit = septets * 7u;
+            assert((bit + 6u) / 8u < sizeof(d.ud));
+            for (unsigned b = 0u; b < 7u; b++)
+                if ((uint8_t)text[i] & (1u << b))
+                    d.ud[(bit + b) / 8u] |= (uint8_t)(1u << ((bit + b) % 8u));
+        }
+        d.udl = (uint8_t)septets;
+        d.ud_len = (uint8_t)((septets * 7u + 7u) / 8u);
+    } else {
+        for (size_t i = 0u; text[i]; i++) {
+            if (dcs == 8u) d.ud[d.ud_len++] = 0u;
+            assert(d.ud_len < sizeof(d.ud));
+            d.ud[d.ud_len++] = (uint8_t)text[i];
+        }
+        d.udl = d.ud_len;
     }
-    d.udl = d.ud_len;
     char pdu[SMS_DELIVER_HEX_MAX]; uint8_t n;
     assert(sms_deliver_build(&d, pdu, sizeof(pdu), &n));
     if (!file.count) assert(message_file_receive(&file, pdu));
@@ -44,13 +57,25 @@ int main(void) {
     phonebook_entry_t source = {.name="Alice", .number="+123456789"};
     char text[MODEM_SMS_TEXT_MAX + 1u];
     assert(business_card_encode(&source, text, sizeof(text)));
-    assert(strcmp(text, "//SCKE2 BEGIN:VCARD\r\nN:Alice\r\nTEL:+123456789\r\nEND:VCARD\r\n") == 0);
-    assert(business_card_text_envelope(text) && !business_card_text_envelope("//SCK"));
+    assert(strcmp(text, body) == 0);
+    assert(business_card_text_envelope("//SCKE2 ") && !business_card_text_envelope("//SCK"));
     assert(!business_card_encode(&source, text, 8u));
     assert(decode(body, false) && strcmp(entry.name, "Alice") == 0 && strcmp(entry.number, "+123456789") == 0);
     source.name[0] = 0;
     assert(business_card_encode(&source, text, sizeof(text)) && strstr(text, "\r\nN:") == NULL);
-    assert(decode(text + 8, true) && entry.name[0] == 0);
+    assert(decode(text, false) && entry.name[0] == 0);
+    strcpy(source.name, "Jos\xc3\xa9");
+    assert(business_card_encode(&source, text, sizeof(text)));
+    assert(strstr(text, "N:Jos\xe9\r\n") && decode(text, false));
+    assert(strcmp(entry.name, source.name) == 0);
+    strcpy(source.name, "\xd0\x90\xd0\xbd\xd0\xbd\xd0\xb0");
+    assert(business_card_encode(&source, text, sizeof(text)));
+    assert(strstr(text, "N;CHARSET=UTF-8:") && decode(text, false));
+    assert(strcmp(entry.name, source.name) == 0);
+    memset(source.name, 'A', sizeof(source.name) - 1u);
+    memset(source.number, '1', sizeof(source.number) - 1u);
+    assert(business_card_encode(&source, text, sizeof(text)) && strlen(text) <= BUSINESS_CARD_SEND_MAX);
+    assert(decode(text, false) && strcmp(entry.name, source.name) == 0 && strcmp(entry.number, source.number) == 0);
     strcpy(source.name, "Bad\r\nTEL:911"); assert(!business_card_encode(&source, text, sizeof(text)));
     strcpy(source.name, "Alice"); strcpy(source.number, "123\r\n");
     assert(!business_card_encode(&source, text, sizeof(text)));
@@ -62,11 +87,14 @@ int main(void) {
     assert(strcmp(entry.name, "Jos\xc3\xa9") == 0);
     assert(decode("BEGIN:VCARD\r\nN;ENCODING=QUOTED-PRINTABLE;CHARSET=ISO-8859-1:Jos=E9\r\nTEL:123\r\nEND:VCARD\r\n", true));
     assert(strcmp(entry.name, "Jos\xc3\xa9") == 0);
+    assert(decode("BEGIN:VCARD\r\nN;CHARSET=ISO-8859-1:Jos\xe9\r\nTEL:123\r\nEND:VCARD\r\n", true));
+    assert(strcmp(entry.name, "Jos\xc3\xa9") == 0);
     assert(decode("BEGIN:VCARD\r\nN;CHARSET=UTF-8:Jos\xc3\xa9\r\nTEL:123\r\nEND:VCARD\r\n", false));
     assert(strcmp(entry.name, "Jos\xc3\xa9") == 0);
     assert(decode("BEGIN:VCARD\r\nN:A\\;B\\,C\\\\D\r\nTEL:123\r\nEND:VCARD\r\n", true));
     assert(strcmp(entry.name, "A;B,C\\D") == 0);
     const char *bad[] = {
+        "CARD\r\nN:Test\r\nTEL:12345678901\r\nEND:VCARD\r\n",
         "BEGIN:VCARD\nTEL:123\nEND:VCARD\n", "BEGIN:VCARD\r\nTEL:123\r\n",
         "BEGIN:VCARD\r\nN:A\r\nEND:VCARD\r\n", "BEGIN:VCARD\r\nTEL:+\r\nEND:VCARD\r\n",
         "BEGIN:VCARD\r\nTEL:123\r\nEND:VCARD\r\nx", "BEGIN:VCARD\r\nBEGIN:VCARD\r\nTEL:123\r\nEND:VCARD\r\n",
@@ -96,6 +124,11 @@ int main(void) {
         file.flags |= MESSAGE_FILE_QUARANTINED;
         assert(business_card_file_decode(&file, &entry) == BUSINESS_CARD_INVALID);
     }
+    memset(&file, 0, sizeof(file)); part(body, 1, 1, 0xe2, 0);
+    assert(business_card_file_decode(&file, &entry) == BUSINESS_CARD_VALID);
+    memset(&file, 0, sizeof(file));
+    part("CARD\r\nN:Test\r\nTEL:12345678901\r\nEND:VCARD\r\n", 1, 1, 0xe2, 0);
+    assert(business_card_file_decode(&file, &entry) == BUSINESS_CARD_INVALID);
     memset(&file, 0, sizeof(file)); part(body, 1, 1, 0x1585, 4);
     assert(business_card_file_decode(&file, &entry) == BUSINESS_CARD_NONE);
     memset(&file, 0, sizeof(file)); part(body, 1, 1, 0, 8);

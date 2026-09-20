@@ -1027,7 +1027,7 @@ bool tick_phonebook_send(app_t *app, uint32_t now) {
         if (!ui_owned) {
             return true;
         }
-        if (result.kind != MODEM_SMS_REQUEST_SEND_TEXT) {
+        if (result.kind != MODEM_SMS_REQUEST_SEND_BINARY) {
             result.outcome = MODEM_SMS_OUTCOME_ERROR;
         }
         if (result.outcome == MODEM_SMS_OUTCOME_OK) {

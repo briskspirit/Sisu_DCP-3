@@ -94,11 +94,20 @@ bool business_card_encode(const phonebook_entry_t *entry, char *out, size_t cap)
         !number_value((const uint8_t *)entry->number, strlen(entry->number), checked.number)) return false;
     for (const unsigned char *p = (const unsigned char *)entry->name; *p; p++)
         if (*p < 32u || *p == 127u || *p == '\\') return false;
+    bool latin1 = true;
+    for (size_t i = 0u; i < size; i += 2u)
+        if (ucs2[i] != 0u) latin1 = false;
+    if (latin1) {
+        for (size_t i = 0u; i < size; i += 2u)
+            checked.name[i / 2u] = (char)ucs2[i + 1u];
+        checked.name[size / 2u] = '\0';
+    }
+    const char *name = latin1 ? checked.name : entry->name;
     int n = entry->name[0]
-        ? snprintf(out, cap, "//SCKE2 BEGIN:VCARD\r\nN:%s\r\nTEL:%s\r\nEND:VCARD\r\n",
-                   entry->name, checked.number)
-        : snprintf(out, cap, "//SCKE2 BEGIN:VCARD\r\nTEL:%s\r\nEND:VCARD\r\n", checked.number);
-    if (n < 0 || (size_t)n >= cap || n > (int)MODEM_SMS_TEXT_MAX) { out[0] = '\0'; return false; }
+        ? snprintf(out, cap, "BEGIN:VCARD\r\nN%s:%s\r\nTEL:%s\r\nEND:VCARD\r\n",
+                   latin1 ? "" : ";CHARSET=UTF-8", name, checked.number)
+        : snprintf(out, cap, "BEGIN:VCARD\r\nTEL:%s\r\nEND:VCARD\r\n", checked.number);
+    if (n < 0 || (size_t)n >= cap || n > (int)BUSINESS_CARD_SEND_MAX) { out[0] = '\0'; return false; }
     return true;
 }
 
@@ -147,7 +156,7 @@ bool business_card_decode(const uint8_t *body, size_t len, bool utf8,
         }
         const uint8_t *value = line + colon + 1u;
         size_t n = size - colon - 1u;
-        if (quoted && latin1) value_utf8 = false;
+        if (latin1) value_utf8 = false;
         if (is_tel) {
             if (quoted) return false;
             if (!tel && !number_value(value, n, card.number)) return false;

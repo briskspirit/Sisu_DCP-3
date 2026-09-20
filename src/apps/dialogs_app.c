@@ -495,14 +495,16 @@ bool handle_editor_key(app_t *app, uint16_t key, event_type_t event_type, uint32
             } else {
                 phonebook_entry_t entry;
                 if (phonebook_service_entry(app->phonebook_pending_index, &entry)) {
-                    char text[MODEM_SMS_TEXT_MAX + 1u];
+                    char text[BUSINESS_CARD_SEND_MAX + 1u];
                     if (!business_card_encode(&entry, text, sizeof(text))) {
                         open_display_sid(app, 0u, 0x359u, "Message\nsending\nfailed", APP_ROUTE_EDITOR, now);
                         return true;
                     }
                     uint32_t request_id = 0u;
-                    if (!modem_service_request_send_sms(
-                            app->editor_value, text, &request_id)) {
+                    if (!modem_service_request_send_binary_sms(
+                            app->editor_value, (const uint8_t *)text,
+                            (uint16_t)strlen(text), BUSINESS_CARD_PORT, 0u,
+                            &request_id)) {
                         open_display_sid(app, 0u, 0x35au, "Still\nsending\nprevious", APP_ROUTE_EDITOR, now);
                         return true;
                     }
