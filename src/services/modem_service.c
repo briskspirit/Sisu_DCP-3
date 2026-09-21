@@ -223,7 +223,7 @@ typedef struct {
     uint16_t source_port;
     uint8_t binary_mode;
     bool sms_options_present;
-    uint32_t sms_sim_generation;
+    uint32_t sim_session_generation;
 } modem_request_t;
 
 typedef enum {
@@ -540,7 +540,8 @@ static uint8_t s_sms_wake_retries;
  * priority; text sends must not run with picture-mode CSMP settings. */
 static bool s_sms_mode_restore_pending;
 static bool s_sms_text_parameters_dirty;
-static uint32_t s_sms_sim_generation;
+static uint32_t s_sim_session_generation;
+static bool s_call_forward_dispatched;
 static uint8_t s_sms_mode_restore_attempts;
 static uint32_t s_sms_mode_restore_retry_ms;
 #define MODEM_SMS_MODE_RESTORE_ATTEMPTS 3u
@@ -1128,7 +1129,8 @@ void modem_service_init(void) {
     direct_ring_reset();
     s_sms_mode_restore_pending = false;
     s_sms_text_parameters_dirty = false;
-    s_sms_sim_generation = 0u;
+    s_sim_session_generation = 0u;
+    s_call_forward_dispatched = false;
     s_sms_mode_restore_attempts = 0u;
     s_sms_mode_restore_retry_ms = 0u;
     s_now_ms = time_ms();
@@ -2262,12 +2264,15 @@ bool modem_service_request_call_forward(const call_forward_request_t *request,
         modem_supplementary_call_forward_next_request_id();
     critical_section_exit(&s_request_lock);
 
-    modem_status_t status;
-    modem_service_get_status(&status);
-    if (!status.sim_ready || !status.network_registered) {
+    critical_section_enter_blocking(&s_status_lock);
+    queued.sim_session_generation = s_sim_session_generation;
+    bool sim_ready = s_status.sim_ready;
+    bool registered = s_status.network_registered;
+    critical_section_exit(&s_status_lock);
+    if (!sim_ready || !registered) {
         call_forward_push_result(
             queued.request_id, &queued.call_forward,
-            status.sim_ready ? CALL_FORWARD_OUTCOME_NO_NETWORK
+            sim_ready ? CALL_FORWARD_OUTCOME_NO_NETWORK
                              : CALL_FORWARD_OUTCOME_NOT_DONE,
             false, false, NULL, false, 0u);
         if (request_id_out != NULL) {
@@ -2377,7 +2382,7 @@ static bool queue_sms_request(modem_request_t *request,
 
     request->request_id = request_id;
     critical_section_enter_blocking(&s_status_lock);
-    request->sms_sim_generation = s_sms_sim_generation;
+    request->sim_session_generation = s_sim_session_generation;
     critical_section_exit(&s_status_lock);
     if (!queue_request(request)) {
         critical_section_enter_blocking(&s_sms_lock);
@@ -3927,7 +3932,13 @@ static void start_next_request(uint32_t now_ms) {
         }
         s_operation = MODEM_OP_CALL_FORWARD;
         set_operation_busy(true);
+        s_call_forward_dispatched = false;
         modem_supplementary_call_forward_begin(step_count);
+        if (s_current_request.sim_session_generation != s_sim_session_generation ||
+            !status_sim_ready_snapshot() || !s_status.network_registered) {
+            call_forward_finish(false, false);
+            break;
+        }
         send_command(MODEM_AT_CALL_FORWARD, command,
                      g_modem_vendor.supplementary.command_timeout_ms,
                      now_ms);
@@ -4064,13 +4075,19 @@ static void send_deferred(uint32_t now_ms) {
     s_deferred_valid = false;
     modem_sms_command_kind_t sms_kind;
     if (sms_protocol_command_from_at(s_deferred_kind, &sms_kind) &&
-        s_current_request.sms_sim_generation != s_sms_sim_generation) {
+        s_current_request.sim_session_generation != s_sim_session_generation) {
         /* A wake-deferred command must not apply an old SIM's SMSC to a new
          * session. No bytes crossed the wire; retain only valid idle repair. */
         modem_sms_protocol_request_t request;
         if (sms_protocol_request_view(&request)) {
             modem_sms_protocol_on_final(sms_kind, false, &request, &s_sms_protocol_hooks, now_ms);
         } else finish_operation(false);
+        return;
+    }
+    if (s_deferred_kind == MODEM_AT_CALL_FORWARD &&
+        (s_current_request.sim_session_generation != s_sim_session_generation ||
+         !status_sim_ready_snapshot() || !s_status.network_registered)) {
+        call_forward_finish(false, false);
         return;
     }
     if (s_deferred_kind == MODEM_AT_SMS_MODE_RESTORE) {
@@ -4359,6 +4376,10 @@ static bool send_raw_command_with_token(modem_at_kind_t kind, const char *cmd,
     }
 
     sms_wake_command_dispatched(cmd, now_ms);
+
+    if (kind == MODEM_AT_CALL_FORWARD) {
+        s_call_forward_dispatched = true;
+    }
 
     modem_sms_command_kind_t sms_kind;
     if (sms_protocol_command_from_at(kind, &sms_kind)) {
@@ -5692,6 +5713,7 @@ static void finish_operation(bool ok) {
     s_operation = MODEM_OP_NONE;
     memset(&s_current_request, 0, sizeof(s_current_request));
     if (was_call_forward) {
+        s_call_forward_dispatched = false;
         modem_supplementary_call_forward_reset();
     }
     if (was_dtmf) {
@@ -5969,6 +5991,11 @@ static void call_forward_push_result(uint32_t request_id,
 }
 
 static void call_forward_finish_step(bool ok, bool timed_out) {
+    if (s_current_request.sim_session_generation != s_sim_session_generation ||
+        !status_sim_ready_snapshot()) {
+        call_forward_finish(false, timed_out);
+        return;
+    }
     uint8_t next_step = 0u;
     bool query = s_current_request.call_forward.action ==
                  CALL_FORWARD_ACTION_QUERY;
@@ -5999,6 +6026,21 @@ static void call_forward_finish(bool ok, bool timed_out) {
     call_forward_request_t request = s_current_request.call_forward;
     bool status_updated = false;
     critical_section_enter_blocking(&s_status_lock);
+    if (s_current_request.sim_session_generation != s_sim_session_generation ||
+        !s_status.sim_ready) {
+        /* A final belongs to the old SIM even if a new SIM is already ready.
+         * Drain it, but never publish its cache or continue a mutation. */
+        bool uncertain = s_call_forward_dispatched &&
+                         request.action != CALL_FORWARD_ACTION_QUERY;
+        modem_supplementary_call_forward_publish_result(
+            request_id, &request,
+            uncertain ? CALL_FORWARD_OUTCOME_RESULT_UNKNOWN
+                      : CALL_FORWARD_OUTCOME_CANCELLED,
+            false, false, NULL, false, 0u);
+        critical_section_exit(&s_status_lock);
+        finish_operation(true);
+        return;
+    }
     bool semantic_ok = modem_supplementary_call_forward_finish(
         request_id, &request, ok, timed_out, s_status.network_registered,
         s_now_ms, &status_updated);
@@ -6474,7 +6516,7 @@ static bool sms_start_current_request(uint32_t now_ms) {
     s_sms_terminal_published = false;
     set_operation_busy(true);
     if (s_sms_text_parameters_dirty ||
-        s_current_request.sms_sim_generation != s_sms_sim_generation) {
+        s_current_request.sim_session_generation != s_sim_session_generation) {
         (void)sms_publish_terminal_for_request(&s_current_request, MODEM_SMS_OUTCOME_ERROR);
         finish_operation(false);
         return true;
@@ -6777,7 +6819,7 @@ static void apply_sim_observation(modem_sim_observation_t observation) {
     }
     was_ready = s_status.sim_ready;
     if (was_ready && observation != MODEM_SIM_OBSERVATION_READY) {
-        s_sms_sim_generation++;
+        s_sim_session_generation++;
         modem_sms_protocol_sim_changed();
     }
     s_status.sim_checked = true;

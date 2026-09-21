@@ -5652,6 +5652,105 @@ static void test_call_forward_queue_cancellation(void) {
           "ordinary session cancellation still owns an in-flight query");
 }
 
+static void test_call_forward_sim_isolation(void) {
+    for (unsigned scenario = 0u; scenario < 3u; scenario++) {
+        begin_telit(true);
+        check(boot_until_ready(30000u), "queued divert SIM fixture boots");
+        mh_feed("+CEREG: 1");
+        mh_settle();
+        s_hold_final_command = "AT+CSQ";
+        check(modem_service_request_debug_at("AT+CSQ"), "hold divert FIFO head");
+        mh_settle();
+        call_forward_request_t request = {
+            .reason = CALL_FORWARD_REASON_BUSY,
+            .action = CALL_FORWARD_ACTION_QUERY,
+        };
+        uint32_t id = 0u;
+        check(modem_service_request_call_forward(&request, &id), "queue divert before service loss");
+        mh_feed(scenario == 2u ? "+CEREG: 0" : "#QSS: 0");
+        if (scenario == 1u) {
+            mh_feed("#QSS: 3");
+            mh_feed("+CEREG: 1");
+        }
+        s_hold_final_command = NULL;
+        mh_feed("OK");
+        mh_settle();
+        if (scenario == 1u) {
+            check(boot_until_ready(30000u), "new SIM completes initialization");
+            mh_settle();
+        }
+        call_forward_result_t result;
+        check(mh_tx_count_exact("AT+CCFC=1,2,,,1") == 0u &&
+                  modem_service_pop_call_forward_result(&result) &&
+                  result.request_id == id &&
+                  result.outcome == (scenario == 2u ? CALL_FORWARD_OUTCOME_NO_NETWORK
+                                                   : CALL_FORWARD_OUTCOME_CANCELLED),
+              "queued divert rechecks registration and cannot cross SIM sessions");
+    }
+
+    for (unsigned mutation = 0u; mutation < 2u; mutation++) {
+        begin_telit(true);
+        check(boot_until_ready(30000u), "on-wire divert SIM fixture boots");
+        mh_feed("+CEREG: 1");
+        mh_settle();
+        call_forward_request_t request = {
+            .reason = mutation ? CALL_FORWARD_REASON_NO_REPLY : CALL_FORWARD_REASON_UNCONDITIONAL,
+            .action = mutation ? CALL_FORWARD_ACTION_REGISTER : CALL_FORWARD_ACTION_QUERY,
+            .has_number = mutation != 0u,
+            .number = "+15550000021",
+            .has_delay = mutation != 0u,
+            .delay_seconds = mutation ? 20u : 0u,
+        };
+        const char *command = mutation ? "AT+CCFC=2,3,\"+15550000021\",145,1"
+                                       : "AT+CCFC=0,2,,,1";
+        s_hold_final_command = command;
+        uint32_t id = 0u;
+        check(modem_service_request_call_forward(&request, &id), "start on-wire divert");
+        mh_settle();
+        check(mh_tx_count_exact(command) == 1u, "divert reached UART before SIM loss");
+        mh_feed("#QSS: 0");
+        mh_feed("#QSS: 3");
+        mh_feed("+CEREG: 1");
+        mh_feed("+CCFC: 1,1,\"+15550000021\",145");
+        s_hold_final_command = NULL;
+        mh_feed("OK");
+        call_forward_result_t result;
+        check(modem_service_pop_call_forward_result(&result) &&
+                  result.request_id == id && !result.status_known &&
+                  result.outcome == (mutation ? CALL_FORWARD_OUTCOME_RESULT_UNKNOWN
+                                             : CALL_FORWARD_OUTCOME_CANCELLED),
+              "old-SIM final cannot claim success for a newly ready SIM");
+        check(!mh_status().call_forward_unconditional_active &&
+                  mh_tx_count_exact("AT+CCFC=2,1,,,1,20") == 0u,
+              "stale final neither restores CFU nor sends a composite second step");
+    }
+
+    begin_telit(true);
+    check(boot_until_ready(30000u), "wake-deferred divert SIM fixture boots");
+    mh_feed("+CEREG: 1");
+    mh_settle();
+    settle_dtr_sleep();
+    s_mh_dtr_wake_works = false;
+    call_forward_request_t request = {
+        .reason = CALL_FORWARD_REASON_UNCONDITIONAL,
+        .action = CALL_FORWARD_ACTION_REGISTER,
+        .has_number = true,
+        .number = "+15550000021",
+    };
+    uint32_t id = 0u;
+    check(modem_service_request_call_forward(&request, &id), "admit deferred divert");
+    mh_settle();
+    check(service_probe().deferred_command_valid, "divert is deferred behind CTS");
+    mh_feed("#QSS: 0");
+    s_mh_cts_asserted = true;
+    mh_settle();
+    call_forward_result_t result;
+    check(mh_tx_count_exact("AT+CCFC=0,3,\"+15550000021\",145,1") == 0u &&
+              modem_service_pop_call_forward_result(&result) &&
+              result.outcome == CALL_FORWARD_OUTCOME_CANCELLED,
+          "wake-deferred mutation is cleanly cancelled before UART after SIM loss");
+}
+
 static void test_newer_call_forward_result_survives_old_final(void) {
     begin_telit(true);
     check(boot_until_ready(30000u),
@@ -7149,6 +7248,7 @@ int main(void) {
     test_mwi_error_fixture_has_no_body();
     test_supplementary_refresh_recovery();
     test_call_forward_queue_cancellation();
+    test_call_forward_sim_isolation();
     test_newer_call_forward_result_survives_old_final();
     test_ringtone_transport_and_recovery();
     test_operator_logo_transport_and_recovery();
