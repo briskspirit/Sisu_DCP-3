@@ -202,6 +202,7 @@ bool call_divert_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
     view->selected = &app->call_divert_menu_selected;
     view->count = menu_count((call_divert_menu_kind_t)app->call_divert_menu_kind, app);
     view->context = app->call_divert_menu_kind | ((uint32_t)app->call_divert_condition_index << 8);
+    if (app->call_divert_menu_kind == CALL_DIVERT_MENU_ROOT) view->deferred_mask = 1u << 5;
     return true;
 }
 

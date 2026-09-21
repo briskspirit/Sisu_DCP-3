@@ -351,13 +351,11 @@ static void test_numeric_settings(void) {
     shortcut_press(&app, KEY_1, 10u);
     shortcut_press(&app, KEY_1, 20u);
     shortcut_press(&app, KEY_2, 30u);
-    check(app.route == APP_ROUTE_SETTINGS_VALUE && app.settings_value_selected == 1u &&
-          app.settings_value_view_start == 1u && s_writes == before,
-          "4-1-1-2 selects Off without an early write");
-    menu_shortcuts_tick(&app, 1566u);
     check(app.route == APP_ROUTE_DISPLAY_MESSAGE && s_record == 3u &&
           s_values[STORE_SETTING_SETTINGS_AUTOMATIC_REDIAL] == 0u && s_writes == before + 1u,
-          "numeric setting commits through the normal save/result path exactly once");
+          "4-1-1-2 immediately commits through the normal save/result path");
+    menu_shortcuts_tick(&app, 1566u);
+    check(s_writes == before + 1u, "completed numeric setting cannot save twice");
 
     open_settings_menu(&app, SETTINGS_MENU_CALL, 0u);
     menu_shortcuts_begin(&app, 2000u);
@@ -379,17 +377,41 @@ static void test_numeric_settings(void) {
     open_settings_menu(&app, SETTINGS_MENU_PHONE, 0u);
     menu_shortcuts_begin(&app, 6000u);
     shortcut_press(&app, KEY_3, 6010u);
+    check(app.route == APP_ROUTE_SETTINGS_MENU && app.menu_shortcut_pending,
+          "welcome-note shortcut honors the deferred item flag");
+    menu_shortcuts_tick(&app, 7546u);
     check(app.route == APP_ROUTE_EDITOR && app.editor_context == EDITOR_CONTEXT_SETTINGS_WELCOME_NOTE &&
-          !app.menu_shortcut_active, "welcome-note shortcut hands over to the existing editor immediately");
+          !app.menu_shortcut_active, "welcome-note shortcut hands over to the existing editor");
 
     open_settings_menu(&app, SETTINGS_MENU_CALL, 0u);
-    menu_shortcuts_begin(&app, 7000u);
-    shortcut_press(&app, KEY_1, 7010u);
-    shortcut_press(&app, KEY_2, 7020u);
+    menu_shortcuts_begin(&app, 8000u);
+    shortcut_press(&app, KEY_1, 8010u);
     s_write_status = STORE_STATUS_INVALID_ARGUMENT;
-    menu_shortcuts_tick(&app, 8556u);
+    shortcut_press(&app, KEY_2, 8020u);
     expect_not_done(&app, APP_ROUTE_SETTINGS_VALUE, "numeric save failure retains ordinary error handling");
     s_write_status = STORE_STATUS_OK;
+
+    before = s_writes;
+    open_settings_menu(&app, SETTINGS_MENU_ROOT, 0u);
+    menu_shortcuts_begin(&app, 9000u);
+    shortcut_press(&app, KEY_4, 9010u);
+    check(app.menu_shortcut_pending && !app.settings_restore_active,
+          "restore shortcut waits before opening the security-code prompt");
+    menu_shortcuts_tick(&app, 10546u);
+    check(app.route == APP_ROUTE_SETTINGS_RESTORE && app.settings_restore_active &&
+          !app.menu_shortcut_active && !app.settings_restore_pending && s_writes == before,
+          "numeric restore never bypasses the security-code prompt or erases settings");
+
+    reset_settings_restore(&app);
+    open_settings_menu(&app, SETTINGS_MENU_PHONE, 0u);
+    menu_shortcuts_begin(&app, 11000u);
+    shortcut_press(&app, KEY_4, 11010u);
+    shortcut_press(&app, KEY_2, 11020u);
+    check(app.route == APP_ROUTE_SETTINGS_VALUE && app.menu_shortcut_pending,
+          "manual network selection honors its deferred item flag");
+    menu_shortcuts_tick(&app, 12556u);
+    expect_not_done(&app, APP_ROUTE_SETTINGS_MENU,
+                    "numeric manual selection retains unsupported-operation handling");
 }
 
 int main(void) {

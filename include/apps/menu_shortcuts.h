@@ -11,7 +11,7 @@ typedef struct {
     uint8_t count; /* Raw one-based ordinals, at most 64. */
     uint32_t context; /* Submenu identity, excluding the selected row. */
     uint64_t hidden_mask;
-    uint32_t immediate_mask;
+    uint32_t deferred_mask; /* Stock item flag 0x04: wait before activation. */
 } menu_shortcut_view_t;
 
 bool main_menu_shortcut_view(app_t *app, menu_shortcut_view_t *view);

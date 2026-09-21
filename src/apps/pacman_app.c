@@ -752,7 +752,7 @@ bool pacman_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
     view->context = app->pacman_menu_variant;
     view->count = pacman_menu_items(app, items, (uint8_t)ARRAY_COUNT(items));
     /* Stock dynamic game actions (0x002dbd84..0x002dbe48) use flag 0x04. */
-    view->immediate_mask = (1u << view->count) - 1u;
+    view->deferred_mask = (1u << view->count) - 1u;
     return true;
 }
 

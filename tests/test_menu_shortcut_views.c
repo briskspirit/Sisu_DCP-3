@@ -14,6 +14,12 @@
 
 static int failures;
 static bool headset, own_tone[2];
+static uint8_t time_set = 1u;
+store_status_t store_setting_get_u8(store_setting_key_t key, uint8_t *value) {
+    if (key != STORE_SETTING_CLOCK_TIME_SET) return STORE_STATUS_INVALID_ARGUMENT;
+    *value = time_set;
+    return STORE_STATUS_OK;
+}
 bool board_diag_headset_inserted(void) { return headset; }
 bool store_own_tone_used(uint8_t slot) { return slot < 2u && own_tone[slot]; }
 uint8_t strings_language_count(void) { return 1u; }
@@ -40,21 +46,31 @@ int main(void) {
     menu_shortcut_view_t view = get(main_menu_shortcut_view, &app);
     check(view.count == 11u && view.selected == &app.menu_index &&
           (view.hidden_mask & (UINT64_C(3) << 9)) == (UINT64_C(3) << 9) &&
-          view.immediate_mask == (1u << 6), "root preserves ordinals and stock calculator flag");
+          view.deferred_mask == ((1u << 6) | (1u << 10)),
+          "root preserves ordinals and deferred Calculator/Netmonitor flags");
 
     feature_gate_set_visible(FEATURE_GATE_PHONEBOOK_SERVICE_NOS, false);
     feature_gate_set_visible(FEATURE_GATE_PHONEBOOK_INFO_NUMBERS, false);
     app.phonebook_menu_kind = PHONEBOOK_MENU_ROOT;
     view = get(phonebook_shortcut_view, &app);
     check(view.count == 10u && (view.hidden_mask & 0x202u) == 0x202u &&
-          view.selected == &app.phonebook_menu_selected && (view.immediate_mask & 1u),
-          "phonebook gates and immediate Search match the original table");
+          view.selected == &app.phonebook_menu_selected && (view.deferred_mask & 1u),
+          "phonebook gates and deferred Search match the original table");
+    app.phonebook_menu_kind = PHONEBOOK_MENU_ERASE;
+    view = get(phonebook_shortcut_view, &app);
+    check(view.count == 2u && view.deferred_mask == 3u, "both erase handoffs are deferred");
     app.phonebook_menu_kind = PHONEBOOK_MENU_OPTIONS;
     view = get(phonebook_shortcut_view, &app);
     check(view.count == 2u && view.context == PHONEBOOK_MENU_OPTIONS && !view.hidden_mask,
           "phonebook Options has independent numbering");
 
     app.route = APP_ROUTE_SETTINGS_MENU;
+    app.settings_menu_kind = SETTINGS_MENU_ROOT;
+    view = get(settings_shortcut_view, &app);
+    check(view.deferred_mask == 8u, "restore factory settings uses a deferred handoff");
+    app.settings_menu_kind = SETTINGS_MENU_SECURITY;
+    view = get(settings_shortcut_view, &app);
+    check(view.deferred_mask == 9u, "PIN request and phone security use deferred handoffs");
     app.settings_menu_kind = SETTINGS_MENU_CALL;
     feature_gate_set_visible(FEATURE_GATE_CALL_SETTINGS_AUTOMATIC_ANSWER, true);
     view = get(settings_shortcut_view, &app);
@@ -68,7 +84,7 @@ int main(void) {
     feature_gate_set_visible(FEATURE_GATE_MESSAGES_INFO_SERVICE, false);
     view = get(messages_shortcut_view, &app);
     check(view.count == 7u && (view.hidden_mask & (1u << 5)) &&
-          view.immediate_mask == 0x4cu, "messages use existing gates and editor handoffs");
+          view.deferred_mask == 0x4cu, "messages use existing gates and editor handoffs");
     app.route = APP_ROUTE_MESSAGES_LIST;
     app.messages_mode = MESSAGES_MODE_SETTINGS_TOP;
     view = get(messages_shortcut_view, &app);
@@ -90,8 +106,8 @@ int main(void) {
     app.route = APP_ROUTE_TONES_MENU;
     feature_gate_set_visible(FEATURE_GATE_TONES_VIBRATING_ALERT, false);
     view = get(tones_shortcut_view, &app);
-    check(view.count == 8u && (view.hidden_mask & 0x80u) && view.immediate_mask == 4u,
-          "tones preserve hidden Vibra and immediate Composer");
+    check(view.count == 8u && (view.hidden_mask & 0x80u) && view.deferred_mask == 4u,
+          "tones preserve hidden Vibra and deferred Composer");
     app.route = APP_ROUTE_TONES_SETTING;
     app.tones_setting_kind = TONES_SETTING_RINGING_TONE;
     view = get(tones_shortcut_view, &app);
@@ -107,13 +123,20 @@ int main(void) {
     app.route = APP_ROUTE_CALL_REGISTER_MENU;
     app.call_register_menu_kind = CALL_REGISTER_MENU_ROOT;
     view = get(call_register_shortcut_view, &app);
-    check(view.count == 8u && view.immediate_mask == 7u, "call register list handoffs match stock flags");
+    check(view.count == 8u && view.deferred_mask == 7u, "call register list handoffs match stock flags");
     app.route = APP_ROUTE_CALL_REGISTER_METRIC;
     app.call_register_metric_kind = CALL_REGISTER_METRIC_DURATION;
     view = get(call_register_shortcut_view, &app);
-    check(view.count == 5u && view.selected == &app.call_register_metric_selected,
+    check(view.count == 5u && view.selected == &app.call_register_metric_selected &&
+          view.deferred_mask == 16u,
           "call duration counters share ordinary menu actions");
+    app.call_register_metric_kind = CALL_REGISTER_METRIC_COSTS;
+    view = get(call_register_shortcut_view, &app);
+    check(view.deferred_mask == 4u, "clear cost counters uses a deferred handoff");
 
+    app.call_divert_menu_kind = CALL_DIVERT_MENU_ROOT;
+    view = get(call_divert_shortcut_view, &app);
+    check(view.deferred_mask == 32u, "cancel all diverts uses a deferred handoff");
     app.call_divert_menu_kind = CALL_DIVERT_MENU_CONDITION;
     app.call_divert_condition_index = 0u;
     view = get(call_divert_shortcut_view, &app);
@@ -123,7 +146,21 @@ int main(void) {
     check(view.context != context, "divert condition changes invalidate deferred requests");
     app.clock_menu_kind = CLOCK_MENU_ROOT;
     view = get(clock_shortcut_view, &app);
-    check(view.count == 3u && view.immediate_mask == 4u, "clock date editor is an immediate handoff");
+    check(view.count == 3u && view.deferred_mask == 4u, "clock date editor is a deferred handoff");
+    app.clock_menu_kind = CLOCK_MENU_ALARM;
+    view = get(clock_shortcut_view, &app);
+    check(view.deferred_mask == 1u, "alarm On defers but Off does not");
+    app.clock_menu_kind = CLOCK_MENU_VISIBLE;
+    view = get(clock_shortcut_view, &app);
+    check(view.deferred_mask == 2u, "Set the time defers but Hide clock does not");
+    app.clock_menu_kind = CLOCK_MENU_HIDDEN;
+    view = get(clock_shortcut_view, &app);
+    context = view.context;
+    check(view.deferred_mask == 2u, "Show clock is immediate when time is set");
+    time_set = 0u;
+    view = get(clock_shortcut_view, &app);
+    check(view.deferred_mask == 3u && view.context != context,
+          "unset clock uses the original deferred setup descriptor");
     view = get(profiles_shortcut_view, &app);
     check(view.selected == &app.profiles_selected_index, "profiles use their own selected row");
     feature_gate_set_visible(FEATURE_GATE_GAMES_EXTRA_ROWS, false);
@@ -140,8 +177,8 @@ int main(void) {
         view = get(game_views[i], &app);
         uint8_t count = view.count;
         check(count == (i == 4u ? 3u : 4u) &&
-              view.immediate_mask == (1u << count) - 1u,
-              "game action menus inherit shortcuts and activate immediately");
+              view.deferred_mask == (1u << count) - 1u,
+              "game action menus inherit shortcuts and use deferred activation");
         *variants[i] = 2u; /* Continue */
         view = get(game_views[i], &app);
         check(view.count == count + 1u && view.context == 2u &&

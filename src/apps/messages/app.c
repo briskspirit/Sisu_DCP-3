@@ -472,7 +472,7 @@ bool messages_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
         for (uint8_t i = 0u; i < view->count; i++) {
             if (!messages_root_item_visible(i)) view->hidden_mask |= UINT64_C(1) << i;
         }
-        view->immediate_mask = (1u << 2) | (1u << 3) | (1u << 6);
+        view->deferred_mask = (1u << 2) | (1u << 3) | (1u << 6);
         return true;
     }
     view->context = app->messages_mode | ((uint32_t)app->messages_settings_kind << 8) |
@@ -487,7 +487,7 @@ bool messages_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
         view->count = app->messages_settings_kind == 0u
             ? (uint8_t)ARRAY_COUNT(MESSAGE_SETTINGS_SET_LABELS)
             : (uint8_t)ARRAY_COUNT(MESSAGE_SETTINGS_COMMON_LABELS);
-        if (app->messages_settings_kind == 0u) view->immediate_mask = 1u;
+        if (app->messages_settings_kind == 0u) view->deferred_mask = 1u;
         break;
     case MESSAGES_MODE_SETTINGS_VALUE:
         view->selected = &app->messages_settings_value_selected;

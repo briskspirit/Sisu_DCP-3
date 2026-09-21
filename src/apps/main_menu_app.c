@@ -90,7 +90,7 @@ bool main_menu_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
     for (uint8_t i = 0u; i < view->count; i++) {
         if (!main_menu_entry_visible(i)) view->hidden_mask |= UINT64_C(1) << i;
     }
-    view->immediate_mask = 1u << 6; /* Calculator: stock item flag 0x04. */
+    view->deferred_mask = (1u << 6) | (1u << 10); /* Calculator and Netmonitor. */
     return true;
 }
 

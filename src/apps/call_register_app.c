@@ -385,15 +385,17 @@ bool call_register_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
         view->count = app->call_register_metric_kind == CALL_REGISTER_METRIC_COSTS
             ? (uint8_t)ARRAY_COUNT(CALL_REGISTER_COST_LABELS)
             : (uint8_t)ARRAY_COUNT(CALL_REGISTER_DURATION_LABELS);
+        view->deferred_mask = app->call_register_metric_kind == CALL_REGISTER_METRIC_COSTS
+            ? 1u << 2 : 1u << 4;
         return true;
     }
     call_register_menu_kind_t kind = (call_register_menu_kind_t)app->call_register_menu_kind;
     view->selected = &app->call_register_menu_selected;
     view->context = kind;
     view->count = call_register_menu_count(kind);
-    if (kind == CALL_REGISTER_MENU_ROOT) view->immediate_mask = 7u;
-    if (kind == CALL_REGISTER_MENU_COST_SETTINGS) view->immediate_mask = 3u;
-    if (kind == CALL_REGISTER_MENU_PREPAID) view->immediate_mask = 1u << 3;
+    if (kind == CALL_REGISTER_MENU_ROOT) view->deferred_mask = 7u;
+    if (kind == CALL_REGISTER_MENU_COST_SETTINGS) view->deferred_mask = 3u;
+    if (kind == CALL_REGISTER_MENU_PREPAID) view->deferred_mask = 1u << 3;
     return true;
 }
 

@@ -445,6 +445,7 @@ bool settings_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
         view->selected = &app->settings_value_selected;
         view->view_start = &app->settings_value_view_start;
         view->context = app->settings_value_kind;
+        if (app->settings_value_kind == SETTINGS_VALUE_NETWORK) view->deferred_mask = 1u << 1;
         return true;
     }
     settings_menu_kind_t kind = (settings_menu_kind_t)app->settings_menu_kind;
@@ -454,8 +455,10 @@ bool settings_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
     for (uint8_t i = 0u; i < view->count; i++) {
         if (!settings_menu_item_visible(kind, i)) view->hidden_mask |= UINT64_C(1) << i;
     }
-    if (kind == SETTINGS_MENU_PHONE) view->immediate_mask = 1u << 2;
-    if (kind == SETTINGS_MENU_ACCESS_CODES) view->immediate_mask = 7u;
+    if (kind == SETTINGS_MENU_ROOT) view->deferred_mask = 1u << 3;
+    if (kind == SETTINGS_MENU_PHONE) view->deferred_mask = 1u << 2;
+    if (kind == SETTINGS_MENU_SECURITY) view->deferred_mask = (1u << 0) | (1u << 3);
+    if (kind == SETTINGS_MENU_ACCESS_CODES) view->deferred_mask = 7u;
     return true;
 }
 

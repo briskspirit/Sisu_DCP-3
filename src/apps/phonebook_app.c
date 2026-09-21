@@ -461,7 +461,9 @@ bool phonebook_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
         for (uint8_t i = 0u; i < view->count; i++) {
             if (!phonebook_root_item_visible(i)) view->hidden_mask |= UINT64_C(1) << i;
         }
-        view->immediate_mask = (1u << 0) | (1u << 2) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 8);
+        view->deferred_mask = (1u << 0) | (1u << 2) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 8);
+    } else if (kind == PHONEBOOK_MENU_ERASE) {
+        view->deferred_mask = 3u;
     }
     return true;
 }

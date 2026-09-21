@@ -196,7 +196,17 @@ bool clock_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
     view->selected = &app->clock_menu_selected;
     view->context = app->clock_menu_kind;
     view->count = clock_menu_count((clock_menu_kind_t)app->clock_menu_kind);
-    if (app->clock_menu_kind == CLOCK_MENU_ROOT) view->immediate_mask = 1u << 2;
+    if (app->clock_menu_kind == CLOCK_MENU_ROOT) view->deferred_mask = 1u << 2;
+    if (app->clock_menu_kind == CLOCK_MENU_ALARM) view->deferred_mask = 1u;
+    if (app->clock_menu_kind == CLOCK_MENU_VISIBLE || app->clock_menu_kind == CLOCK_MENU_HIDDEN) {
+        view->deferred_mask = 1u << 1;
+        if (app->clock_menu_kind == CLOCK_MENU_HIDDEN) {
+            uint8_t time_set = 1u;
+            clock_setting_u8(STORE_SETTING_CLOCK_TIME_SET, &time_set);
+            view->context |= (uint32_t)time_set << 8;
+            if (!time_set) view->deferred_mask |= 1u; /* Show clock opens initial setup. */
+        }
+    }
     return true;
 }
 

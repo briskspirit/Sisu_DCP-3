@@ -22,7 +22,7 @@ bool main_menu_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
     view->selected = &app->menu_index;
     view->count = root_count;
     view->hidden_mask = hidden;
-    view->immediate_mask = immediate ? UINT32_MAX : 0u;
+    view->deferred_mask = immediate ? 0u : UINT32_MAX;
     return true;
 }
 
@@ -31,6 +31,7 @@ bool settings_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
     view->view_start = &app->settings_value_view_start;
     view->count = 4u;
     view->context = app->settings_menu_kind;
+    view->deferred_mask = UINT32_MAX;
     return true;
 }
 
@@ -59,7 +60,7 @@ NO_VIEW(games_shortcut_view)
 bool snake_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
     view->selected = &app->snake_menu_selected;
     view->count = 4u;
-    view->immediate_mask = 0xfu;
+    view->deferred_mask = 0xfu;
     return true;
 }
 NO_VIEW(rotation_shortcut_view)
@@ -136,7 +137,7 @@ static void test_timers(void) {
     begin(&app, 0u);
     check(press(&app, KEY_4, 100u), "digit selects a menu");
     check(app.menu_index == 3u && app.menu_shortcut_pending && activations == 0u,
-          "unambiguous choice is highlighted before deferred activation");
+          "item flag 0x04 defers activation of an unambiguous choice");
     check(!app.menu_keyguard_armed, "numeric navigation ends Menu-star chord");
     check(!menu_shortcuts_tick(&app, 1635u), "selection waits for all 1536 ms");
     check(menu_shortcuts_tick(&app, 1636u) && activations == 1u &&
@@ -171,6 +172,14 @@ static void test_prefixes_and_visibility(void) {
     menu_shortcuts_tick(&app, 3090u);
     check(app.menu_index == 0u && app.menu_shortcut_pending && activations == 0u,
           "a lone ambiguous 1 resolves on input timeout");
+
+    begin(&app, 0u);
+    press(&app, KEY_0, 10u); press(&app, KEY_1, 20u);
+    check(!app.menu_shortcut_pending && activations == 0u,
+          "leading zero does not remove numeric prefix ambiguity");
+    menu_shortcuts_tick(&app, 3100u);
+    check(app.menu_index == 0u && app.menu_shortcut_pending,
+          "01 also resolves to menu 1 on timeout");
 
     begin(&app, 0u);
     hidden = (UINT64_C(1) << 9) | (UINT64_C(1) << 10);
@@ -216,7 +225,7 @@ static void test_sequences_and_ownership(void) {
     begin(&app, 0u);
     immediate = true;
     event(&app, EVENT_KEY_DOWN, KEY_4, 10u);
-    check(activations == 1u, "stock immediate item does not wait");
+    check(activations == 1u, "clear item flag 0x04 activates without waiting");
     event(&app, EVENT_KEY_HOLD, KEY_4, 810u);
     check(activations == 1u && !app.menu_shortcut_pending,
           "held navigation digit is not reused in the submenu");
@@ -229,17 +238,29 @@ static void test_sequences_and_ownership(void) {
     begin(&app, 0u);
     app.route = APP_ROUTE_SNAKE_MENU;
     menu_shortcuts_begin(&app, 0u);
-    check(press(&app, KEY_1, 10u) && app.route == APP_ROUTE_SNAKE_LEVEL &&
+    check(press(&app, KEY_1, 10u) && app.route == APP_ROUTE_SNAKE_MENU &&
+          app.menu_shortcut_pending && activations == 0u,
+          "game option uses the stock deferred action flag");
+    menu_shortcuts_tick(&app, 1546u);
+    check(app.route == APP_ROUTE_SNAKE_LEVEL &&
           activations == 1u && !app.menu_shortcut_active,
-          "game option acts immediately and leaves the ladder's keys alone");
-    check(!press(&app, KEY_2, 20u), "level ladder retains ordinary digit controls");
+          "game option leaves the ladder's keys alone after activation");
+    check(!press(&app, KEY_2, 1550u), "level ladder retains ordinary digit controls");
 
     begin(&app, 0u);
     app.route = APP_ROUTE_TONES_SETTING;
     menu_shortcuts_begin(&app, 0u);
     press(&app, KEY_3, 10u);
-    check(previews == 1u && activations == 0u,
-          "tone shortcut previews its highlighted row before delayed save");
+    check(previews == 1u && activations == 1u,
+          "tone shortcut updates ordinary preview selection before activation");
+
+    const uint16_t non_digits[] = {KEY_STAR, KEY_HASH};
+    for (unsigned i = 0u; i < sizeof(non_digits) / sizeof(non_digits[0]); i++) {
+        begin(&app, 0u);
+        check(!press(&app, non_digits[i], 10u) && app.menu_keyguard_armed &&
+              !app.menu_shortcut_active && activations == 0u && notices == 0u,
+              "star/hash pass through without stealing the Menu-star chord");
+    }
 
     static const app_route_t interruptions[] = {
         APP_ROUTE_DISPLAY_MESSAGE, APP_ROUTE_INCOMING_CALL, APP_ROUTE_CALL,

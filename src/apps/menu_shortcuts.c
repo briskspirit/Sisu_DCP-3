@@ -164,7 +164,8 @@ static bool select_number(app_t *app, uint32_t now) {
     app->menu_shortcut_deadline_ms = now + SHORTCUT_SELECT_MS;
     app->dirty = true;
     if (app->route == APP_ROUTE_TONES_SETTING) tones_shortcut_selected(app, now);
-    return raw < 32u && (view.immediate_mask & (1u << raw)) != 0u;
+    /* The carry-set branch at 0x00263af8 defers item flag 0x04. */
+    return raw >= 32u || (view.deferred_mask & (1u << raw)) == 0u;
 }
 
 bool menu_shortcuts_tick(app_t *app, uint32_t now) {
@@ -193,7 +194,7 @@ bool menu_shortcuts_handle(app_t *app, const input_event_t *event) {
     if (event->type != EVENT_KEY_DOWN && event->type != EVENT_KEY_HOLD) return false;
     if (event->type == EVENT_KEY_DOWN) app->menu_shortcut_held_key = 0u;
     char digit = key_digit(event->code);
-    if (digit == '\0') {
+    if (digit < '0' || digit > '9') {
         menu_shortcuts_cancel(app);
         return false;
     }

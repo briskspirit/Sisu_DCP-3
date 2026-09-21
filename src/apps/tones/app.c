@@ -233,7 +233,7 @@ bool tones_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
     for (uint8_t i = 0u; i < view->count; i++) {
         if (!tones_root_item_visible(i)) view->hidden_mask |= UINT64_C(1) << i;
     }
-    view->immediate_mask = 1u << 2;
+    view->deferred_mask = 1u << 2;
     return true;
 }
 
