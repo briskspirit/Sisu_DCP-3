@@ -26,6 +26,10 @@
 #define CALL_ACTIVE_CONFIRM_MS 250u
 #define CALL_CONNECT_DELAY_MS 480u
 #define CALL_NO_NETWORK_DELAY_MS 1200u
+/* v6.00 0x2ac102: 2, 16, then 46 beats; timer 0x30 uses 514 * 8 ms. */
+#define REDIAL_BEAT_MS 4112u
+#define REDIAL_ATTEMPT_LIMIT 10u
+#define REDIAL_CUE_MS 256u /* system tone 11's approximately 255 ms stream */
 /* The service does not expose supplementary-command terminal results in the
  * Phase-1 flat status. Bound a failed targeted-release admission so the menu
  * can be retried without allowing rapid duplicate commands. */
@@ -142,6 +146,111 @@ static uint32_t call_arm_stamp(uint32_t stamp_ms);
 static void draw_incoming_stacked(framebuffer_t *fb, const font_t *font,
                                   uint16_t sid, int y0);
 
+static uint32_t redial_delay_ms(uint8_t attempts) {
+    return REDIAL_BEAT_MS * (attempts == 0u ? 2u : attempts < 4u ? 16u : 46u);
+}
+
+static bool redial_number_allowed(const char *number) {
+    if (*number == '+') number++;
+    unsigned digits = 0u;
+    for (; *number != '\0'; number++) {
+        if (*number < '0' || *number > '9') return false;
+        digits++;
+    }
+    /* Short codes, emergency numbers and supplementary-service strings are
+     * never automatic targets. Their manual handling is unchanged. */
+    return digits >= 5u;
+}
+
+static bool redial_setting_enabled(void) {
+    uint8_t value = 0u;
+    return store_setting_get_u8(STORE_SETTING_SETTINGS_AUTOMATIC_REDIAL, &value) ==
+               STORE_STATUS_OK && value == 1u;
+}
+
+static bool redial_result_allowed(modem_call_result_t result) {
+    return result == MODEM_CALL_RESULT_BUSY || result == MODEM_CALL_RESULT_NO_ANSWER;
+}
+
+static bool schedule_redial(app_t *app, const modem_status_t *status, uint32_t now) {
+    if (!app->call_redial_enabled || app->call_redial_attempts >= REDIAL_ATTEMPT_LIMIT ||
+        !redial_result_allowed(status->last_call_result)) return false;
+    /* The log represents the user's one call sequence, not ten duplicate
+     * entries. Keep its id so a later successful attempt updates that record. */
+    if (app->call_record_id != 0u) {
+        (void)store_call_update_result(app->call_record_list, app->call_record_id, 0u,
+                                      call_reason_for_result(status->last_call_result, true));
+    }
+    stop_call_tone();
+    app->call_phase = CALL_PHASE_REDIAL_WAIT;
+    app->call_redial_wait_ms = now;
+    app->call_frame_index = 0u;
+    app->call_result_armed = false;
+    app->dirty = true;
+    return true;
+}
+
+void calls_app_cancel_redial_wait(app_t *app) {
+    if (app->call_phase != CALL_PHASE_REDIAL_WAIT) return;
+    /* No call exists while waiting: do not send a session-wide hangup that
+     * could reject a caller arriving between the UI and modem polls. */
+    if (app->route == APP_ROUTE_CALL) app->route = APP_ROUTE_STANDBY;
+    if (app->display_return_route == APP_ROUTE_CALL) {
+        app->display_return_route = APP_ROUTE_STANDBY;
+    }
+    /* Waiting already stopped call audio. A preempting alarm/notice may have
+     * started its own sound; clearing this session must not stop that owner. */
+    call_session_clear_fields(app);
+    app->dirty = true;
+}
+
+static void start_redial_attempt(app_t *app, uint32_t now) {
+    app->call_redial_token = modem_service_request_redial(app->call_number, app->call_redial_generation);
+    if (app->call_redial_token == 0u) {
+        open_display_sid(app, 0u, 0x99u, "Call not\nallowed", APP_ROUTE_STANDBY, now);
+        call_session_reset(app);
+        return;
+    }
+    app->call_redial_attempts++;
+    app->call_phase = CALL_PHASE_SETUP;
+    app->call_result_armed = true;
+    app->call_started_ms = now;
+    app->call_active_seen_ms = 0u;
+    app->call_frame_index = 0u;
+    app->dirty = true;
+    uint8_t level = profile_get_tone_setting(profile_active_index(), PROFILE_SETTING_WARNING_GAME_TONES);
+    app->call_redial_cue_pending = level != 255u;
+    if (app->call_redial_cue_pending) {
+        if (level > AUDIO_LEVEL_MAX) level = AUDIO_LEVEL_MAX;
+        core1_post_command(CORE1_CMD_AUDIO_SYSTEM_TONE, audio_arg(11u, level));
+    } else {
+        start_call_progress_tone();
+    }
+}
+
+static void render_redial(const app_t *app, framebuffer_t *fb) {
+    /* Stock windows 70/71: animation 2 is the solid 80x4 bar, clipped
+     * by an 8-bit fraction, above the translated FS2 label. */
+    fb_rect(fb, 0, 7, 84, 8, true);
+    const bitmap_t *bar = asset_bitmap(165u);
+    uint32_t beats = redial_delay_ms(app->call_redial_attempts) / REDIAL_BEAT_MS;
+    uint32_t fraction = app->call_frame_index == 0u ? 1u :
+        ((uint32_t)app->call_frame_index * 255u + 255u) / beats;
+    if (fraction > 255u) fraction = 255u;
+    if (bar != NULL) {
+        const uint8_t *data = asset_bitmap_data(bar);
+        unsigned width = bar->width < 80u ? bar->width : 80u;
+        unsigned height = bar->height < 4u ? bar->height : 4u;
+        for (unsigned x = 0u; x < width * fraction / 255u; x++) {
+            for (unsigned y = 0u; y < height; y++) {
+                if ((data[x] & (1u << y)) != 0u) fb_pixel(fb, 2 + x, 9 + y, true);
+            }
+        }
+    }
+    draw_text_block(fb, asset_font(FONT_FS2), ts_or(0x5cu, "Redialling"),
+                    0, 18, FB_WIDTH, 9, 2u);
+}
+
 void calls_app_init(app_t *app) {
     app->last_modem_call_state = MODEM_CALL_IDLE;
     app->last_modem_call_result = MODEM_CALL_RESULT_NONE;
@@ -158,6 +267,10 @@ void render_call(const app_t *app, framebuffer_t *fb) {
     fb_clear(fb, false);
     if (app->call_phase == CALL_PHASE_CONNECTED && app->call_volume_visible) {
         render_call_volume(app, fb);
+        return;
+    }
+    if (app->call_phase == CALL_PHASE_REDIAL_WAIT) {
+        render_redial(app, fb);
         return;
     }
     draw_status(fb, app->signal_bars);
@@ -403,6 +516,18 @@ void render_incoming_call(const app_t *app, framebuffer_t *fb) {
 }
 
 bool handle_call_key(app_t *app, uint16_t key, uint32_t now) {
+    if (app->call_phase == CALL_PHASE_REDIAL_WAIT) {
+        if (key == KEY_C) calls_app_cancel_redial_wait(app);
+        return true;
+    }
+    if (app->call_phase == CALL_PHASE_SETUP && app->call_redial_token != 0u &&
+        (key == KEY_C || key == KEY_NAVI) &&
+        modem_service_cancel_pending_redial(app->call_redial_token)) {
+        app->route = APP_ROUTE_STANDBY;
+        call_session_reset(app);
+        app->dirty = true;
+        return true;
+    }
     if (key == KEY_C) {
         /* v6.00 waiting-call handler 0x00299c0c maps hard C to the same
          * id-scoped reject action (cmd 0x2b) as menu Reject (mask 0x0040).
@@ -702,6 +827,42 @@ bool poll_call_runtime(app_t *app, uint32_t now) {
     app->last_modem_call_state = status.call_state;
     app->last_modem_call_result = status.last_call_result;
     bool call_surface = route_is_call_surface(app);
+    bool redial_sequence = app->call_redial_enabled || app->call_redial_attempts != 0u;
+
+    if (app->call_phase == CALL_PHASE_REDIAL_WAIT) {
+        if (app->route != APP_ROUTE_CALL || !status.sim_ready || !status.network_registered ||
+            status.registration_generation != app->call_redial_generation ||
+            status.call_state != MODEM_CALL_IDLE || call_snapshot.leg_count != 0u ||
+            call_snapshot.pending_incoming_active || call_snapshot.overflow ||
+            !redial_setting_enabled()) {
+            calls_app_cancel_redial_wait(app);
+            call_surface = route_is_call_surface(app);
+        } else {
+            if (time_diff_ms(now, app->call_redial_wait_ms +
+                                  redial_delay_ms(app->call_redial_attempts)) >= 0) {
+                start_redial_attempt(app, now);
+                return true;
+            }
+            return false;
+        }
+    }
+    if (app->call_redial_enabled &&
+        (!call_surface || !status.sim_ready || !status.network_registered ||
+         status.registration_generation != app->call_redial_generation ||
+         status.call_state == MODEM_CALL_ACTIVE ||
+         status.last_call_result == MODEM_CALL_RESULT_CONNECTED || status.ring_active ||
+         status.waiting_call || app->call_secondary_active || app->call_incoming ||
+         call_snapshot.pending_incoming_active || call_snapshot.overflow)) {
+        app->call_redial_enabled = false;
+    }
+    /* A queued retry has no authority over a new incoming call. The service
+     * independently cancels its undispatched command at the UART boundary. */
+    if (redial_sequence && app->call_phase == CALL_PHASE_SETUP &&
+        status.call_state == MODEM_CALL_RINGING) {
+        app->route = APP_ROUTE_STANDBY;
+        call_session_reset(app);
+        call_surface = false;
+    }
 
     /* Single-call network hold: drive the "On hold" indicator from
      * the modem's call-table hold state, not an optimistic UI flag, so it
@@ -1170,6 +1331,7 @@ bool poll_call_runtime(app_t *app, uint32_t now) {
                 app->dirty = true;
                 return true;
             }
+            if (schedule_redial(app, &status, now)) return true;
             finalize_call_record(app, now, call_reason_for_result(status.last_call_result, status.network_registered));
             open_call_result_display(app, status.last_call_result, status.network_registered, now);
             call_session_reset(app);
@@ -1181,6 +1343,11 @@ bool poll_call_runtime(app_t *app, uint32_t now) {
         status.last_call_result != MODEM_CALL_RESULT_CONNECTED &&
         app->call_result_armed &&
         call_surface && app->call_phase == CALL_PHASE_SETUP) {
+        if (app->call_redial_enabled && redial_result_allowed(status.last_call_result)) {
+            /* A provisional bare BUSY is not proof that the old leg is gone. */
+            if (status.call_state != MODEM_CALL_IDLE) return false;
+            if (schedule_redial(app, &status, now)) return true;
+        }
         finalize_call_record(app, now, call_reason_for_result(status.last_call_result, status.network_registered));
         open_call_result_display(app, status.last_call_result, status.network_registered, now);
         call_session_reset(app);
@@ -1194,11 +1361,25 @@ bool poll_call_runtime(app_t *app, uint32_t now) {
 }
 
 bool tick_call(app_t *app, uint32_t now) {
+    if (app->call_phase == CALL_PHASE_REDIAL_WAIT) {
+        uint32_t elapsed = (uint32_t)time_diff_ms(now, app->call_redial_wait_ms);
+        uint32_t beats = redial_delay_ms(app->call_redial_attempts) / REDIAL_BEAT_MS;
+        uint32_t frame = elapsed / REDIAL_BEAT_MS;
+        if (frame > beats) frame = beats;
+        if (app->call_frame_index == frame) return false;
+        app->call_frame_index = (uint8_t)frame;
+        return true;
+    }
     if (app->call_volume_visible && time_diff_ms(now, app->call_volume_until_ms) >= 0) {
         app->call_volume_visible = false;
         return true;
     }
     if (app->call_phase == CALL_PHASE_SETUP) {
+        if (app->call_redial_cue_pending &&
+            time_diff_ms(now, app->call_started_ms + REDIAL_CUE_MS) >= 0) {
+            app->call_redial_cue_pending = false;
+            start_call_progress_tone();
+        }
         uint8_t frame = (uint8_t)((uint32_t)time_diff_ms(now, app->call_started_ms) / CALLING_FRAME_MS) % 4u;
         if (frame != app->call_frame_index) {
             app->call_frame_index = frame;
@@ -1291,6 +1472,11 @@ bool start_outgoing_call(app_t *app, const char *number, const char *name, uint3
     app->call_new_active_ref = status.active_call_id;
     copy_text(app->call_number, sizeof(app->call_number), number);
     copy_text(app->call_name, sizeof(app->call_name), name);
+    app->call_redial_generation = status.registration_generation;
+    app->call_redial_enabled = status.sim_ready && status.network_registered &&
+        status.call_state == MODEM_CALL_IDLE && !status.ring_active &&
+        !status.waiting_call && status.active_call_id == 0u &&
+        redial_number_allowed(number) && redial_setting_enabled();
     if (app->call_name[0] == '\0') {
         /* v6.00 resolves a hand-typed number to its phonebook name at CALL
          * time (the call-register loggers resolve before writing, ROM
@@ -1378,6 +1564,8 @@ bool start_standby_call(app_t *app, uint32_t now) {
 }
 
 static void connect_call(app_t *app, uint32_t now) {
+    app->call_redial_enabled = false;
+    app->call_redial_cue_pending = false;
     stop_call_tone();
     app->route = APP_ROUTE_CALL;
     app->call_phase = CALL_PHASE_CONNECTED;
@@ -2281,6 +2469,12 @@ static void call_session_clear_fields(app_t *app) {
     app->call_held_name[0] = '\0';
     app->call_phase = CALL_PHASE_SETUP;
     app->call_incoming = false;
+    app->call_redial_enabled = false;
+    app->call_redial_attempts = 0u;
+    app->call_redial_generation = 0u;
+    app->call_redial_wait_ms = 0u;
+    app->call_redial_token = 0u;
+    app->call_redial_cue_pending = false;
     app->call_answer_pending = false;
     app->call_incoming_recorded = false;
     app->call_incoming_silenced = false;

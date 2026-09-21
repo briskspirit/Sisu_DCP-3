@@ -222,6 +222,11 @@ typedef struct {
     union {
         uint8_t binary[MODEM_SMS_BINARY_MAX];
         sms_send_options_t sms_options;
+        struct {
+            uint32_t registration_generation;
+            uint32_t incoming_generation;
+            bool automatic;
+        } redial;
     };
     uint16_t binary_len;
     uint16_t dest_port;
@@ -765,6 +770,14 @@ static bool model_queue_call_request(modem_request_t *request, bool front) {
      * ownership/latches; a front request atomically captures the exact evicted
      * token. Thus there is no "allocated but failed to enqueue" rollback window. */
     critical_section_enter_blocking(&s_request_lock);
+    if (request->type == MODEM_REQ_DIAL && request->redial.automatic &&
+        !call_model_redial_available(&s_call_model, 0u)) {
+        critical_section_exit(&s_request_lock);
+        return false;
+    }
+    if (request->type == MODEM_REQ_DIAL) {
+        request->redial.incoming_generation = s_call_model.mt_episode_next;
+    }
     if (!front && s_request_count >= MODEM_REQUEST_QUEUE_LEN) {
         s_request_admission_failures++;
         critical_section_exit(&s_request_lock);
@@ -997,6 +1010,7 @@ static void model_project_publish(void) {
 }
 
 static void model_reset_call_session(uint32_t now_ms) {
+    s_registration_generation++;
     call_model_init(&s_call_model, &g_modem_vendor.call.timing);
     call_model_set_now(&s_call_model, now_ms);
     modem_call_snapshot_t snapshot;
@@ -1450,6 +1464,7 @@ void modem_service_get_status(modem_status_t *out) {
     }
     critical_section_enter_blocking(&s_status_lock);
     *out = s_status;
+    out->registration_generation = s_registration_generation;
     model_apply_projection(out, &s_call_projection);
     out->last_update_ms = s_now_ms;
     critical_section_exit(&s_status_lock);
@@ -2102,10 +2117,17 @@ static void diag_invalidate_all(uint32_t now_ms) {
     critical_section_exit(&s_status_lock);
 }
 
-bool modem_service_request_dial(const char *number) {
+static uint32_t request_dial(const char *number, bool automatic, uint32_t generation) {
     modem_request_t request;
     memset(&request, 0, sizeof(request));
     request.type = MODEM_REQ_DIAL;
+    request.redial.automatic = automatic;
+    request.redial.registration_generation = generation;
+    request.sim_session_generation = s_sim_session_generation;
+    if (automatic && (!s_status.at_ready || !s_status.sim_ready || !s_status.network_registered ||
+                      s_power_off_pending || generation != s_registration_generation)) {
+        return false;
+    }
     copy_bounded(request.number, sizeof(request.number), number);
     if (request.number[0] == '\0') {
         return false;
@@ -2130,7 +2152,46 @@ bool modem_service_request_dial(const char *number) {
     if (!model_queue_call_request(&request, false)) {
         return false;
     }
-    return true;
+    return request.call_token;
+}
+
+bool modem_service_request_dial(const char *number) {
+    return request_dial(number, false, 0u) != 0u;
+}
+
+uint32_t modem_service_request_redial(const char *number, uint32_t registration_generation) {
+    return request_dial(number, true, registration_generation);
+}
+
+bool modem_service_cancel_pending_redial(uint32_t token) {
+    if (token == 0u || !s_request_lock_ready) return false;
+    call_txn_t *txn = model_txn_by_token(token);
+    if (txn == NULL) {
+        /* The dispatch guard may already have retired this retry for a new
+         * incoming call. Do not turn a late C into ATH for that caller. A
+         * connected outgoing leg, however, still needs ordinary teardown. */
+        for (uint8_t i = 0u; i < MODEM_MAX_CALL_LEGS; i++) {
+            if (s_call_model.legs[i].in_use && s_call_model.legs[i].dir != CALL_DIR_MT) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (txn->ever_dispatched) return false;
+    bool owned = s_current_request.type == MODEM_REQ_DIAL &&
+                 s_current_request.redial.automatic && s_current_request.call_token == token;
+    critical_section_enter_blocking(&s_request_lock);
+    for (uint8_t i = 0u; i < s_request_count && !owned; i++) {
+        const modem_request_t *request =
+            &s_request_queue[(s_request_head + i) % MODEM_REQUEST_QUEUE_LEN];
+        owned = request->type == MODEM_REQ_DIAL && request->redial.automatic &&
+                request->call_token == token;
+    }
+    if (owned) model_cancel_token(token);
+    critical_section_exit(&s_request_lock);
+    /* Leave the queue/wake stash to its normal drain. Its token is now stale,
+     * so neither it nor a newly arriving call can cause ATD/ATH here. */
+    return owned;
 }
 
 void modem_service_new_call_abandoned(void) {
@@ -4474,6 +4535,18 @@ static bool send_raw_command_with_token(modem_at_kind_t kind, const char *cmd,
                                         uint32_t timeout_ms, uint32_t token, uint32_t now_ms) {
     if (token != 0u) {
         call_model_set_now(&s_call_model, now_ms);
+        if (token == s_current_request.call_token && s_current_request.type == MODEM_REQ_DIAL &&
+            s_current_request.redial.automatic &&
+            (!s_status.at_ready || !s_status.sim_ready || !s_status.network_registered || s_power_off_pending ||
+             s_current_request.sim_session_generation != s_sim_session_generation ||
+             s_current_request.redial.registration_generation != s_registration_generation ||
+             s_current_request.redial.incoming_generation != s_call_model.mt_episode_next ||
+             !call_model_redial_available(&s_call_model, token))) {
+            LOGI("modem", "cancelled automatic redial before UART");
+            model_cancel_token(token);
+            finish_operation(true);
+            return false;
+        }
         call_dispatch_guard_t guard = call_model_txn_dispatch_guard(&s_call_model, token);
         if (guard != CALL_DISPATCH_SEND) {
             LOGI("modem", "suppressed stale call command token=%lu verdict=%u",

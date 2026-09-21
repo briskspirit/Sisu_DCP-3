@@ -348,6 +348,27 @@ bool call_model_background_work_blocked(const call_model_t *m) {
     return false;
 }
 
+bool call_model_redial_available(const call_model_t *m, uint32_t own_token) {
+    if (m == NULL || m->overflow || m->pending_mt.active || m->release_count != 0u) {
+        return false;
+    }
+    for (unsigned i = 0u; i < MODEM_MAX_CALL_LEGS; i++) {
+        if (m->legs[i].in_use) return false;
+    }
+    bool found = own_token == 0u;
+    for (unsigned i = 0u; i < MODEM_MAX_CALL_TRANSACTIONS; i++) {
+        const call_txn_t *txn = &m->txns[i];
+        if (!txn->in_use) continue;
+        if (own_token == 0u || txn->token != own_token ||
+            txn->kind != CALL_TXN_DIAL || txn->state != TXN_PENDING ||
+            txn->ever_dispatched || txn->is_tombstone) {
+            return false;
+        }
+        found = true;
+    }
+    return found;
+}
+
 bool call_model_session_active(const call_model_t *m) {
     if (m == NULL) return false;
     if (m->pending_mt.active) return true;

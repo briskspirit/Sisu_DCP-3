@@ -238,7 +238,35 @@ static void test_hangup_tracks_pre_id_dial_by_token(void) {
             "an empty-session HANGUP never absorbs a later unrelated DIAL"); }
 }
 
+static void test_redial_requires_quiescent_model(void) {
+    call_model_t m; tinit(&m); call_model_set_now(&m, 1000u);
+    check(call_model_redial_available(&m, 0u), "idle model permits a retry");
+    check(!call_model_redial_available(&m, 99u), "unknown retry token is rejected");
+    uint32_t dial = call_model_request(&m, CALL_TXN_DIAL, 0u, false);
+    check(dial != 0u && call_model_redial_available(&m, dial),
+          "only the retry's own pending transaction is allowed at dispatch");
+    check(!call_model_redial_available(&m, 0u), "another dial cannot supersede pending setup");
+    call_model_txn_dispatched(&m, dial);
+    check(!call_model_redial_available(&m, dial), "already-dispatched dial cannot be resent");
+    call_model_txn_cancel(&m, dial);
+    check(!call_model_redial_available(&m, 0u), "bindable cancelled setup blocks a retry");
+
+    tinit(&m);
+    call_model_on_ring(&m);
+    check(!call_model_redial_available(&m, 0u), "pre-id incoming call blocks a retry");
+    tinit(&m);
+    call_model_on_incoming_diverted(&m);
+    check(!call_model_redial_available(&m, 0u), "incoming metadata also blocks a retry");
+    tinit(&m);
+    call_model_on_event(&m, 1u, true, CALL_LEG_ACTIVE, CALL_DIR_MO);
+    check(!call_model_redial_available(&m, 0u), "active call blocks a retry");
+    tinit(&m);
+    call_model_on_event(&m, 1u, true, CALL_LEG_HELD, CALL_DIR_MO);
+    check(!call_model_redial_available(&m, 0u), "held call blocks a retry");
+}
+
 int main(void) {
+    test_redial_requires_quiescent_model();
     test_wait_reject_guard_stale_across_episodes();
     test_wait_reject_guard_live_episode_sends();
     test_hold_guard_rechecks_sole_leg_at_dispatch();

@@ -412,6 +412,12 @@ typedef struct {
     char call_held_number[MODEM_PHONE_MAX + 1u];
     char call_held_name[PHONEBOOK_NAME_MAX + 1u];
     uint8_t call_phase;
+    bool call_redial_enabled;
+    uint8_t call_redial_attempts;
+    uint32_t call_redial_generation;
+    uint32_t call_redial_wait_ms;
+    uint32_t call_redial_token;
+    bool call_redial_cue_pending;
     bool call_incoming;
     bool call_answer_pending;
     bool call_incoming_recorded;

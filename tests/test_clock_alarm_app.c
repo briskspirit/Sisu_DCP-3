@@ -11,6 +11,7 @@
 
 #include "apps/clock_alarm_logic.h"
 #include "apps/clock_app.h"
+#include "apps/calls_app.h"
 #include "apps/dialogs_app.h"
 #include "apps/power_app.h"
 #include "apps/powerup_app.h"
@@ -369,6 +370,32 @@ static void test_auto_snooze_and_call_suppression(void) {
           "under-call auto-snooze preserves the call route");
 }
 
+static void test_redial_wait_does_not_suppress_alarm(void) {
+    reset_fixture();
+    app_t app;
+    memset(&app, 0, sizeof(app));
+    app.route = APP_ROUTE_CALL;
+    app.call_phase = CALL_PHASE_REDIAL_WAIT;
+    arm_due(6u, 31u);
+
+    check(poll_clock_alarm(&app, 25000u), "alarm interrupts an idle redial wait");
+    expect_alarm_started(&app, 25000u, "Alarm!\n06:31");
+
+    const uint8_t phases[] = {CALL_PHASE_SETUP, CALL_PHASE_CONNECTED};
+    for (size_t i = 0u; i < sizeof(phases) / sizeof(phases[0]); i++) {
+        reset_fixture();
+        memset(&app, 0, sizeof(app));
+        app.route = APP_ROUTE_CALL;
+        app.call_phase = phases[i];
+        arm_due(6u, 31u);
+        (void)poll_clock_alarm(&app, 25000u);
+        check(app.route == APP_ROUTE_CALL &&
+                  app.clock_alarm_mode == CLOCK_ALARM_MODE_IDLE && s_alarm_due,
+              "alarm still yields to outgoing setup and connected calls");
+        check(s_post_count == 0u, "suppressed alarm cannot replace call audio");
+    }
+}
+
 static void test_power_off_wake_and_activate_prompt(void) {
     reset_fixture();
     app_t app;
@@ -439,6 +466,7 @@ static void test_snooze_stop_note(void) {
 int main(void) {
     test_fire_snooze_refire_and_dismiss();
     test_auto_snooze_and_call_suppression();
+    test_redial_wait_does_not_suppress_alarm();
     test_power_off_wake_and_activate_prompt();
     test_snooze_stop_note();
 

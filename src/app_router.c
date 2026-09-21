@@ -74,6 +74,7 @@ static bool dispatch_event(app_t *app, const input_event_t *event) {
     uint16_t key = event->code;
     uint32_t now = event->when_ms;
     if (key == KEY_POWER) {
+        calls_app_cancel_redial_wait(app);
         return handle_power_key(app, event);
     }
 

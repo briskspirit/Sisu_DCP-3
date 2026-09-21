@@ -233,6 +233,9 @@ void call_model_clcc_error(call_model_t *m);
  * leg and no pre-id incoming episode. This is the safe topology for a vendor
  * hold toggle whose wire command can otherwise answer/swap another call. */
 bool call_model_hold_toggle_available(const call_model_t *m);
+/* Automatic retries may not supersede any call or unresolved teardown. At
+ * dispatch, own_token permits only the retry's still-pending DIAL itself. */
+bool call_model_redial_available(const call_model_t *m, uint32_t own_token);
 uint32_t call_model_request(call_model_t *m, call_txn_kind_t kind,
                             uint8_t target_id, bool second_mo);   /* 0 = rejected (no slot) */
 void call_model_txn_dispatched(call_model_t *m, uint32_t token);  /* AT actually written */

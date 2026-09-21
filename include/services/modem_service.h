@@ -45,6 +45,8 @@ typedef struct {
     bool audio_init_ok;
     bool sms_init_ok;
     bool network_registered;
+    /* Changes when registration/SIM/modem continuity is invalidated. */
+    uint32_t registration_generation;
     bool ring_active;
     bool waiting_call;
     /* The sole active call is on NETWORK hold: uplink is muted by the
@@ -191,6 +193,11 @@ void modem_service_set_signal_sampling(bool display_active, uint32_t now_ms);
  * only (codec I2C). */
 void modem_service_accessory_changed(bool headset_inserted);
 bool modem_service_request_dial(const char *number);
+/* A single automatic attempt, guarded again at the actual UART write. */
+uint32_t modem_service_request_redial(const char *number, uint32_t registration_generation);
+/* Cancel only this retry before dispatch; true also when it is already gone
+ * and no outgoing leg remains. Never hangs up a live/foreign leg. */
+bool modem_service_cancel_pending_redial(uint32_t token);
 /* The app has GIVEN UP on a New-call (a 2nd outgoing call dialled while already in a
  * call) and reverted its UI to the original call. The service authoritatively RESOLVES
  * that abandoned 2nd leg. If it is still tracked, it queues a generation-qualified

@@ -9,6 +9,7 @@
 typedef enum {
     CALL_PHASE_SETUP = 0,
     CALL_PHASE_CONNECTED,
+    CALL_PHASE_REDIAL_WAIT,
 } call_phase_t;
 
 void calls_app_init(app_t *app);
@@ -57,5 +58,6 @@ void call_newcall_restore_held(app_t *app, const call_newcall_preserve_t *snap);
  * snapshot must survive -- both the tone-stop linkage and the field set --
  * not a mirror of it. */
 void call_session_reset(app_t *app);
+void calls_app_cancel_redial_wait(app_t *app);
 
 #endif

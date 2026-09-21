@@ -3,6 +3,7 @@
 
 #include "audio/audio_levels.h"
 #include "apps/clock_alarm_logic.h"
+#include "apps/calls_app.h"
 #include "apps/dialogs_app.h"
 #include "apps/power_app.h"
 #include "apps/powerup_app.h"
@@ -171,7 +172,7 @@ bool handle_clock_alarm_key(app_t *app, uint16_t key, uint32_t now) {
  * suppressed, never hijacked. */
 static bool alarm_route_is_call_surface(const app_t *app) {
     return app->route == APP_ROUTE_INCOMING_CALL ||
-           app->route == APP_ROUTE_CALL ||
+           (app->route == APP_ROUTE_CALL && app->call_phase != CALL_PHASE_REDIAL_WAIT) ||
            app->route == APP_ROUTE_CALL_OPTIONS;
 }
 

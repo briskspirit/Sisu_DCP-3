@@ -843,6 +843,7 @@ run test_call_waiting_app    src/apps/call_waiting_app.c
 run test_call_options_logic  src/apps/call_options_logic.c
 run test_call_newcall_preserve src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # New-call snapshot/restore; whole app compiled, unreachable code stripped
 run test_call_waiting_handoff src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # generation-qualified remote-release handoff
+run test_call_redial_render src/apps/calls_app.c src/ui/ui.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c src/ui/status_chrome.c src/services/strings.c "$GENERATED_SRC_DIR/assets_data.c" "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
 run test_phonebook_speed_call src/apps/phonebook_app.c src/services/feature_gates.c src/ui/menu_visible.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c" src/ui/framebuffer.c "${DEAD_CODE_FLAGS[@]}"
 run test_profiles_app       src/apps/profiles_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_settings_restore   src/apps/settings_app.c "${DEAD_CODE_FLAGS[@]}"

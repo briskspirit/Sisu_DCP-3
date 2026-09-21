@@ -5652,6 +5652,88 @@ static void test_call_forward_queue_cancellation(void) {
           "ordinary session cancellation still owns an in-flight query");
 }
 
+static void test_automatic_redial_dispatch(void) {
+    const char *dial = "AT+CLIR=1;D15551234567;";
+    for (unsigned scenario = 0u; scenario < 6u; scenario++) {
+        begin_telit(true);
+        check(boot_until_ready(30000u), "redial fixture boots");
+        mh_feed("+CEREG: 1"); mh_settle();
+        uint32_t generation = mh_status().registration_generation;
+        s_mh_own_number = 2u;
+        check(!modem_service_request_redial("15551234567", generation - 1u),
+              "old registration cannot queue a retry");
+        s_hold_final_command = "AT+CSQ";
+        check(modem_service_request_debug_at("AT+CSQ"), "hold redial queue head");
+        mh_settle();
+        uint32_t token = modem_service_request_redial("15551234567", generation);
+        check(token != 0u, "queue one guarded retry");
+        check(!modem_service_request_redial("15551234567", generation), "no duplicate queued retry");
+        s_mh_own_number = 1u;
+        if (scenario == 1u) mh_feed("RING");
+        if (scenario == 2u) mh_feed("#QSS: 0");
+        if (scenario == 3u) { mh_feed("+CEREG: 0"); mh_feed("+CEREG: 1"); }
+        if (scenario == 4u) modem_service_power_off();
+        if (scenario == 5u) {
+            mh_feed("RING");
+            check(modem_service_cancel_pending_redial(token), "C cancels only the queued retry token");
+        }
+        if (scenario == 0u) {
+            mh_rx_push("+CMT: \"15551230000\",\"\",\"20260916210000\",129,4098,0,8,2");
+            mh_rx_push("OK");
+            mh_settle();
+            check(mh_status().sms_received_count == 1u,
+                  "incoming SMS body remains data while redial is queued");
+        }
+        s_hold_final_command = dial;
+        mh_feed("OK"); mh_settle();
+        check(mh_tx_count_exact(dial) == (scenario == 0u ? 1u : 0u),
+              "only uninterrupted idle retry reaches UART with its saved caller ID policy");
+        if (scenario == 1u || scenario == 5u) {
+            check(mh_status().ring_active && mh_tx_count_exact("ATH") == 0u,
+                  "suppressing redial neither hangs up nor consumes the incoming call");
+            check(modem_service_cancel_pending_redial(token),
+                  "late C treats an already-retired retry as gone, not a request to hang up the new caller");
+        }
+    }
+
+    const char *failures[] = {"BUSY", "NO ANSWER"};
+    for (unsigned i = 0u; i < 2u; i++) {
+        begin_telit(true);
+        check(boot_until_ready(30000u), "failed-call redial fixture boots");
+        mh_feed("+CEREG: 1"); mh_settle();
+        uint32_t generation = mh_status().registration_generation;
+        const char *command = "AT+CLIR=0;D15551234567;";
+        s_hold_final_command = command;
+        check(modem_service_request_dial("15551234567"), "manual attempt starts before retry");
+        mh_settle();
+        mh_feed(failures[i]); mh_settle();
+        mh_advance(8224u); mh_settle();
+        check(mh_status().call_state == MODEM_CALL_IDLE &&
+                  mh_status().last_call_result == (i == 0u ? MODEM_CALL_RESULT_BUSY :
+                                                           MODEM_CALL_RESULT_NO_ANSWER),
+              "failed manual attempt reaches authoritative idle with its explicit cause");
+        check(modem_service_request_redial("15551234567", generation) != 0u,
+              "retired manual attempt does not block its automatic retry");
+        mh_settle();
+        check(mh_tx_count_exact(command) == 2u &&
+                  mh_status().last_call_result == MODEM_CALL_RESULT_NONE,
+              "retry transmits once and cannot inherit the preceding failure latch");
+    }
+
+    begin_telit(true);
+    check(boot_until_ready(30000u), "deferred redial fixture boots");
+    mh_feed("+CEREG: 1"); mh_settle(); settle_dtr_sleep();
+    uint32_t generation = mh_status().registration_generation;
+    s_mh_dtr_wake_works = false;
+    check(modem_service_request_redial("15551234567", generation), "admit wake-deferred redial");
+    mh_settle();
+    check(service_probe().deferred_command_valid, "redial waits for CTS");
+    mh_feed("RING"); s_mh_cts_asserted = true; mh_settle();
+    check(mh_tx_count_exact("AT+CLIR=0;D15551234567;") == 0u &&
+              mh_status().ring_active && mh_tx_count_exact("ATH") == 0u,
+          "incoming call wins even after the retry entered the wake stash");
+}
+
 static void test_caller_id_dial_policy(void) {
     static const char *commands[] = {
         "AT+CLIR=0;D15551234567;",
@@ -7440,6 +7522,7 @@ int main(void) {
     test_supplementary_refresh_recovery();
     test_call_forward_queue_cancellation();
     test_caller_id_dial_policy();
+    test_automatic_redial_dispatch();
     test_call_forward_sim_isolation();
     test_newer_call_forward_result_survives_old_final();
     test_ringtone_transport_and_recovery();

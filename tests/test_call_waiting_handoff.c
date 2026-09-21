@@ -33,6 +33,15 @@ static unsigned s_hold_requests;
 static unsigned s_hangup_requests;
 static unsigned s_waiting_reject_requests;
 static bool s_release_active_pending;
+static uint8_t s_redial_setting;
+static bool s_redial_setting_readable = true;
+static bool s_dial_accepted = true;
+static unsigned s_manual_dials, s_auto_dials, s_dialled_writes;
+static uint16_t s_display_sid;
+static uint32_t s_retry_generation;
+static char s_retry_number[MODEM_PHONE_MAX + 1u];
+static bool s_retry_cancelled;
+static unsigned s_audio_stops, s_redial_cues, s_ringback_starts;
 
 static void check(bool condition, const char *message) {
     if (!condition) {
@@ -63,8 +72,9 @@ void modem_service_get_call_snapshot(modem_call_snapshot_t *out) {
 }
 
 void core1_post_command(core1_cmd_t cmd, uint16_t arg) {
-    (void)cmd;
-    (void)arg;
+    if (cmd == CORE1_CMD_AUDIO_STOP) s_audio_stops++;
+    if (cmd == CORE1_CMD_AUDIO_SYSTEM_TONE && (arg & 0xffu) == 11u) s_redial_cues++;
+    if (cmd == CORE1_CMD_AUDIO_SYSTEM_TONE_QUIET_LOOP) s_ringback_starts++;
 }
 
 void core1_post_audio_composer_packed(const uint8_t *data, uint16_t len,
@@ -100,7 +110,8 @@ uint8_t profile_active_index(void) { return 0u; }
 uint8_t profile_get_tone_setting(uint8_t profile_index,
                                  profile_setting_kind_t kind) {
     (void)profile_index;
-    return kind == PROFILE_SETTING_INCOMING_ALERT ? 4u : 0u;
+    if (kind == PROFILE_SETTING_INCOMING_ALERT) return 4u;
+    return kind == PROFILE_SETTING_RINGING_VOLUME ? 3u : 0u;
 }
 
 const ringtone_t *ringtone_by_value(uint8_t value) {
@@ -472,7 +483,198 @@ static void test_ambiguous_episode_defers_missed_decision(void) {
           "ambiguous identity cannot invent a missed call");
 }
 
+static void redial_fixture(app_t *app, uint32_t now) {
+    memset(app, 0, sizeof(*app));
+    memset(&s_status, 0, sizeof(s_status));
+    memset(&s_call_snapshot, 0, sizeof(s_call_snapshot));
+    reset_observations();
+    s_now_ms = now;
+    s_status.sim_ready = s_status.network_registered = true;
+    s_status.registration_generation = 7u;
+    s_redial_setting = 1u;
+    s_redial_setting_readable = s_dial_accepted = true;
+    s_manual_dials = s_auto_dials = s_dialled_writes = 0u;
+    s_display_sid = 0u;
+    s_retry_cancelled = false;
+    s_audio_stops = s_redial_cues = s_ringback_starts = 0u;
+    app->route = APP_ROUTE_STANDBY;
+}
+
+static void redial_start(app_t *app, const char *number) {
+    check(start_outgoing_call(app, number, "Name", s_now_ms, APP_ROUTE_STANDBY),
+          "manual call starts through the ordinary path");
+    (void)poll_call_runtime(app, ++s_now_ms);
+}
+
+static void redial_fail(app_t *app, modem_call_result_t result) {
+    s_status.call_state = MODEM_CALL_IDLE;
+    s_status.last_call_result = result;
+    (void)poll_call_runtime(app, ++s_now_ms);
+}
+
+static void test_redial_boundaries_and_log(void) {
+    app_t app;
+    redial_fixture(&app, UINT32_MAX - 4000u);
+    redial_start(&app, "+15551234567");
+    check(app.call_redial_enabled, "On enables an ordinary single-call retry sequence");
+    for (unsigned attempt = 0u; attempt < 10u; attempt++) {
+        redial_fail(&app, attempt & 1u ? MODEM_CALL_RESULT_NO_ANSWER : MODEM_CALL_RESULT_BUSY);
+        check(app.call_phase == CALL_PHASE_REDIAL_WAIT && app.call_record_id == 99u,
+              "failure starts waiting without losing the original log record");
+        uint32_t wait = (attempt == 0u ? 2u : attempt < 4u ? 16u : 46u) * 4112u;
+        s_now_ms += wait - 1u;
+        (void)poll_call_runtime(&app, s_now_ms);
+        check(s_auto_dials == attempt, "retry never starts before its ROM-derived deadline");
+        (void)poll_call_runtime(&app, ++s_now_ms);
+        check(s_auto_dials == attempt + 1u && app.call_phase == CALL_PHASE_SETUP,
+              "one retry starts exactly at the deadline, including clock wrap");
+        check(app.call_redial_attempts == attempt + 1u && s_retry_generation == 7u &&
+                  strcmp(s_retry_number, "+15551234567") == 0,
+              "retry preserves its bounded count, subscription generation and number");
+        (void)poll_call_runtime(&app, ++s_now_ms);
+    }
+    redial_fail(&app, MODEM_CALL_RESULT_BUSY);
+    check(app.call_phase != CALL_PHASE_REDIAL_WAIT && !app.call_redial_enabled &&
+              s_manual_dials == 1u && s_auto_dials == 10u && s_dialled_writes == 1u,
+          "ten additional attempts is a hard limit with one dialled-log entry");
+    (void)poll_call_runtime(&app, s_now_ms + 600000u);
+    check(s_auto_dials == 10u, "exhausted sequence cannot restart from a sticky BUSY latch");
+}
+
+static void test_redial_failure_policy(void) {
+    const char *numbers[] = {"911", "112", "999", "*21*15550000000#", "123p45", "+112"};
+    app_t app;
+    for (unsigned i = 0u; i < sizeof(numbers) / sizeof(numbers[0]); i++) {
+        redial_fixture(&app, 1000u);
+        redial_start(&app, numbers[i]);
+        check(!app.call_redial_enabled, "short and service numbers are never automatic targets");
+        redial_fail(&app, MODEM_CALL_RESULT_BUSY);
+        check(app.call_phase != CALL_PHASE_REDIAL_WAIT, "short-code failure does not schedule retry");
+    }
+    for (unsigned i = 0u; i < 7u; i++) {
+        redial_fixture(&app, 1000u);
+        if (i == 0u) s_redial_setting = 0u;
+        if (i == 1u) s_redial_setting_readable = false;
+        if (i == 2u) s_redial_setting = 2u;
+        if (i == 3u) s_status.sim_ready = false;
+        if (i == 4u) s_status.network_registered = false;
+        if (i == 5u) { s_status.call_state = MODEM_CALL_ACTIVE; s_status.active_call_id = 1u; }
+        if (i == 6u) s_dial_accepted = false;
+        redial_start(&app, "15551234567");
+        check(!app.call_redial_enabled, "unavailable, disabled, invalid or multi-call setup cannot arm retries");
+    }
+    const modem_call_result_t results[] = {MODEM_CALL_RESULT_NO_CARRIER,
+                                         MODEM_CALL_RESULT_NO_DIALTONE};
+    for (unsigned i = 0u; i < sizeof(results) / sizeof(results[0]); i++) {
+        redial_fixture(&app, 1000u); redial_start(&app, "15551234567");
+        redial_fail(&app, results[i]);
+        check(app.call_phase != CALL_PHASE_REDIAL_WAIT, "ambiguous failures keep ordinary result handling");
+    }
+    redial_fixture(&app, 1000u); redial_start(&app, "15551234567");
+    s_status.last_call_result = MODEM_CALL_RESULT_BUSY;
+    (void)poll_call_runtime(&app, ++s_now_ms);
+    check(app.call_phase == CALL_PHASE_SETUP && s_auto_dials == 0u,
+          "provisional BUSY while still dialing cannot schedule a retry");
+    redial_fail(&app, MODEM_CALL_RESULT_BUSY);
+    check(app.call_phase == CALL_PHASE_REDIAL_WAIT, "authoritative idle permits scheduling");
+}
+
+static void test_redial_cancellation_and_preemption(void) {
+    app_t app;
+    for (unsigned i = 0u; i < 9u; i++) {
+        redial_fixture(&app, 1000u); redial_start(&app, "15551234567");
+        redial_fail(&app, MODEM_CALL_RESULT_BUSY);
+        if (i == 0u) (void)handle_call_key(&app, KEY_C, s_now_ms);
+        if (i == 1u) calls_app_cancel_redial_wait(&app); /* Power-key path */
+        if (i == 2u) s_status.sim_ready = false;
+        if (i == 3u) s_status.network_registered = false;
+        if (i == 4u) s_status.registration_generation++;
+        if (i == 5u) s_call_snapshot.overflow = true;
+        if (i == 6u) {
+            app.route = APP_ROUTE_DISPLAY_MESSAGE;
+            app.display_return_route = APP_ROUTE_CALL;
+        }
+        if (i == 7u) s_redial_setting = 0u;
+        if (i == 8u) app.route = APP_ROUTE_CLOCK_ALARM;
+        unsigned stops_before = s_audio_stops;
+        (void)poll_call_runtime(&app, s_now_ms + 9000u);
+        check(!app.call_redial_enabled && app.call_phase != CALL_PHASE_REDIAL_WAIT &&
+                  s_auto_dials == 0u && s_hangup_requests == 0u,
+              "cancel/preemption invalidates wait without dialing or hanging up another call");
+        if (i == 6u) check(app.route == APP_ROUTE_DISPLAY_MESSAGE &&
+                              app.display_return_route == APP_ROUTE_STANDBY,
+                          "preempting dialog keeps ownership and cannot return to stale redial UI");
+        if (i == 8u) check(app.route == APP_ROUTE_CLOCK_ALARM && s_audio_stops == stops_before,
+                          "silent wait cleanup cannot stop the preempting alarm's audio");
+        s_status.sim_ready = s_status.network_registered = true;
+        (void)poll_call_runtime(&app, s_now_ms + 600000u);
+        check(s_auto_dials == 0u, "later recovery cannot resurrect a cancelled sequence");
+    }
+    for (unsigned queued = 0u; queued < 2u; queued++) {
+        redial_fixture(&app, 1000u); redial_start(&app, "15551234567");
+        redial_fail(&app, MODEM_CALL_RESULT_BUSY);
+        (void)handle_call_key(&app, KEY_NAVI, s_now_ms);
+        check(app.call_phase == CALL_PHASE_REDIAL_WAIT, "blank Navi has no action in stock retry screen");
+        if (queued != 0u) (void)poll_call_runtime(&app, s_now_ms += 8224u);
+        s_status.call_state = MODEM_CALL_RINGING;
+        s_status.ring_active = true;
+        s_call_snapshot.pending_incoming_active = true;
+        s_call_snapshot.pending_incoming_alert_observed = true;
+        copy_text(s_status.incoming_number, sizeof(s_status.incoming_number), "15559876543");
+        (void)poll_call_runtime(&app, ++s_now_ms);
+        check(app.route == APP_ROUTE_INCOMING_CALL && !app.call_redial_enabled &&
+                  strcmp(app.call_number, "15559876543") == 0 && s_hangup_requests == 0u,
+              "incoming caller owns UI both during wait and after retry queue admission");
+    }
+}
+
+static void test_redial_success_and_rejection(void) {
+    app_t app;
+    redial_fixture(&app, 1000u); redial_start(&app, "15551234567");
+    redial_fail(&app, MODEM_CALL_RESULT_BUSY);
+    (void)poll_call_runtime(&app, s_now_ms += 8224u);
+    check(s_redial_cues == 1u, "retry plays stock system tone 11");
+    unsigned ringback_before = s_ringback_starts;
+    (void)tick_call(&app, s_now_ms + 255u);
+    check(s_ringback_starts == ringback_before, "ringback cannot truncate the redial cue");
+    (void)tick_call(&app, s_now_ms + 256u);
+    check(s_ringback_starts == ringback_before + 1u, "ordinary ringback follows the finite cue");
+    s_retry_cancelled = true;
+    (void)handle_call_key(&app, KEY_C, s_now_ms);
+    check(app.route == APP_ROUTE_STANDBY && s_hangup_requests == 0u,
+          "C cancels an undispatched retry by token without a session hangup");
+    redial_fixture(&app, 1000u); redial_start(&app, "15551234567");
+    redial_fail(&app, MODEM_CALL_RESULT_BUSY);
+    s_dial_accepted = false;
+    (void)poll_call_runtime(&app, s_now_ms + 8224u);
+    check(s_auto_dials == 0u && s_display_sid == 0x99u && !app.call_redial_enabled,
+          "admission rejection terminates with the existing failure dialog");
+
+    for (unsigned brief = 0u; brief < 2u; brief++) {
+        redial_fixture(&app, 1000u); redial_start(&app, "15551234567");
+        redial_fail(&app, MODEM_CALL_RESULT_NO_ANSWER);
+        (void)poll_call_runtime(&app, s_now_ms += 8224u);
+        s_status.call_state = MODEM_CALL_ACTIVE;
+        s_status.last_call_result = MODEM_CALL_RESULT_CONNECTED;
+        s_status.active_call_id = 1u;
+        (void)poll_call_runtime(&app, ++s_now_ms);
+        check(!app.call_redial_enabled, "first active evidence disarms retries before confirmation delay");
+        if (!brief) {
+            (void)poll_call_runtime(&app, s_now_ms += 250u);
+            check(app.call_phase == CALL_PHASE_CONNECTED && s_dialled_writes == 1u,
+                  "successful retry uses normal connected-call UI and original log");
+        }
+        redial_fail(&app, MODEM_CALL_RESULT_BUSY);
+        check(app.call_phase != CALL_PHASE_REDIAL_WAIT && s_auto_dials == 1u,
+              "release after even a brief connection never retries");
+    }
+}
+
 int main(void) {
+    test_redial_boundaries_and_log();
+    test_redial_failure_policy();
+    test_redial_cancellation_and_preemption();
+    test_redial_success_and_rejection();
     test_remote_a_release_leaves_b_ringing();
     test_remote_a_release_promotes_b_active();
     test_waiting_b_disappears_while_a_survives();
@@ -503,6 +705,7 @@ store_status_t store_call_add_now(store_call_list_t list, const char *number,
     (void)reason;
     if (list == STORE_CALL_LIST_MISSED) s_missed_writes++;
     if (list == STORE_CALL_LIST_RECEIVED) s_received_writes++;
+    if (list == STORE_CALL_LIST_DIALLED) s_dialled_writes++;
     if (out_record_id != NULL) *out_record_id = 99u;
     return STORE_STATUS_OK;
 }
@@ -543,6 +746,37 @@ store_status_t store_setting_set_u8(store_setting_key_t key, uint8_t value) {
     return STORE_STATUS_OK;
 }
 
+store_status_t store_setting_get_u8(store_setting_key_t key, uint8_t *value) {
+    if (key == STORE_SETTING_SETTINGS_AUTOMATIC_REDIAL) {
+        if (!s_redial_setting_readable) return STORE_STATUS_NOT_FOUND;
+        *value = s_redial_setting;
+    } else *value = 0u;
+    return STORE_STATUS_OK;
+}
+
+bool modem_service_request_dial(const char *number) {
+    (void)number;
+    if (!s_dial_accepted) return false;
+    s_manual_dials++;
+    s_status.call_state = MODEM_CALL_DIALING;
+    s_status.last_call_result = MODEM_CALL_RESULT_NONE;
+    return true;
+}
+
+uint32_t modem_service_request_redial(const char *number, uint32_t generation) {
+    if (!s_dial_accepted) return false;
+    s_auto_dials++;
+    s_retry_generation = generation;
+    copy_text(s_retry_number, sizeof(s_retry_number), number);
+    s_status.call_state = MODEM_CALL_DIALING;
+    s_status.last_call_result = MODEM_CALL_RESULT_NONE;
+    return 100u + s_auto_dials;
+}
+
+bool modem_service_cancel_pending_redial(uint32_t token) {
+    return token != 0u && s_retry_cancelled;
+}
+
 bool phonebook_service_find_name(const char *number, char *out,
                                        size_t cap) {
     (void)number;
@@ -580,7 +814,9 @@ void modem_service_new_call_abandoned(void) {}
 void open_display_sid(app_t *app, uint8_t record_id, uint16_t sid,
                       const char *fallback, app_route_t return_route,
                       uint32_t now) {
-    (void)app; (void)record_id; (void)sid; (void)fallback;
+    (void)record_id; (void)fallback;
+    s_display_sid = sid;
+    app->route = APP_ROUTE_DISPLAY_MESSAGE;
     (void)return_route; (void)now;
 }
 
