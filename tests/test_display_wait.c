@@ -35,6 +35,9 @@ void messages_picture_confirm_save(app_t *app, bool save, uint32_t now) {
     s_picture_confirm_calls++;
     s_picture_confirm_save = save;
 }
+void messages_confirm_report_erase(app_t *app, bool erase, uint32_t now) {
+    (void)app; (void)erase; (void)now;
+}
 
 static void check(bool condition, const char *message) {
     if (!condition) {

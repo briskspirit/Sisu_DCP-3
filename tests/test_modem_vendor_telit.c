@@ -263,7 +263,9 @@ static void test_production_descriptor(void) {
                       MODEM_SETTING_RUNTIME);
     check_init_policy("AT+CSDH=1", MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION,
                       MODEM_SETTING_PROFILE);
-    check_init_policy("AT+CNMI=2,2,0,0,0", MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION,
+    check_init_policy("AT+CSMS=0", MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION,
+                      MODEM_SETTING_RUNTIME);
+    check_init_policy("AT+CNMI=2,2,0,1,0", MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION,
                       MODEM_SETTING_PROFILE);
     check_init_policy("AT+CLIP=1", MODEM_INIT_PREREQ_SIM_READY,
                       MODEM_SETTING_PROFILE);
@@ -625,19 +627,24 @@ static void test_call_builders(void) {
 
 static void test_init_table_direct_sms_delivery(void) {
     bool saw_csdh = false;
+    bool saw_modem_ack = false;
     bool saw_cnmi_direct = false;
     bool saw_cnmi_store = false;
     for (size_t i = 0u; i < TELIT_INIT_STEP_COUNT; i++) {
         const char *cmd = TELIT_INIT_STEPS[i].cmd;
         if (strcmp(cmd, "AT+CSDH=1") == 0) {
             saw_csdh = TELIT_INIT_STEPS[i].persistence == MODEM_SETTING_PROFILE;
-        } else if (strcmp(cmd, "AT+CNMI=2,2,0,0,0") == 0) {
+        } else if (strcmp(cmd, "AT+CSMS=0") == 0) {
+            saw_modem_ack = !TELIT_INIT_STEPS[i].recoverable;
+        } else if (strcmp(cmd, "AT+CNMI=2,2,0,1,0") == 0) {
             saw_cnmi_direct = true;
+            check(saw_modem_ack, "SIM completion requires modem acknowledgement before report routing");
         } else if (strncmp(cmd, "AT+CNMI=1,", 10u) == 0) {
             saw_cnmi_store = true;
         }
     }
     check(saw_csdh, "init sets the extended text header (+CSDH=1)");
+    check(saw_modem_ack, "init selects service zero without requiring host CNMA");
     check(saw_cnmi_direct && !saw_cnmi_store,
           "init routes SMS-DELIVER directly (+CNMI=2,2) instead of storing");
 }
@@ -2265,10 +2272,10 @@ static void test_sms_profile_readback(void) {
     check(early && late && early->recoverable && !late->recoverable,
           "early optional SMS inspection has a strict SIM-ready completion counterpart");
     if (!early || !late) return;
-    const char *rows[] = {"+CNMI: 2,2,0,0,0", "#CSCSEXT: 0", "+CSCS: \"GSM\"", "+CMGF: 1", "+CSDH: 1"};
+    const char *rows[] = {"+CNMI: 2,2,0,1,0", "#CSCSEXT: 0", "+CSCS: \"GSM\"", "+CMGF: 1", "+CSDH: 1"};
     char command[MODEM_PROVISION_COMMAND_MAX];
     check(late->build_set_cmd(command, sizeof(command)) &&
-              strcmp(command, "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0") == 0,
+              strcmp(command, "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,1,0;&P0;&W0") == 0,
           "profile writer orders representation before delivery and explicitly saves default profile zero");
     early->readback_begin();
     for (unsigned i = 0; i < 5u; i++) early->parse(rows[i]);
@@ -2297,7 +2304,68 @@ static void test_sms_profile_readback(void) {
           "stored-message delivery profile is a repairable mismatch");
 }
 
+static void test_sms_service_centre_snapshot(void) {
+    char number[MODEM_SMS_SENDER_MAX + 1u];
+    uint8_t type = 0u;
+    check(g_modem_vendor.parse_sms_service_centre != NULL, "SMSC snapshot parser installed");
+    check(g_modem_vendor.parse_sms_service_centre("+CSCA: \"+15551234567\",145",
+              number, sizeof(number), &type) && type == 145u && strcmp(number, "+15551234567") == 0,
+          "SMSC snapshot preserves international address and type");
+    check(g_modem_vendor.parse_sms_service_centre("+CSCA: \"12345\",129",
+              number, sizeof(number), &type) && type == 129u && strcmp(number, "12345") == 0,
+          "SMSC snapshot preserves national address and type");
+    check(g_modem_vendor.parse_sms_service_centre("+CSCA: \"\",129", number, sizeof(number), &type),
+          "explicit empty SMSC can be restored exactly");
+    const char *invalid[] = {"OK", "+CSCA: \"123\"", "+CSCA: \"123\",256",
+        "+CSCA: \"123\",-1", "+CSCA: \"123\",129,0", "+CSCA: \"123;AT\",129",
+        "+CSCA: \"+\",145", "+CSCA: \"123456789012345678901234567890123\",129",
+        "+CSCA: \"123\",129garbage", "+CSCA: \"123,129"};
+    for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+        check(!g_modem_vendor.parse_sms_service_centre(invalid[i], number, sizeof(number), &type),
+              "malformed, unsafe or truncated SMSC cannot be used for restoration");
+}
+
+static void test_sms_reports(void) {
+    sms_report_t report;
+    check(g_modem_vendor.parse_sms_report != NULL, "vendor owns status report syntax");
+    check(g_modem_vendor.parse_sms_report(
+        "+CDS: 6,255,\"15551234567\",145,\"26/09/21,12:00:00-16\",\"26/09/21,12:01:03-16\",0", &report) &&
+        report.reference == 255u && report.status == 0u && report.first_octet == 6u &&
+        strcmp(report.recipient, "+15551234567") == 0 &&
+        strcmp(report.discharged, "26/09/21,12:01:03-16") == 0,
+        "text CDS preserves complete evidence and normalizes international recipient");
+    const char *bad[] = {
+        "+CDS: 28", "+CDSI: \"ME\",3",
+        "+CDS: 2,256,\"123\",129,\"26/09/21,12:00:00+00\",\"26/09/21,12:01:03+00\",0",
+        "+CDS: 2,1,\"\",129,\"26/09/21,12:00:00+00\",\"26/09/21,12:01:03+00\",0",
+        "+CDS: 34,1,\"123\",129,\"26/09/21,12:00:00+00\",\"26/09/21,12:01:03+00\",0",
+        "+CDS: 2,1,\"ABC\",208,\"26/09/21,12:00:00+00\",\"26/09/21,12:01:03+00\",0",
+        "+CDS: 2,1,\"123\",129,\"26/02/29,12:00:00+00\",\"26/09/21,12:01:03+00\",0",
+        "+CDS: 2,1,\"123\",129,\"26/09/21,24:00:00+00\",\"26/09/21,12:01:03+00\",0",
+        "+CDS: 2,1,\"123\",129,\"26/09/21,12:00:00\",\"26/09/21,12:01:03+00\",0",
+        "+CDS: 2,1,\"123\",129,\"26/09/21,12:00:00+00\",\"26/09/21,12:01:03+80\",0",
+        "+CDS: 2,1,\"123\",129,\"26/09/21,12:00:00+00\",\"26/09/21,12:01:03+00\",-1",
+        "+CDS: 2,1,\"123\",129,\"26/09/21,12:00:00+00\",\"26/09/21,12:01:03+00\",0,42",
+    };
+    sms_report_t saved = report;
+    for (unsigned i = 0u; i < sizeof(bad) / sizeof(bad[0]); i++)
+        check(!g_modem_vendor.parse_sms_report(bad[i], &report) && memcmp(&saved, &report, sizeof(report)) == 0,
+              "malformed, command-related or incomplete report leaves no partial result");
+    check(g_modem_vendor.parse_sms_report(
+        "+CDS: 2,0,\"123\",129,\"24/02/29,00:00:00+00\",\"24/02/29,00:00:01+00\",1", &report) &&
+        sms_report_state(report.status) == SMS_REPORT_UNKNOWN,
+        "forwarded without delivery confirmation is not Delivered");
+    for (unsigned st = 0; st <= 255u; st++) {
+        sms_report_state_t expected = st == 0u ? SMS_REPORT_DELIVERED :
+            st >= 0x20u && st <= 0x3fu ? SMS_REPORT_PENDING :
+            st >= 0x40u && st <= 0x7fu ? SMS_REPORT_FAILED : SMS_REPORT_UNKNOWN;
+        check(sms_report_state((uint8_t)st) == expected, "all raw TP-ST values classified without invented success");
+    }
+}
+
 int main(void) {
+    test_sms_reports();
+    test_sms_service_centre_snapshot();
     test_sms_profile_readback();
     test_text_transmit_encoding();
     test_3gpp_ucs2_character_length();

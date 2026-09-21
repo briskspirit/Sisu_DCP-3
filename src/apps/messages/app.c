@@ -27,6 +27,7 @@
 #define SMS_MAILBOX_TIMEOUT_MS 60000u
 #define SMS_READ_TIMEOUT_MS 30000u
 #define SMS_DELETE_TIMEOUT_MS 10000u
+#define SMS_REPORTS_DELETE_TIMEOUT_MS 60000u
 #define SMS_SAVE_TIMEOUT_MS 20000u
 #define SMS_MAILBOX_TEXT_X 10
 #define SMS_MAILBOX_TEXT_W (FB_WIDTH - SMS_MAILBOX_TEXT_X)
@@ -43,6 +44,7 @@
 #define SMS_INBOX_UNREAD_ICON_ID 43u
 #define SMS_OUTBOX_SENT_ICON_ID 44u
 #define SMS_OUTBOX_UNSENT_ICON_ID 45u
+#define SMS_REPORT_ICON_ID 46u
 /* Compared prefix of the fixed-width "YY/MM/DD,HH:MM:SS" SMS timestamp -- enough
  * to order chronologically by a plain strncmp (newest-first when descending). */
 #define SMS_TIMESTAMP_SORT_LEN 17u
@@ -58,6 +60,8 @@ static const char *const MESSAGES_ROOT_LABELS[] = {
 };
 static const char *const MESSAGE_INBOX_OPTIONS[] = {"Reply", "Forward", "Edit", "Use number", "Erase", "Details"};
 static const char *const MESSAGE_OUTBOX_OPTIONS[] = {"Send", "Edit", "Use number", "Erase", "Details"};
+static const char *const MESSAGE_REPORT_OPTIONS[] = {"Use number", "Erase", "Erase reports", "Details"};
+static const uint16_t MESSAGE_REPORT_OPTIONS_SID[] = {0x186u, 0x170u, 0x326u, 0x16eu};
 static const char *const MESSAGE_SETTINGS_TOP_LABELS[] = {"Set 1", "Common"};
 static const char *const MESSAGE_SETTINGS_SET_LABELS[] = {"Message centre number", "Messages sent as", "Message validity"};
 static const char *const MESSAGE_SETTINGS_COMMON_LABELS[] = {"Delivery reports", "Reply via\nsame centre"};
@@ -116,6 +120,7 @@ static void sms_detail_page_text(const app_t *app, char *dst, size_t cap);
 static void sms_use_number_candidate(const app_sms_record_t *record,
                                      const char *body, char *dst, size_t cap);
 static void sms_delete_current(app_t *app, uint32_t now);
+static void sms_report_text(const app_sms_record_t *record, char *dst, size_t cap);
 static void sms_remove_current_local(app_t *app, uint32_t now);
 static void sms_open_empty_notice(app_t *app, uint32_t now);
 static void sms_begin_read_current(app_t *app, uint32_t now);
@@ -263,15 +268,15 @@ void render_messages_list(const app_t *app, framebuffer_t *fb) {
 
     const app_sms_record_t *record = current_sms_record_const(app);
     if (app->messages_mode == MESSAGES_MODE_OPTIONS) {
-        const char *const *options = app->messages_kind == MESSAGES_KIND_OUTBOX
+        const char *const *options = record != NULL && record->report ? MESSAGE_REPORT_OPTIONS : app->messages_kind == MESSAGES_KIND_OUTBOX
             ? MESSAGE_OUTBOX_OPTIONS
             : MESSAGE_INBOX_OPTIONS;
-        uint8_t count = app->messages_kind == MESSAGES_KIND_OUTBOX
+        uint8_t count = record != NULL && record->report ? (uint8_t)ARRAY_COUNT(MESSAGE_REPORT_OPTIONS) : app->messages_kind == MESSAGES_KIND_OUTBOX
             ? sms_outbox_option_count(record)
             : (uint8_t)ARRAY_COUNT(MESSAGE_INBOX_OPTIONS);
         /* Outbox localizes "Edit" (0x344); inbox localizes "Reply" (0x347) +
          * "Edit" (0x344). The other entries are absent from the map -> English. */
-        const uint16_t *sids = app->messages_kind == MESSAGES_KIND_OUTBOX
+        const uint16_t *sids = record != NULL && record->report ? MESSAGE_REPORT_OPTIONS_SID : app->messages_kind == MESSAGES_KIND_OUTBOX
             ? MESSAGE_OUTBOX_OPTIONS_SID
             : MESSAGE_INBOX_OPTIONS_SID;
         const char *loc[6];
@@ -291,7 +296,9 @@ void render_messages_list(const app_t *app, framebuffer_t *fb) {
         if (record == 0 || !app->sms_selected_content.valid) {
             return;
         }
-        if (app->messages_kind == MESSAGES_KIND_INBOX && app->messages_read_page == 1u) {
+        if (record->report) {
+            text = app->sms_selected_content.text;
+        } else if (app->messages_kind == MESSAGES_KIND_INBOX && app->messages_read_page == 1u) {
             sms_sender_page_text(record, detail, sizeof(detail));
         } else if (app->messages_kind == MESSAGES_KIND_INBOX && app->messages_read_page == 2u) {
             char ts[40];
@@ -359,7 +366,9 @@ void render_messages_list(const app_t *app, framebuffer_t *fb) {
          * / UNREAD=43, outbox SENT=44 / UNSENT=45. Local file state
          * is the source of truth for both groups. */
         uint16_t icon_id;
-        if (app->messages_kind == MESSAGES_KIND_OUTBOX) {
+        if (item->report) {
+            icon_id = SMS_REPORT_ICON_ID;
+        } else if (app->messages_kind == MESSAGES_KIND_OUTBOX) {
             icon_id = !item->sent ? SMS_OUTBOX_UNSENT_ICON_ID
                                                           : SMS_OUTBOX_SENT_ICON_ID;
         } else {
@@ -555,7 +564,7 @@ bool handle_messages_list_key(app_t *app, uint16_t key, uint32_t now) {
 
     if (app->messages_mode == MESSAGES_MODE_OPTIONS) {
         const app_sms_record_t *record = current_sms_record_const(app);
-        uint8_t count = app->messages_kind == MESSAGES_KIND_OUTBOX
+        uint8_t count = record != NULL && record->report ? (uint8_t)ARRAY_COUNT(MESSAGE_REPORT_OPTIONS) : app->messages_kind == MESSAGES_KIND_OUTBOX
             ? sms_outbox_option_count(record)
             : (uint8_t)ARRAY_COUNT(MESSAGE_INBOX_OPTIONS);
         if (key == KEY_UP) {
@@ -619,6 +628,11 @@ bool handle_messages_list_key(app_t *app, uint16_t key, uint32_t now) {
                 }
                 if (delta < 0 && app->messages_read_scroll > 0u) {
                     app->messages_read_scroll--;
+                    app->dirty = true;
+                    return true;
+                }
+                if (record->report) {
+                    app->messages_read_scroll = delta > 0 || line_count <= 4u ? 0u : (uint16_t)(line_count - 4u);
                     app->dirty = true;
                     return true;
                 }
@@ -842,7 +856,8 @@ bool poll_sms(app_t *app, uint32_t now) {
         app->messages_open_pending = false;
         app->sms_read_waiting = false;
     }
-    if (!sms_progress_ui_active(app, 4u, APP_ROUTE_MESSAGES_LIST)) app->sms_delete_waiting = false;
+    if (!sms_progress_ui_active(app, 4u, APP_ROUTE_MESSAGES_LIST) &&
+        !sms_progress_ui_active(app, 35u, APP_ROUTE_MESSAGES_LIST)) app->sms_delete_waiting = false;
     if (!sms_progress_ui_active(app, 4u, APP_ROUTE_SMS_COMPOSER)) app->sms_save_waiting = false;
     if (app->sms_send_waiting &&
         !sms_progress_ui_active(app, 46u, app->sms_send_return_route)) {
@@ -904,6 +919,8 @@ bool poll_sms(app_t *app, uint32_t now) {
                 app->sms_selected_content.valid = true;
                 copy_text(app->sms_selected_content.text, sizeof(app->sms_selected_content.text),
                           read_content.metadata.binary ? ts_or(SID_DATA_MESSAGE, "Data message") : read_content.text);
+                if (record->report)
+                    sms_report_text(record, app->sms_selected_content.text, sizeof(app->sms_selected_content.text));
                 app->messages_mode = MESSAGES_MODE_READ;
                 app->messages_read_page = 0u;
                 app->messages_read_scroll = 0u;
@@ -928,18 +945,34 @@ bool poll_sms(app_t *app, uint32_t now) {
         if (app->sms_delete_waiting) {
             app->sms_delete_waiting = false;
             const app_sms_record_t *record = current_sms_record_const(app);
-            if (result.kind == MESSAGE_OP_DELETE && result.outcome == MESSAGE_RESULT_OK &&
+            if (result.kind == MESSAGE_OP_DELETE_REPORTS && result.outcome == MESSAGE_RESULT_OK &&
+                app->sms_delete_object_id == 0u) {
+                uint16_t kept = 0u;
+                for (uint16_t i = 0u; i < app->sms_inbox_count; i++)
+                    if (!app->sms_inbox[i].report) app->sms_inbox[kept++] = app->sms_inbox[i];
+                app->sms_inbox_count = kept;
+                app->messages_selected = 0u;
+                app->messages_mode = MESSAGES_MODE_LIST;
+                memset(&app->sms_selected_content, 0, sizeof(app->sms_selected_content));
+                open_display_sid(app, 44u, 0x356u, "Reports\nerased", APP_ROUTE_MESSAGES_LIST, now);
+            } else if (result.kind == MESSAGE_OP_DELETE && result.outcome == MESSAGE_RESULT_OK &&
                 record != NULL && record->id == result.object_id &&
                 result.object_id == app->sms_delete_object_id) {
                 sms_remove_current_local(app, now);
             } else {
+                /* A bulk erase may have committed some files before failure. */
+                app->messages_mode = MESSAGES_MODE_LIST;
+                memset(&app->sms_selected_content, 0, sizeof(app->sms_selected_content));
                 open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MESSAGES_LIST, now);
             }
         }
         changed = true;
     } else if (app->sms_delete_waiting &&
-               time_diff_ms(now, app->sms_delete_started_ms + SMS_DELETE_TIMEOUT_MS) >= 0) {
+               time_diff_ms(now, app->sms_delete_started_ms +
+                   (app->sms_delete_object_id == 0u ? SMS_REPORTS_DELETE_TIMEOUT_MS : SMS_DELETE_TIMEOUT_MS)) >= 0) {
         app->sms_delete_waiting = false;
+        app->messages_mode = MESSAGES_MODE_LIST;
+        memset(&app->sms_selected_content, 0, sizeof(app->sms_selected_content));
         open_display(app, 0u, "Message", "function", "failed", APP_ROUTE_MESSAGES_LIST, now);
         changed = true;
     }
@@ -1078,8 +1111,27 @@ void start_sms_send(app_t *app, const char *recipient, const char *text, app_rou
         return;
     }
     uint32_t request_id = 0u;
-    if (!modem_service_request_send_sms(
-            recipient, text != 0 ? text : "", &request_id)) {
+    sms_send_options_t options = {0};
+    char service_centre[STORE_TEXT_MAX + 1u];
+    uint8_t reply_path = 0u, reports = 0u;
+    if (store_setting_get_u8(STORE_SETTING_SMS_SENT_AS, &options.format) != STORE_STATUS_OK ||
+        store_setting_get_u8(STORE_SETTING_SMS_VALIDITY, &options.validity) != STORE_STATUS_OK ||
+        store_setting_get_u8(STORE_SETTING_SMS_REPLY_SAME_CENTRE, &reply_path) != STORE_STATUS_OK ||
+        store_setting_get_u8(STORE_SETTING_SMS_DELIVERY_REPORTS, &reports) != STORE_STATUS_OK ||
+        reply_path > 1u || reports > 1u ||
+        store_setting_get_text(STORE_SETTING_SMS_MESSAGE_CENTRE, service_centre,
+                               sizeof(service_centre)) != STORE_STATUS_OK ||
+        strlen(service_centre) >= sizeof(options.service_centre) ||
+        !sms_service_centre_valid(service_centre, sizeof(service_centre)) ||
+        !sms_send_options_valid(&options)) {
+        open_display_sid(app, 32u, 0x210u, "Not done", return_route, now);
+        return;
+    }
+    copy_text(options.service_centre, sizeof(options.service_centre), service_centre);
+    options.reply_same_centre = reply_path != 0u;
+    options.delivery_reports = reports != 0u;
+    if (!modem_service_request_send_sms_with_options(
+            recipient, text != 0 ? text : "", &options, &request_id)) {
         open_display_sid(app, 0u, 0x35au, "Still\nsending\nprevious", return_route, now);
         return;
     }
@@ -1162,6 +1214,10 @@ static const char *sms_record_label(const app_sms_record_t *record,
         copy_text(scratch, cap, ts_or(0x337u, "Message"));
         return scratch;
     }
+    if (record->report) {
+        copy_text(scratch, cap, ts_or(0x355u, "Report"));
+        return scratch;
+    }
     if (record->address[0] != '\0') {
         char name[PHONEBOOK_NAME_MAX + 1u];
         resolve_contact_name(record->address, name, sizeof(name));
@@ -1174,6 +1230,32 @@ static const char *sms_record_label(const app_sms_record_t *record,
     }
     copy_text(scratch, cap, ts_or(0x337u, "Message"));
     return scratch;
+}
+
+static void sms_report_text(const app_sms_record_t *record, char *dst, size_t cap) {
+    /* ROM 0x22963c..0x22975e uses status/name followed by Time for terminal
+     * reports in the ordinary FS2 read window. Do not turn unconfirmed or
+     * reserved statuses into Delivered, even though the original grouped them. */
+    char name[PHONEBOOK_NAME_MAX + 1u];
+    resolve_contact_name(record->address, name, sizeof(name));
+    const char *recipient = name[0] != '\0' ? name : record->address;
+    sms_report_state_t state = sms_report_state(record->report_status);
+    if (state == SMS_REPORT_UNKNOWN) {
+        snprintf(dst, cap, "%s\n%s", ts_or(0x229u, "Result\nunknown"), recipient);
+    } else {
+        const char *format = state == SMS_REPORT_DELIVERED ? ts_or(0x31cu, "Delivered:\n%S") :
+            state == SMS_REPORT_FAILED ? ts_or(0x31du, "Failed:\n%S") : ts_or(0x31eu, "Pending:\n%S");
+        messages_format(dst, cap, format, 'S', recipient);
+    }
+    if (state != SMS_REPORT_PENDING) {
+        char stamp[40];
+        sms_timestamp_text(record->timestamp, stamp, sizeof(stamp));
+        size_t used = strlen(dst);
+        if (used + 1u < cap) {
+            dst[used++] = '\n'; dst[used] = '\0';
+            messages_format(dst + used, cap - used, ts_or(0x322u, "Time:\n%U"), 'U', stamp);
+        }
+    }
 }
 
 static void sms_sender_page_text(const app_sms_record_t *record, char *dst, size_t cap) {
@@ -1246,7 +1328,7 @@ static void sms_detail_page_text(const app_t *app, char *dst, size_t cap) {
         copy_text(dst, cap, "");
         return;
     }
-    if (app->messages_kind == MESSAGES_KIND_INBOX) {
+    if (app->messages_kind == MESSAGES_KIND_INBOX && !record->report) {
         if (app->messages_detail_page == 0u) {
             sms_sender_page_text(record, dst, cap);
         } else if (app->messages_detail_page == 1u) {
@@ -1312,7 +1394,8 @@ static void sms_delete_current(app_t *app, uint32_t now) {
     app->sms_delete_request_id = request_id;
     app->sms_delete_object_id = record->id;
     app->sms_delete_started_ms = now;
-    open_display_sid(app, 4u, 0x328u, "Erasing\nmessage", APP_ROUTE_MESSAGES_LIST, now);
+    open_display_sid(app, record->report ? 35u : 4u, record->report ? 0x329u : 0x328u,
+                     record->report ? "Erasing\nreport" : "Erasing\nmessage", APP_ROUTE_MESSAGES_LIST, now);
 }
 
 static void sms_remove_current_local(app_t *app, uint32_t now) {
@@ -1324,6 +1407,7 @@ static void sms_remove_current_local(app_t *app, uint32_t now) {
     app_sms_record_t *records = app->messages_kind == MESSAGES_KIND_OUTBOX ? app->sms_outbox : app->sms_inbox;
     uint16_t *count_ptr = app->messages_kind == MESSAGES_KIND_OUTBOX ? &app->sms_outbox_count : &app->sms_inbox_count;
     uint16_t selected = app->messages_selected >= count ? (uint16_t)(count - 1u) : app->messages_selected;
+    bool report = records[selected].report;
     /* The complete logical message has left the local store. */
     for (uint16_t i = selected; i + 1u < count; i++) {
         records[i] = records[i + 1u];
@@ -1338,7 +1422,8 @@ static void sms_remove_current_local(app_t *app, uint32_t now) {
     if (*count_ptr == 0u) {
         sms_open_empty_notice(app, now);
     } else {
-        open_display_sid(app, 44u, 0x327u, "Erased", APP_ROUTE_MESSAGES_LIST, now);
+        open_display_sid(app, 44u, report ? 0x354u : 0x327u,
+                         report ? "Report\nerased" : "Erased", APP_ROUTE_MESSAGES_LIST, now);
     }
 }
 
@@ -1381,6 +1466,25 @@ static void sms_open_current_options(app_t *app) {
     app->dirty = true;
 }
 
+void messages_confirm_report_erase(app_t *app, bool erase, uint32_t now) {
+    bool all = app->confirm_context == CONFIRM_CONTEXT_SMS_REPORT_ERASE_ALL;
+    app->confirm_context = CONFIRM_CONTEXT_NONE;
+    app->route = APP_ROUTE_MESSAGES_LIST;
+    app->dirty = true;
+    if (!erase) return;
+    if (!all) { sms_delete_current(app, now); return; }
+    uint32_t token;
+    if (app->sms_delete_request_id != 0u || !message_service_request_delete_reports(&token)) {
+        open_display_sid(app, 0u, 0x20fu, "Not allowed", APP_ROUTE_MESSAGES_LIST, now);
+        return;
+    }
+    app->sms_delete_waiting = true;
+    app->sms_delete_request_id = token;
+    app->sms_delete_object_id = 0u;
+    app->sms_delete_started_ms = now;
+    open_display_sid(app, 35u, 0x32au, "Erasing\nreports", APP_ROUTE_MESSAGES_LIST, now);
+}
+
 static void sms_select_read_option(app_t *app, uint32_t now) {
     const app_sms_record_t *record = current_sms_record_const(app);
     const app_sms_content_t *content = &app->sms_selected_content;
@@ -1390,13 +1494,13 @@ static void sms_select_read_option(app_t *app, uint32_t now) {
         return;
     }
     uint8_t option = app->messages_option_selected;
-    uint8_t option_count = app->messages_kind == MESSAGES_KIND_OUTBOX
+    uint8_t option_count = record->report ? (uint8_t)ARRAY_COUNT(MESSAGE_REPORT_OPTIONS) : app->messages_kind == MESSAGES_KIND_OUTBOX
         ? sms_outbox_option_count(record)
         : (uint8_t)ARRAY_COUNT(MESSAGE_INBOX_OPTIONS);
     if (option >= option_count) {
         option = 0u;
     }
-    const char *label = app->messages_kind == MESSAGES_KIND_OUTBOX
+    const char *label = record->report ? MESSAGE_REPORT_OPTIONS[option] : app->messages_kind == MESSAGES_KIND_OUTBOX
         ? MESSAGE_OUTBOX_OPTIONS[option]
         : MESSAGE_INBOX_OPTIONS[option];
     const char *body = content->text;
@@ -1437,7 +1541,11 @@ static void sms_select_read_option(app_t *app, uint32_t now) {
         app->route = APP_ROUTE_STANDBY;
         app->dirty = true;
     } else if (strcmp(label, "Erase") == 0) {
-        sms_delete_current(app, now);
+        if (record->report)
+            open_confirm_sid(app, CONFIRM_CONTEXT_SMS_REPORT_ERASE, 0x318u, "Erase\nreport?", 0);
+        else sms_delete_current(app, now);
+    } else if (strcmp(label, "Erase reports") == 0) {
+        open_confirm_sid(app, CONFIRM_CONTEXT_SMS_REPORT_ERASE_ALL, 0x319u, "Erase\nreports?", 0);
     } else if (strcmp(label, "Details") == 0) {
         app->messages_mode = MESSAGES_MODE_DETAIL;
         app->messages_detail_page = 0u;

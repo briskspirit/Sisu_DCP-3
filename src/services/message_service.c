@@ -17,17 +17,19 @@
 #define INDEX_CONTROL 8u
 #define INDEX_PUBLICATION_BLOCKED 16u
 #define INDEX_CARD 32u
+#define INDEX_REPORT 64u
 
 typedef struct { uint32_t id, time; uint8_t flags; } index_t;
 typedef struct {
     message_result_t result;
     message_mailbox_t mailbox;
-    bool done, attempted;
+    bool done, attempted, more;
     message_metadata_t *rows;
     uint16_t capacity;
 } request_t;
 typedef struct {
     union {
+        sms_report_t report;
         char pdu[MESSAGE_FILE_PDU_MAX * 2u + 1u];
         struct { char address[MODEM_SMS_SENDER_MAX + 1u], text[MODEM_SMS_TEXT_MAX + 1u]; } sent;
     };
@@ -36,6 +38,7 @@ typedef struct {
     uint32_t retry_at;
     bool deferred;
     bool outgoing;
+    bool is_report;
 } receive_t;
 
 static index_t s_index[2][MESSAGE_MAILBOX_LIMIT], s_pending[PENDING_LIMIT];
@@ -95,7 +98,7 @@ static storage_record_result_t index_current(storage_object_collection_t c, uint
     *entry = (index_t){.id=id, .time=pending ? state : message_timestamp_seconds(meta.timestamp),
         .flags=(uint8_t)((pending ? 0u : state) | (message_file_complete(&s_file) ? INDEX_COMPLETE : 0u) |
             (pending && message_file_control(&s_file) != SMS_CONTROL_KEEP ? INDEX_CONTROL : 0u) |
-            (meta.quarantined ? INDEX_QUARANTINED : 0u))};
+            (meta.quarantined ? INDEX_QUARANTINED : 0u) | (meta.report ? INDEX_REPORT : 0u))};
     if (pending && (entry->flags & INDEX_COMPLETE)) {
         phonebook_entry_t card;
         if (business_card_file_decode(&s_file, &card) != BUSINESS_CARD_NONE) entry->flags |= INDEX_CARD;
@@ -234,6 +237,7 @@ bool message_service_request_list(message_mailbox_t m, message_metadata_t *rows,
 }
 bool message_service_request_read(message_mailbox_t m, uint32_t id, uint32_t *t) { return request(MESSAGE_OP_READ, m, id, t); }
 bool message_service_request_delete(message_mailbox_t m, uint32_t id, uint32_t *t) { return request(MESSAGE_OP_DELETE, m, id, t); }
+bool message_service_request_delete_reports(uint32_t *t) { return request(MESSAGE_OP_DELETE_REPORTS, MESSAGE_INBOX, 0u, t); }
 bool message_service_request_save(const char *address, const char *text, uint32_t *token) {
     if (address == NULL || text == NULL || strlen(address) > MODEM_SMS_SENDER_MAX ||
         strlen(text) > MODEM_SMS_TEXT_MAX || !request(MESSAGE_OP_SAVE, MESSAGE_OUTBOX, 0u, token)) return false;
@@ -266,12 +270,42 @@ bool message_service_entry(message_mailbox_t mailbox, uint16_t position, message
     return true;
 }
 
+static void space_reclaimed(void) {
+    s_status.full = false;
+    for (unsigned i = 0u; i < s_queued; i++)
+        s_receive[(s_head + i) % RECEIVE_LIMIT].deferred = false;
+}
+
 static storage_record_result_t perform(request_t *r) {
     uint32_t id = r->result.object_id;
     message_mailbox_t m = r->mailbox;
     storage_object_collection_t c = collection(m);
     int pos = find(s_index[m], s_count[m], id);
     storage_record_result_t rc;
+    if (r->result.kind == MESSAGE_OP_DELETE_REPORTS) {
+        r->more = false;
+        for (uint16_t i = 0u; i < s_count[MESSAGE_INBOX]; i++) {
+            if (!(s_index[MESSAGE_INBOX][i].flags & INDEX_REPORT)) continue;
+            /* One file per safe window. New queued arrivals are published only
+             * after completion, so they cannot extend this operation forever. */
+            uint32_t report_id = s_index[MESSAGE_INBOX][i].id;
+            rc = load(STORAGE_OBJECT_INBOX, report_id);
+            if (rc != STORAGE_RECORD_OK && rc != STORAGE_RECORD_NOT_FOUND) return rc;
+            if (rc == STORAGE_RECORD_OK && !(s_file.flags & MESSAGE_FILE_REPORT)) {
+                store_health_note_corrupt(STORAGE_OBJECT_INBOX, report_id);
+                return STORAGE_RECORD_CORRUPT;
+            }
+            rc = storage_object_remove(STORAGE_OBJECT_INBOX, report_id);
+            if (rc != STORAGE_RECORD_OK && rc != STORAGE_RECORD_NOT_FOUND) return rc;
+            erase_index(s_index[MESSAGE_INBOX], &s_count[MESSAGE_INBOX], i);
+            r->result.count++;
+            r->more = true;
+            s_status.revision++;
+            space_reclaimed();
+            return STORAGE_RECORD_OK;
+        }
+        return STORAGE_RECORD_OK;
+    }
     if (r->result.kind == MESSAGE_OP_LIST) {
         if (s_count[m] > r->capacity) return STORAGE_RECORD_FULL;
         for (uint16_t i = 0u; i < s_count[m]; i++)
@@ -321,11 +355,7 @@ static storage_record_result_t perform(request_t *r) {
         rc = storage_object_remove(c, id);
         if (rc != STORAGE_RECORD_OK && rc != STORAGE_RECORD_NOT_FOUND) return rc;
         if (pos >= 0) erase_index(s_index[m], &s_count[m], (unsigned)pos);
-        s_status.full = false;
-        for (unsigned i = 0u; i < s_queued; i++) {
-            receive_t *queued = &s_receive[(s_head + i) % RECEIVE_LIMIT];
-            queued->deferred = false;
-        }
+        space_reclaimed();
     }
     s_status.revision++;
     return STORAGE_RECORD_OK;
@@ -365,6 +395,21 @@ bool message_service_receive_tracked(const char *pdu, uint32_t *receipt) {
     return true;
 }
 
+bool message_service_receive_report(const sms_report_t *report) {
+    if (!sms_report_valid(report) || s_queued == RECEIVE_LIMIT) {
+        s_status.receive_errors++;
+        return false;
+    }
+    receive_t *r = &s_receive[(s_head + s_queued) % RECEIVE_LIMIT];
+    memset(r, 0, sizeof(*r));
+    r->report = *report;
+    r->is_report = true;
+    s_queued++;
+    s_status.queued = s_queued;
+    if (s_io_deferred) { s_io_deferred = false; s_retry_pending = false; }
+    return true;
+}
+
 bool message_service_receive_committed(uint32_t receipt) {
     return receipt != 0u && receipt == s_receipt_active && s_receipt_committed;
 }
@@ -396,6 +441,37 @@ bool message_service_sent(const char *address, const char *text) {
 static storage_record_result_t receive_one(void) {
     receive_t *r = &s_receive[s_head];
     storage_record_result_t rc;
+    if (r->is_report) {
+        /* Independent reports avoid guessing which submitted message an
+         * eight-bit MR belongs to. Only identical evidence is suppressed;
+         * pending/final and out-of-order events remain independently readable. */
+        for (uint16_t i = 0u; i < s_count[MESSAGE_INBOX]; i++) {
+            if (!(s_index[MESSAGE_INBOX][i].flags & INDEX_REPORT)) continue;
+            rc = load(STORAGE_OBJECT_INBOX, s_index[MESSAGE_INBOX][i].id);
+            if (rc != STORAGE_RECORD_OK) return rc;
+            const sms_report_t *old = &s_file.report;
+            if (old->reference == r->report.reference && old->status == r->report.status &&
+                old->address_type == r->report.address_type &&
+                strcmp(old->recipient, r->report.recipient) == 0 &&
+                strcmp(old->submitted, r->report.submitted) == 0 &&
+                strcmp(old->discharged, r->report.discharged) == 0) return STORAGE_RECORD_OK;
+        }
+        if (s_count[MESSAGE_INBOX] == MESSAGE_MAILBOX_LIMIT) return STORAGE_RECORD_FULL;
+        if (r->id == 0u) {
+            rc = storage_object_allocate(&r->id);
+            if (rc != STORAGE_RECORD_OK) return rc;
+        }
+        if (!message_file_report(&s_file, &r->report)) return STORAGE_RECORD_ERROR;
+        rc = save(STORAGE_OBJECT_INBOX, r->id);
+        if (rc != STORAGE_RECORD_OK) return rc;
+        index_t entry;
+        rc = index_current(STORAGE_OBJECT_INBOX, r->id, &entry);
+        if (rc == STORAGE_RECORD_OK) {
+            insert(s_index[MESSAGE_INBOX], &s_count[MESSAGE_INBOX], &entry, true);
+            s_status.received++; s_status.revision++;
+        }
+        return rc;
+    }
     if (r->outgoing) {
         int pos = find(s_index[MESSAGE_OUTBOX], s_count[MESSAGE_OUTBOX], r->id);
         if (pos >= 0) return STORAGE_RECORD_OK;
@@ -593,7 +669,7 @@ void message_service_tick(uint32_t now, const rtc_datetime_t *wall_time) {
         if (rc == STORAGE_RECORD_BUSY) { failure(rc, now); return; }
         r->result.outcome = rc == STORAGE_RECORD_OK ? MESSAGE_RESULT_OK :
             rc == STORAGE_RECORD_FULL ? MESSAGE_RESULT_FULL : MESSAGE_RESULT_ERROR;
-        r->done = true;
+        r->done = rc != STORAGE_RECORD_OK || !r->more;
         if (rc != STORAGE_RECORD_OK) failure(rc, now);
         else s_io_failures = 0u;
         recount();

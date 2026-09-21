@@ -6,6 +6,7 @@
 #include "services/datetime_types.h"
 #include "services/sms_control_filter.h"
 #include "services/sms_picture_codec.h"
+#include "services/sms_report.h"
 
 /* Normal messages contain at most eight parts. Extra slots retain conflicting
  * duplicates as one quarantined object instead of splicing unrelated text. */
@@ -15,6 +16,7 @@
 #define MESSAGE_FILE_DRAFT 1u
 #define MESSAGE_FILE_QUARANTINED 2u
 #define MESSAGE_FILE_SENT 4u
+#define MESSAGE_FILE_REPORT 8u
 
 typedef struct {
     uint8_t size;
@@ -25,6 +27,7 @@ typedef struct {
     uint8_t flags;
     uint8_t count;
     union {
+        sms_report_t report;
         message_file_part_t parts[MESSAGE_FILE_PART_LIMIT];
         struct {
             char address[MODEM_SMS_SENDER_MAX + 1u];
@@ -44,6 +47,7 @@ typedef enum {
  * the firmware stack budget. No returned structure borrows that scratch. */
 bool message_file_draft(message_file_t *file, const char *address, const char *text);
 bool message_file_receive(message_file_t *file, const char *pdu);
+bool message_file_report(message_file_t *file, const sms_report_t *report);
 message_merge_t message_file_merge(message_file_t *file, const char *pdu);
 bool message_file_complete(const message_file_t *file);
 /* Only a complete, unambiguous control is eligible; fragments stay durable. */

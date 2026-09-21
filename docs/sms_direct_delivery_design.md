@@ -4,6 +4,103 @@ Current architecture: direct modem delivery, local littlefs messages.
 The September 16 implementation plan describes the superseded ME re-store path.
 See [Storage engine](storage_engine.md) for file layout, quotas and durability.
 
+## Outgoing Text Settings
+
+The Messages app snapshots Set 1's message-centre number, sent-as format and
+validity, plus Common's reply-via-same-centre and delivery-report preferences, when it queues a text
+send. Editing a setting afterward cannot change a queued request. Invalid or
+unreadable preferences prevent transmission rather than silently using other
+values. The original setting menus and translated result dialogs are retained.
+
+The modem protocol applies the snapshot through text-mode parameters. Validity
+choices map to relative TP-VP values 11, 71, 167, 169, 173 and 255. The last is
+the maximum encodable interval, 63 weeks; the network can impose a shorter
+limit. Text uses TP-PID 0; Fax, Paging and E-mail request interworking with
+group-3 fax, national paging and Internet mail respectively. These are network
+requests, not a guarantee that an operator provides those conversion services.
+Reply via same centre sets TP-RP on the outgoing submission; it does not reroute
+the phone's replies to received messages.
+
+An empty centre preference leaves the modem's current centre alone. For an
+explicit override, the protocol first reads the current address and type, then
+temporarily changes them. A missing, malformed, duplicate or unsuccessful
+snapshot prevents the send. Cleanup restores the snapshot without saving an AT
+profile. Cancellation and failed cleanup retain the backup for bounded idle
+repair; further SMS sends remain blocked until repair succeeds. An accepted
+submission stays accepted even if cleanup fails. SIM invalidation prevents an
+old centre from being restored into the new SIM session, and a confirmed modem
+power-off discards the old recovery state.
+
+This changes outgoing parameters only: direct reception remains in text mode,
+without PDU or HEX-character-mode switching. Smart Messaging retains its
+separate F5 framing and transport defaults. Service-console text sends without
+explicit options retain the transport's original 24-hour/default-centre behavior.
+
+The Delivery reports preference sets TP-SRR for new text submissions. Turning it off does not
+discard a later report for an earlier submission. Smart Messaging does not use
+the text-message report preference.
+
+Protocol references: Telit LE910Cx ThreadX AT Commands Reference Guide revision 4,
+`+CSCA` and `+CSMP`; [3GPP TS 23.040, sections 9.2.3.9, 9.2.3.12 and 9.2.3.17](https://www.etsi.org/deliver/etsi_ts/123000_123099/123040/16.00.00_60/ts_123040v160000p.pdf).
+
+## Delivery Reports
+
+Provisioning selects `+CSMS=0` and `+CNMI=2,2,0,1,0`. The modem acknowledges
+network delivery; the host does not need a competing `+CNMA` transaction.
+The Telit adapter validates the documented seven-field text-mode `+CDS` and
+passes a typed report to the local message service. Reports can arrive during
+another AT command without consuming its response. Bytes inside a length-owned
+`+CMT` body remain message text, even when they resemble a report header.
+
+Each report is an independent Inbox file, following the original phone's Report
+entry and Use number / Erase / Erase reports / Details menu. It retains the raw
+status, message reference, recipient/type, service-centre timestamp and discharge
+timestamp with their zones. The file payload is `52 + recipient length` bytes
+before the storage envelope and filesystem overhead. Reports share the Inbox
+quota and receive queue; they do not get an unbounded storage allowance.
+
+Only TP-ST 0 is shown as Delivered. Temporary errors with further retries are
+Pending, terminal errors are Failed, and other codes are Result unknown.
+In particular, forwarded-but-unconfirmed is not delivery proof. A report is not
+a read receipt. A successful `+CMGS` or the absence of a report proves neither
+delivery nor failure.
+
+The UI uses the extracted report icon, translated status templates, confirmation
+windows, and erasing/result dialogs. Pending reports omit the Time block, as in
+the original formatter. Exact duplicate evidence is suppressed without making a
+read record unread again. Different pending/final reports are separate entries;
+an out-of-order arrival cannot overwrite a delivered result. The eight-bit modem
+reference alone is not used to guess an Outbox association across wraps or SIM
+changes.
+
+Erase reports removes one report per safe storage window. A power cut can leave
+some reports unerased, but does not affect ordinary messages or drafts; damaged
+records remain preserved for diagnosis. Full storage retains queued reports for
+retry and reports the existing storage warning. As with ordinary direct SMS,
+power loss before the first commit or queue overflow can lose an arrival.
+
+Host tests cover parsing, routing, UI transitions, quota pressure, duplicate
+evidence and torn writes. The September 21 Verizon bench run received three
+real, seven-field `+CDS` delivered reports for self-sent text messages, including
+one interleaved with a signal-query response. Report storage, read-state
+persistence across a firmware restart, the rendered report/details screens,
+cancelled deletion, single deletion and bulk deletion were checked on the DUT.
+Bulk deletion left ordinary messages intact.
+
+The same run verified one-hour and maximum-validity submissions, reports-on
+and reports-off parameters, restoration of the resting text parameters, ordinary
+incoming/outgoing text, and a three-part F5 picture-message loopback. The iPhone
+received a cross-carrier text, but no report for that submission was observed;
+it is not evidence of delivery-report support on that route. Other carriers and
+real pending/failed reports remain unqualified. Unsupported report layouts and
+unexpected stored-report `+CDSI` indications increment the receive-error counter
+rather than fabricating a result. No proprietary 3GPP2 report format or PDU-mode
+fallback is assumed.
+
+Protocol references: Telit ThreadX `+CSMS` / `+CNMI`,
+[3GPP TS 27.005](https://www.etsi.org/deliver/etsi_TS/127000_127099/127005/14.00.00_60/ts_127005v140000p.pdf)
+and [TS 23.040, section 9.2.3.15](https://www.etsi.org/deliver/etsi_ts/123000_123099/123040/16.00.00_60/ts_123040v160000p.pdf).
+
 ## Problem
 
 With a Verizon SIM (US Mobile "Warp", IMSI 311480, Telit image
@@ -103,7 +200,7 @@ an active command). The collector therefore reads the body **raw, by
 Therefore:
 
 - init keeps `AT+CMGF=1`, adds `AT+CSDH=1`, and replaces
-  `AT+CNMI=1,1,0,0,0` with `AT+CNMI=2,2,0,0,0` (mode 2 buffers URCs while
+  `AT+CNMI=1,1,0,0,0` with `AT+CNMI=2,2,0,1,0` (mode 2 buffers URCs while
   the link is reserved and flushes them afterwards);
 - picture and diagnostic binary sending stay in text mode with temporary 8-bit/UDHI
   CSMP settings, then restores normal text settings. Local file operations do

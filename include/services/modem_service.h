@@ -243,6 +243,10 @@ bool modem_service_get_voice_mailbox_number(char *out, size_t out_cap);
  * the output at zero and publishes nothing. */
 bool modem_service_request_send_sms(const char *number, const char *text,
                                     uint32_t *request_id_out);
+/* Copies the options at admission. NULL retains the transport's 24-hour,
+ * ordinary-text defaults. Never applies these preferences to Smart Messaging. */
+bool modem_service_request_send_sms_with_options(const char *number, const char *text,
+    const sms_send_options_t *options, uint32_t *request_id_out);
 /* Binary SMS (picture messages) defaults to DCS F5: 8-bit data, class 1. */
 bool modem_service_request_send_binary_sms(const char *number,
                                            const uint8_t *payload,

@@ -143,14 +143,16 @@ unsolicited results. UART writes are bounded so a CTS fault cannot deadlock the
 UI core.
 
 Incoming SMS use direct delivery on every carrier: init applies `AT+CSDH=1` and
-`AT+CNMI=2,2,0,0,0`, the module hands each message over as a `+CMT` URC (the
-standard 3GPP text/PDU forms, or the Telit 3GPP2 forms a Verizon SIM produces),
-and the firmware rebuilds it as a 3GPP TS 23.040 SMS-DELIVER PDU and writes it
-into the ME store with `AT+CMGW=<len>,0` before the ordinary mailbox scan sees
-it. The resting SMS mode stays text (`AT+CMGF=1`); plain bodies are read raw by
+`AT+CNMI=2,2,0,1,0`. The module hands each message over as a `+CMT` URC, and
+the vendor adapter normalizes the documented text forms into a 3GPP TS 23.040
+SMS-DELIVER for the local littlefs pipeline. No ME write or mailbox scan is
+required. The resting SMS mode stays text (`AT+CMGF=1`); plain bodies are read raw by
 `<length>` so line breaks, spaces and `@` survive. Store mode (`+CMTI`) is no
 longer used because the Verizon image files 3GPP2 messages in a CDMA store
-this backend cannot read (`$QCMTI`). Design, evidence and bench results:
+this backend cannot read (`$QCMTI`). `+CSMS=0` leaves network acknowledgement
+with the modem. Documented text `+CDS` delivery reports have a separate typed
+Inbox path; delivered reports are bench-qualified on Verizon loopback, not on
+every carrier or delivery route. Design, evidence and bench results:
 `docs/sms_direct_delivery_design.md`.
 
 Unsolicited RI-triggered DTR wake starts only in READY. Startup and controlled

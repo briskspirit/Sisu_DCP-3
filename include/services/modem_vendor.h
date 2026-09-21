@@ -21,6 +21,7 @@
 #include "services/modem_signal.h"
 #include "services/modem_sms_direct.h"
 #include "services/modem_sms_text.h"
+#include "services/sms_report.h"
 
 typedef enum {
     MODEM_DEGRADE_NONE = 0, MODEM_DEGRADE_AUDIO, MODEM_DEGRADE_SMS_SETUP,
@@ -333,7 +334,10 @@ typedef struct modem_vendor {
     /* Optional: translate a module-specific +CMT header/payload pair into a
      * neutral SMS-DELIVER. Return NOT_MINE for standard 3GPP forms. Pure. */
     modem_sms_direct_translate_fn translate_direct_sms;
+    bool (*parse_sms_report)(const char *line, sms_report_t *out);
     bool (*encode_sms_text)(const char *text, modem_sms_text_t *out);
+    bool (*parse_sms_service_centre)(const char *line, char *number, size_t cap,
+                                      uint8_t *type);
 } modem_vendor_t;
 
 extern const modem_vendor_t g_modem_vendor;

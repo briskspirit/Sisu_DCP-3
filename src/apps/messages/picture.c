@@ -34,23 +34,7 @@ static const uint16_t PICTURE_EDITOR_OPTIONS_SID[] = {
 
 static void picture_format(char *dst, size_t cap, const char *format,
                             char token, const char *value) {
-    size_t used = 0u;
-    while (*format != '\0' && used + 1u < cap) {
-        if (format[0] == '%' && format[1] == token) {
-            copy_text(dst + used, cap - used, value);
-            used += strlen(dst + used);
-            format += 2;
-        } else {
-            const char *next = format;
-            asset_next_codepoint(&next);
-            size_t bytes = (size_t)(next - format);
-            if (used + bytes >= cap) break;
-            memcpy(dst + used, format, bytes);
-            used += bytes;
-            format = next;
-        }
-    }
-    if (cap != 0u) dst[used] = '\0';
+    messages_format(dst, cap, format, token, value);
 }
 
 static void picture_sender_text(uint8_t slot, char *text, size_t cap) {

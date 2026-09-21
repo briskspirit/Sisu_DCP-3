@@ -46,6 +46,7 @@ static uint8_t s_settings[STORE_SETTING_COUNT];
 static unsigned s_setting_writes;
 static char s_setting_text[STORE_TEXT_MAX + 1u];
 static store_status_t s_setting_write_status;
+static store_status_t s_setting_read_status;
 static char s_saved_words[APP_SMS_T9_USER_WORD_LIMIT][STORE_T9_WORD_MAX + 1u];
 static uint8_t s_saved_word_count;
 static unsigned s_saved_word_writes;
@@ -77,6 +78,7 @@ static char s_saved_sms_text[MODEM_SMS_TEXT_MAX + 1u];
 static unsigned s_send_sms_requests;
 static char s_send_sms_number[MODEM_SMS_SENDER_MAX + 1u];
 static char s_send_sms_text[MODEM_SMS_TEXT_MAX + 1u];
+static sms_send_options_t s_send_sms_options;
 static bool s_binary_send_accept;
 static unsigned s_binary_send_requests;
 static char s_binary_number[33];
@@ -136,6 +138,7 @@ static void reset_fixture(void) {
     s_setting_writes = 0u;
     s_setting_text[0] = '\0';
     s_setting_write_status = STORE_STATUS_OK;
+    s_setting_read_status = STORE_STATUS_OK;
     s_settings[STORE_SETTING_SMS_DICTIONARY_LANGUAGE] = 0x81u;
     memset(s_saved_words, 0, sizeof(s_saved_words));
     s_saved_word_count = 0u;
@@ -164,6 +167,7 @@ static void reset_fixture(void) {
     s_send_sms_requests = 0u;
     s_send_sms_number[0] = '\0';
     s_send_sms_text[0] = '\0';
+    memset(&s_send_sms_options, 0, sizeof(s_send_sms_options));
     s_binary_send_accept = true;
     s_binary_send_requests = 0u;
     s_binary_number[0] = '\0';
@@ -244,7 +248,7 @@ const char *ts_or(uint16_t sid, const char *fallback) {
 
 store_status_t store_setting_get_u8(store_setting_key_t key, uint8_t *out_value) {
     *out_value = s_settings[key];
-    return STORE_STATUS_OK;
+    return s_setting_read_status;
 }
 
 store_status_t store_setting_set_u8(store_setting_key_t key, uint8_t value) {
@@ -256,7 +260,7 @@ store_status_t store_setting_set_u8(store_setting_key_t key, uint8_t value) {
 store_status_t store_setting_get_text(store_setting_key_t key, char *out_text, uint8_t out_cap) {
     (void)key;
     copy_text(out_text, out_cap, s_setting_text);
-    return STORE_STATUS_OK;
+    return s_setting_read_status;
 }
 
 store_status_t store_t9_user_words_load(char words[][STORE_T9_WORD_MAX + 1u],
@@ -476,12 +480,14 @@ bool message_service_request_read(message_mailbox_t mailbox, uint32_t id, uint32
 bool message_service_request_delete(message_mailbox_t mailbox, uint32_t id, uint32_t *token) {
     (void)mailbox; (void)id; return admit_sms_request(true, token);
 }
+bool message_service_request_delete_reports(uint32_t *token) { return admit_sms_request(true, token); }
 
-bool modem_service_request_send_sms(const char *number, const char *text,
-                                    uint32_t *request_id_out) {
+bool modem_service_request_send_sms_with_options(const char *number, const char *text,
+    const sms_send_options_t *options, uint32_t *request_id_out) {
     s_send_sms_requests++;
     copy_text(s_send_sms_number, sizeof(s_send_sms_number), number);
     copy_text(s_send_sms_text, sizeof(s_send_sms_text), text);
+    if (options != NULL) s_send_sms_options = *options;
     return admit_sms_request(true, request_id_out);
 }
 
@@ -1911,14 +1917,14 @@ static void test_message_preferences_and_queries(void) {
             check(s_display_sid == 0x3b4u && s_setting_writes == 1u &&
                       s_settings[cases[i].stored_key] == expected &&
                       app.messages_mode == MESSAGES_MODE_SETTINGS_MENU,
-                  "simulated SMS preference saves locally and returns to its menu");
+                  "SMS preference saves locally and returns to its menu");
             render_messages_list(&app, &fb);
             check_str(s_menu_preview, cases[i].labels[choice],
                       "SMS preference preview displays the saved choice");
             app.route = APP_ROUTE_MESSAGES_LIST;
             (void)handle_messages_list_key(&app, KEY_NAVI, 140u);
             check(app.messages_settings_value_selected == choice,
-                  "reopening a simulated SMS preference selects its saved value");
+                  "reopening an SMS preference selects its saved value");
             app.messages_settings_value_selected = (uint8_t)((choice + 1u) % cases[i].count);
             s_setting_write_status = STORE_STATUS_INVALID_ARGUMENT;
             (void)handle_messages_list_key(&app, KEY_NAVI, 150u);
@@ -1983,6 +1989,42 @@ static void test_message_preferences_and_queries(void) {
     }
 }
 
+static void test_send_uses_saved_preferences(void) {
+    for (uint8_t format = 0u; format <= SMS_SEND_AS_EMAIL; format++) {
+        for (uint8_t validity = 0u; validity <= SMS_VALIDITY_MAXIMUM; validity++) {
+            reset_fixture();
+            app_t app = {0};
+            s_settings[STORE_SETTING_SMS_SENT_AS] = format;
+            s_settings[STORE_SETTING_SMS_VALIDITY] = validity;
+            s_settings[STORE_SETTING_SMS_REPLY_SAME_CENTRE] = 1u;
+            s_settings[STORE_SETTING_SMS_DELIVERY_REPORTS] = validity & 1u;
+            copy_text(s_setting_text, sizeof(s_setting_text), "+15551234567");
+            start_sms_send(&app, "5550100", "Settings test", APP_ROUTE_SMS_COMPOSER, 1u);
+            check(s_send_sms_requests == 1u && s_send_sms_options.format == format &&
+                      s_send_sms_options.validity == validity && s_send_sms_options.reply_same_centre &&
+                      s_send_sms_options.delivery_reports == ((validity & 1u) != 0u) &&
+                      strcmp(s_send_sms_options.service_centre, "+15551234567") == 0,
+                  "all original picker values are copied into the outgoing request");
+            check(app.sms_send_waiting && s_display_sid == 0x35fu,
+                  "configured sending keeps the original progress dialog");
+        }
+    }
+    for (unsigned bad = 0; bad < 7u; bad++) {
+        reset_fixture();
+        app_t app = {0};
+        if (bad == 0u) s_settings[STORE_SETTING_SMS_SENT_AS] = 4u;
+        if (bad == 1u) s_settings[STORE_SETTING_SMS_VALIDITY] = 6u;
+        if (bad == 2u) s_settings[STORE_SETTING_SMS_REPLY_SAME_CENTRE] = 2u;
+        if (bad == 3u) copy_text(s_setting_text, sizeof(s_setting_text), "123;AT");
+        if (bad == 4u) s_setting_read_status = STORE_STATUS_NOT_READY;
+        if (bad == 5u) copy_text(s_setting_text, sizeof(s_setting_text), "12345678901234567890123456789012345");
+        if (bad == 6u) s_settings[STORE_SETTING_SMS_DELIVERY_REPORTS] = 2u;
+        start_sms_send(&app, "5550100", "Rejected", APP_ROUTE_SMS_COMPOSER, 1u);
+        check(s_send_sms_requests == 0u && !app.sms_send_waiting && s_display_sid == 0x210u,
+              "invalid saved preferences do not silently send with different settings");
+    }
+}
+
 static void test_message_details_unknowns(void) {
     reset_fixture();
     app_t app = {0};
@@ -2011,7 +2053,97 @@ static void test_message_details_unknowns(void) {
     check_str(s_text_block, "--", "missing outgoing date is not a sample date");
 }
 
+static void test_delivery_report_ui(void) {
+    const uint8_t statuses[] = {0u, 0x20u, 0x40u, 0x60u, 1u, 2u, 0x10u, 0x80u};
+    const char *prefix[] = {"Delivered:\n", "Pending:\n", "Failed:\n", "Failed:\n",
+                            "Result\nunknown\n", "Result\nunknown\n", "Result\nunknown\n", "Result\nunknown\n"};
+    for (unsigned i = 0u; i < sizeof(statuses); i++) {
+        reset_fixture();
+        app_t app = {0}; framebuffer_t fb = {0};
+        app.route = APP_ROUTE_MESSAGES_LIST;
+        app.messages_kind = MESSAGES_KIND_INBOX; app.messages_mode = MESSAGES_MODE_LIST;
+        app.sms_inbox_count = 1u;
+        app.sms_inbox[0] = (message_metadata_t){.id=987u, .report=true, .report_status=statuses[i],
+            .address="+15551234567", .timestamp="26/09/21,12:01:03-16"};
+        render_messages_list(&app, &fb);
+        check(s_bitmap_count == 1u && s_bitmap_ids[0] == 46u, "reports use the ROM report icon, not an envelope");
+        (void)handle_messages_list_key(&app, KEY_NAVI, 100u);
+        s_read_result = (message_result_t){.request_id=app.sms_read_request_id, .object_id=987u,
+            .kind=MESSAGE_OP_READ, .outcome=MESSAGE_RESULT_OK};
+        s_read_content.metadata = app.sms_inbox[0]; s_read_result_ready = true;
+        (void)poll_sms(&app, 110u);
+        check(app.messages_mode == MESSAGES_MODE_READ &&
+              strncmp(app.sms_selected_content.text, prefix[i], strlen(prefix[i])) == 0 &&
+              strstr(app.sms_selected_content.text, "+15551234567") != NULL,
+              "report read uses the correct translated status and recipient");
+        check((strstr(app.sms_selected_content.text, "Time:\n21-Sept-2026\n12:01:03") != NULL) == (statuses[i] != 0x20u),
+              "only pending reports omit the original Time block");
+        (void)handle_messages_list_key(&app, KEY_UP, 120u);
+        check(app.messages_read_page == 0u, "report wrapping never exposes Sender or Sent pages");
+        (void)handle_messages_list_key(&app, KEY_NAVI, 130u);
+        render_messages_list(&app, &fb);
+        check_str(s_list_first, "Use number", "report options start with Use number");
+        check_str(s_list_last, "Details", "report options end with Details");
+        app.messages_option_selected = 1u;
+        (void)handle_messages_list_key(&app, KEY_NAVI, 140u);
+        check(app.confirm_context == CONFIRM_CONTEXT_SMS_REPORT_ERASE && s_display_sid == 0x318u &&
+              app.sms_delete_request_id == 0u && app.confirm_first_y == 0,
+              "report deletion uses the ROM window-24 confirmation before storage mutation");
+        messages_confirm_report_erase(&app, false, 150u);
+        check(app.route == APP_ROUTE_MESSAGES_LIST && app.sms_delete_request_id == 0u,
+              "C preserves the report");
+        app.messages_option_selected = 2u;
+        (void)handle_messages_list_key(&app, KEY_NAVI, 160u);
+        check(s_display_sid == 0x319u && app.confirm_context == CONFIRM_CONTEXT_SMS_REPORT_ERASE_ALL,
+              "Erase reports uses its own confirmation");
+        messages_confirm_report_erase(&app, true, 170u);
+        check(app.sms_delete_waiting && app.sms_delete_request_id != 0u && app.sms_delete_object_id == 0u &&
+              s_display_sid == 0x32au && s_display_record == 35u,
+              "Erase reports starts an identity-scoped bulk operation with ROM progress record 0x23");
+        (void)poll_sms(&app, 180u);
+        check(app.sms_delete_waiting, "report progress keeps its operation alive while storage works");
+        s_delete_result = (message_result_t){.request_id=app.sms_delete_request_id,
+            .kind=MESSAGE_OP_DELETE_REPORTS, .outcome=i & 1u ? MESSAGE_RESULT_ERROR : MESSAGE_RESULT_OK};
+        s_delete_result_ready = true;
+        (void)poll_sms(&app, 190u);
+        check(!app.sms_delete_waiting && app.sms_delete_request_id == 0u &&
+              app.messages_mode == MESSAGES_MODE_LIST && !app.sms_selected_content.valid,
+              "bulk completion and partial failure return to a refreshable list");
+        if (!(i & 1u))
+            check(app.sms_inbox_count == 0u && s_display_sid == 0x356u && s_display_record == 44u,
+                  "successful bulk erase displays the ROM reports-erased result");
+    }
+    for (unsigned interrupted = 0u; interrupted < 2u; interrupted++) {
+        reset_fixture();
+        app_t app = {0};
+        app.route = APP_ROUTE_CONFIRM;
+        app.confirm_context = CONFIRM_CONTEXT_SMS_REPORT_ERASE;
+        app.messages_kind = MESSAGES_KIND_INBOX; app.messages_mode = MESSAGES_MODE_OPTIONS;
+        app.sms_inbox_count = 2u;
+        app.sms_inbox[0] = (message_metadata_t){.id=987u, .report=true};
+        app.sms_inbox[1] = (message_metadata_t){.id=988u};
+        messages_confirm_report_erase(&app, true, 200u);
+        check(app.sms_delete_object_id == 987u && s_display_sid == 0x329u && s_display_record == 35u,
+              "single report erase uses its own progress text");
+        if (interrupted) app.route = APP_ROUTE_INCOMING_CALL;
+        s_delete_result = (message_result_t){.request_id=app.sms_delete_request_id,
+            .object_id=987u, .kind=MESSAGE_OP_DELETE, .outcome=MESSAGE_RESULT_OK};
+        s_delete_result_ready = true;
+        (void)poll_sms(&app, 210u);
+        check(app.sms_delete_request_id == 0u && !app.sms_delete_waiting,
+              "single report completion drains its exact token");
+        if (interrupted)
+            check(app.route == APP_ROUTE_INCOMING_CALL, "late report deletion does not reclaim a call screen");
+        else
+            check(app.sms_inbox_count == 1u && app.sms_inbox[0].id == 988u &&
+                  s_display_sid == 0x354u && s_display_record == 44u,
+                  "single report completion preserves its neighbour and uses Report erased");
+    }
+}
+
 int main(void) {
+    test_delivery_report_ui();
+    test_send_uses_saved_preferences();
     test_init_loads_composer_state();
     test_open_multitap_delete_and_cursor();
     test_composer_long_press_enters_digit();

@@ -2,6 +2,7 @@
 #define SMS_TYPES_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Outbound drafts remain bounded to one 160-septet GSM message. A received
@@ -16,6 +17,41 @@
 #define MODEM_SMS_TIMESTAMP_MAX 24u
 #define MODEM_SMS_STATUS_MAX 12u
 #define MODEM_SMS_SEGMENT_MAX 8u
+
+/* Values match the persistent, original-style Set 1 pickers. These express
+ * user intent; AT parameters and network encodings belong to the adapter. */
+typedef enum {
+    SMS_SEND_AS_TEXT, SMS_SEND_AS_FAX, SMS_SEND_AS_PAGING, SMS_SEND_AS_EMAIL,
+} sms_send_format_t;
+typedef enum {
+    SMS_VALIDITY_1_HOUR, SMS_VALIDITY_6_HOURS, SMS_VALIDITY_24_HOURS,
+    SMS_VALIDITY_72_HOURS, SMS_VALIDITY_1_WEEK, SMS_VALIDITY_MAXIMUM,
+} sms_validity_t;
+typedef struct {
+    uint8_t format;
+    uint8_t validity;
+    bool reply_same_centre;
+    bool delivery_reports;
+    /* Empty means use the current SIM/modem service centre without changing it. */
+    char service_centre[MODEM_SMS_SENDER_MAX + 1u];
+} sms_send_options_t;
+
+static inline bool sms_service_centre_valid(const char *number, size_t capacity) {
+    if (number == NULL || capacity == 0u) return false;
+    size_t i = number[0] == '+' ? 1u : 0u;
+    if (i != 0u && (capacity == 1u || number[i] == '\0')) return false;
+    for (; i < capacity; i++) {
+        if (number[i] == '\0') return true;
+        if (number[i] < '0' || number[i] > '9') return false;
+    }
+    return false;
+}
+
+static inline bool sms_send_options_valid(const sms_send_options_t *options) {
+    return options != NULL && options->format <= SMS_SEND_AS_EMAIL &&
+        options->validity <= SMS_VALIDITY_MAXIMUM &&
+        sms_service_centre_valid(options->service_centre, sizeof(options->service_centre));
+}
 typedef enum {
     MODEM_BINARY_SMS_MODE_DCS04_PORT_FIRST = 0,
     MODEM_BINARY_SMS_MODE_DCS04_CONCAT_FIRST,

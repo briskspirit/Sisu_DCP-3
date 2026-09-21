@@ -20,6 +20,7 @@ typedef enum {
     MODEM_SMS_COMMAND_CMGS_PROMPT,
     MODEM_SMS_COMMAND_CMGS_FINAL,
     MODEM_SMS_COMMAND_TEXT_SETUP,
+    MODEM_SMS_COMMAND_CENTRE_READ,
 } modem_sms_command_kind_t;
 
 /* The root request owns every pointed-to buffer for the whole operation. The
@@ -35,6 +36,7 @@ typedef struct {
     uint16_t dest_port;
     uint16_t source_port;
     modem_binary_sms_mode_t binary_mode;
+    const sms_send_options_t *options;
 } modem_sms_protocol_request_t;
 
 typedef enum {
@@ -89,6 +91,8 @@ typedef struct {
 typedef struct {
     bool (*emit)(const modem_sms_protocol_action_t *action);
     bool (*encode_text)(const char *text, modem_sms_text_t *out);
+    bool (*parse_service_centre)(const char *line, char *number, size_t cap,
+                                  uint8_t *type);
 } modem_sms_protocol_hooks_t;
 
 void modem_sms_protocol_init(void);
@@ -128,9 +132,15 @@ void modem_sms_protocol_resume_after_prompt_abort(
  * already handed to the modem as safely retryable. */
 modem_sms_outcome_t modem_sms_protocol_cancel_outcome(
     const modem_sms_protocol_request_t *request);
-/* Read before cancel(), which clears the protocol's dispatch evidence. */
+/* Parameter-repair obligations survive cancel() until confirmed cleanup. */
 bool modem_sms_protocol_settings_restore_needed(void);
 bool modem_sms_protocol_text_parameters_dirty(void);
+/* SIM changes discard the old centre, but still require parameter cleanup.
+ * init() clears all recovery state after a confirmed modem session end.
+ * Returned command storage is owned by the protocol until the next call. */
+const char *modem_sms_protocol_restore_command(void);
+void modem_sms_protocol_restore_confirmed(void);
+void modem_sms_protocol_sim_changed(void);
 void modem_sms_protocol_cancel(void);
 
 #endif /* MODEM_SMS_PROTOCOL_INTERNAL_H */

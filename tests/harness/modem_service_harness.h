@@ -365,6 +365,8 @@ static store_status_t s_mh_logo_result;
 static store_status_t s_mh_picture_receipt_result, s_mh_ringtone_receipt_result, s_mh_logo_receipt_result;
 static char s_mh_local_pdu[SMS_DELIVER_HEX_MAX];
 static unsigned s_mh_local_received, s_mh_local_sent, s_mh_local_lost;
+static unsigned s_mh_local_reports;
+static sms_report_t s_mh_last_report;
 static bool s_mh_local_reject;
 static bool s_mh_local_commit_held;
 static uint32_t s_mh_receive_receipt;
@@ -377,6 +379,12 @@ bool message_service_receive(const char *pdu) {
 bool message_service_receive_tracked(const char *pdu, uint32_t *receipt) {
     if (!message_service_receive(pdu)) return false;
     *receipt = ++s_mh_receive_receipt;
+    return true;
+}
+bool message_service_receive_report(const sms_report_t *report) {
+    if (s_mh_local_reject) { s_mh_local_lost++; return false; }
+    s_mh_last_report = *report;
+    s_mh_local_reports++;
     return true;
 }
 bool message_service_receive_committed(uint32_t receipt) {
@@ -606,6 +614,8 @@ void mh_begin(void) {
     s_mh_picture_receipt_result = s_mh_ringtone_receipt_result = s_mh_logo_receipt_result = STORE_STATUS_OK;
     s_mh_local_pdu[0] = 0;
     s_mh_local_received = s_mh_local_sent = s_mh_local_lost = 0u;
+    s_mh_local_reports = 0u;
+    memset(&s_mh_last_report, 0, sizeof(s_mh_last_report));
     s_mh_local_reject = false;
     s_mh_local_commit_held = false;
     s_mh_receive_receipt = 0u;

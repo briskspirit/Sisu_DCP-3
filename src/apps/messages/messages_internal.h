@@ -2,8 +2,31 @@
 #define APPS_MESSAGES_INTERNAL_H
 
 #include <stdint.h>
+#include <string.h>
 
 #include "apps/messages_app.h"
+#include "ui/ui.h"
+
+static inline void messages_format(char *dst, size_t cap, const char *format,
+                                    char token, const char *value) {
+    size_t used = 0u;
+    while (*format != '\0' && used + 1u < cap) {
+        if (format[0] == '%' && format[1] == token) {
+            copy_text(dst + used, cap - used, value);
+            used += strlen(dst + used);
+            format += 2;
+        } else {
+            const char *next = format;
+            asset_next_codepoint(&next);
+            size_t bytes = (size_t)(next - format);
+            if (used + bytes >= cap) break;
+            memcpy(dst + used, format, bytes);
+            used += bytes;
+            format = next;
+        }
+    }
+    if (cap != 0u) dst[used] = '\0';
+}
 
 void messages_composer_init(app_t *app);
 void messages_composer_open_picture(app_t *app, const char *text, uint32_t now);

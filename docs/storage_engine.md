@@ -234,6 +234,12 @@ the local service. Listing, reading, saving and deleting never send ME commands.
 Successful network sends queue a separate local sent copy; failure to save that
 copy cannot turn an accepted transmission into a retryable send failure.
 
+Delivery reports are separate typed Inbox files, sharing the same quota and
+read/unread ownership. Their payload is `52 + recipient length` bytes before
+the object envelope and filesystem overhead. The network reference, raw status
+and both timestamps are retained; the service does not guess an Outbox match.
+See [Delivery reports](sms_direct_delivery_design.md#delivery-reports).
+
 The RAM index holds at most 500 inbox and 500 outbox entries (12 bytes each),
 plus 64 pending identities. One shared UI metadata buffer holds 500 rows
 (34,000 bytes); only the selected body is decoded. List requests borrow that

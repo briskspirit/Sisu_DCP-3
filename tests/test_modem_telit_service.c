@@ -23,8 +23,8 @@ static uint16_t s_e2smsri_ms;
 static uint16_t s_psmri_ms;
 static uint8_t s_cnmi_mode;
 static const char SMS_PROFILE_QUERY[] = "AT+CMGF?;+CSDH?;+CSCS?;#CSCSEXT?;+CNMI?";
-static const char SMS_PROFILE_RUNTIME[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0";
-static const char SMS_PROFILE_SET[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0";
+static const char SMS_PROFILE_RUNTIME[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,1,0";
+static const char SMS_PROFILE_SET[] = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,1,0;&P0;&W0";
 static bool s_recovery_test_message, s_recovery_test_changed;
 static bool s_recovery_test_ringtone;
 static bool s_recovery_test_logo;
@@ -414,6 +414,10 @@ static void telit_sms_inject_crossed_urcs(void) {
 }
 
 static bool telit_sms_response(const char *command) {
+    if (strcmp(command, "AT+CSCA?") == 0) {
+        mh_rx_push("+CSCA: \"+15550000000\",145");
+        return true;
+    }
     if (strncmp(command, "AT+CMGF=1;+CSMP=81,", 18u) == 0 ||
         strcmp(command, "AT+CMGF=1;+CSMP=17,167,0,4") == 0) {
         if (s_sms_flow_fault == SMS_FLOW_FAULT_BINARY_SETUP_ERROR) {
@@ -424,7 +428,8 @@ static bool telit_sms_response(const char *command) {
         return true;
     }
     if (strcmp(command, "AT+CMGF=1") == 0 ||
-        strcmp(command, "AT+CMGF=1;+CSMP=17,167,0,0") == 0) {
+        strcmp(command, "AT+CMGF=1;+CSMP=17,167,0,0") == 0 ||
+        strcmp(command, "AT+CMGF=1;+CSMP=17,167,0,0;+CSCA=\"+15550000000\",145") == 0) {
         if (s_sms_cmgf_text_error_budget != 0u) {
             s_sms_cmgf_text_error_budget--;
             s_mh_final = MH_FINAL_ERROR;
@@ -532,7 +537,7 @@ static void telit_response(const char *command) {
     if (strcmp(command, SMS_PROFILE_QUERY) == 0) {
         mh_rx_push("+CMGF: 1"); mh_rx_push("+CSDH: 1");
         mh_rx_push("+CSCS: \"GSM\""); mh_rx_push("#CSCSEXT: 0");
-        mh_rx_push(s_cnmi_mode == 2u ? "+CNMI: 2,2,0,0,0" : "+CNMI: 0,0,0,0,0");
+        mh_rx_push(s_cnmi_mode == 2u ? "+CNMI: 2,2,0,1,0" : "+CNMI: 0,0,0,0,0");
         return;
     }
     if (strcmp(command, SMS_PROFILE_SET) == 0 || strcmp(command, SMS_PROFILE_RUNTIME) == 0) {
@@ -854,7 +859,7 @@ static void telit_response(const char *command) {
             mh_rx_push("+CMS ERROR: SIM not inserted");
             s_mh_final = MH_FINAL_NONE;
         }
-    } else if (strcmp(command, "AT+CNMI=2,2,0,0,0") == 0) {
+    } else if (strcmp(command, "AT+CNMI=2,2,0,1,0") == 0) {
         if (!s_mh_sim_interface_active || !s_mh_sim_present) {
             mh_rx_push("+CMS ERROR: SIM not inserted");
             s_mh_final = MH_FINAL_NONE;
@@ -1526,7 +1531,7 @@ static void test_cold_boot_matching_provision(void) {
               mh_tx_count_exact("AT+CFUN=1") == 1u &&
               mh_tx_count_exact("AT+CFUN=5") == 2u &&
               mh_tx_count_exact("AT+CSDH=1") == 1u &&
-              mh_tx_count_exact("AT+CNMI=2,2,0,0,0") == 1u &&
+              mh_tx_count_exact("AT+CNMI=2,2,0,1,0") == 1u &&
               mh_tx_count_exact("AT+CNMI=1,1,0,0,0") == 0u,
           "RF-safe activation and focused SIM lifecycle run once each");
     check(mh_tx_count_exact("AT+CSSN?") == 1u &&
@@ -1538,8 +1543,8 @@ static void test_cold_boot_matching_provision(void) {
               tx_first_index("AT+CFUN=1") <
                   tx_first_index("AT+CSDH=1") &&
               tx_first_index("AT+CSDH=1") <
-                  tx_first_index("AT+CNMI=2,2,0,0,0") &&
-              tx_first_index("AT+CNMI=2,2,0,0,0") <
+                  tx_first_index("AT+CNMI=2,2,0,1,0") &&
+              tx_first_index("AT+CNMI=2,2,0,1,0") <
                   tx_first_index("AT#WKIO?") &&
               tx_first_index("AT#WKIO?") < tx_first_index("AT&V") &&
               tx_first_index("AT&V") < tx_first_index("AT#PSMRI?") &&
@@ -6087,6 +6092,126 @@ static void test_smart_recovery_receipt_failures(void) {
     }
 }
 
+static void test_configured_sms_send(void) {
+    if (!begin_sms_operation_fixture("configured SMS fixture boots")) return;
+    sms_send_options_t options = {.format=SMS_SEND_AS_EMAIL, .validity=SMS_VALIDITY_1_WEEK,
+        .reply_same_centre=true, .delivery_reports=true, .service_centre="+15551111111"};
+    const char *setup = "AT+CMGF=1;+CSMP=177,173,50,8;+CSCA=\"+15551111111\",145";
+    const char *restore = "AT+CMGF=1;+CSMP=17,167,0,0;+CSCA=\"+15550000000\",145";
+    s_hold_final_command = setup;
+    uint32_t token = 0u;
+    check(modem_service_request_send_sms_with_options("5550102", "{}", &options, &token) && token != 0u,
+          "configured SMS request has a result identity");
+    memset(&options, 0, sizeof(options));
+    mh_settle();
+    check(mh_tx_count_exact("AT+CSCA?") == 1u && mh_tx_count_exact(setup) == 1u &&
+          mh_tx_count_exact("AT+CMGS=\"5550102\"") == 0u,
+          "queued SMS owns an immutable options copy and waits for setup acknowledgement");
+    unsigned received = s_mh_picture_parts;
+    feed_direct("+CMT: \"12025550123\",\"\",\"20260918102440\",129,4101,1,0,15",
+                "0B0504158A158A000302030242494E");
+    check(s_mh_picture_parts == received + 1u, "direct picture reception survives configured text setup");
+    unsigned reports = s_mh_local_reports;
+    mh_feed("+CDS: 2,19,\"15550102\",145,\"26/09/21,12:00:00+00\",\"26/09/21,12:00:01+00\",0");
+    check(s_mh_local_reports == reports + 1u && s_mh_last_report.reference == 19u &&
+          service_probe().command_active,
+          "interleaved report is queued without completing the configured send");
+    s_sms_cmgf_text_error_budget = 10u;
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    mh_settle();
+    modem_sms_send_result_t result;
+    check((modem_service_pop_sms_send_result)(token, &result) && result.request_id == token &&
+          result.outcome == MODEM_SMS_OUTCOME_OK && mh_tx_count_exact(restore) != 0u &&
+          service_probe().sms_mode_restore_pending,
+          "accepted send is not falsely failed when restoring the original SMSC fails");
+    s_sms_cmgf_text_error_budget = 0u;
+    mh_advance(31000u); mh_settle();
+    check(!service_probe().sms_mode_restore_pending && mh_tx_count_exact(restore) >= 2u,
+          "idle repair retains the original SMSC through failures");
+    mh_clear_tx_capture();
+    check(modem_service_request_send_sms("5550102", "After repair"), "ordinary send after SMSC repair admitted");
+    mh_settle();
+    check(modem_service_pop_sms_send_result(&result) && result.outcome == MODEM_SMS_OUTCOME_OK &&
+          mh_tx_count_exact("AT+CSCA?") == 0u && mh_tx_count_exact("AT+CMGS=\"5550102\"") == 1u,
+          "later default send is not blocked or given the earlier override");
+    options.validity = 255u;
+    token = 123u;
+    check(!modem_service_request_send_sms_with_options("5550102", "Invalid", &options, &token) && token == 0u,
+          "invalid option values are rejected before result reservation");
+}
+
+static void test_delivery_report_routing(void) {
+    if (!begin_sms_operation_fixture("delivery-report routing fixture boots")) return;
+    const char *report = "+CDS: 2,0,\"123\",129,\"26/09/21,12:00:00+00\",\"26/09/21,12:00:01+00\",32";
+    unsigned reports = s_mh_local_reports, lost = s_mh_local_lost;
+    s_hold_final_command = "AT+CSQ";
+    check(modem_service_request_debug_at("AT+CSQ"), "debug query admitted for interleaved report");
+    mh_settle();
+    mh_feed(report);
+    check(s_mh_local_reports == reports + 1u && s_mh_last_report.status == 32u &&
+          service_probe().command_active, "debug catch-all cannot swallow CDS or consume its command final");
+    mh_feed("+CDS: 2,0,\"123\",129,\"bad\",\"bad\",0");
+    check(s_mh_local_lost == lost + 1u && s_mh_local_reports == reports + 1u &&
+          service_probe().command_active, "malformed reports are counted, not stored or command finals");
+    s_mh_local_reject = true;
+    mh_feed(report);
+    check(s_mh_local_lost == lost + 2u && s_mh_local_reports == reports + 1u,
+          "report queue overflow is visible as receive loss");
+    s_mh_local_reject = false;
+    mh_feed("+CDSI: \"ME\",1");
+    check(s_mh_local_lost == lost + 3u && s_mh_local_reports == reports + 1u,
+          "unexpected stored reports are visible as receive loss, not silently discarded");
+    s_hold_final_command = NULL; mh_feed("OK"); mh_settle();
+    unsigned received = s_mh_local_received;
+    char header[160];
+    snprintf(header, sizeof(header), "+CMT: \"123\",,\"26/09/21,12:00:00+00\",129,0,0,0,\"\",129,%u",
+             (unsigned)strlen(report));
+    feed_direct(header, report);
+    check(s_mh_local_received == received + 1u && s_mh_local_reports == reports + 1u,
+          "CDS-looking bytes inside a length-owned SMS body are only message text");
+}
+
+static void test_sms_service_centre_sim_change(void) {
+    if (!begin_sms_operation_fixture("SMSC SIM-change fixture boots")) return;
+    sms_send_options_t options = {.validity=SMS_VALIDITY_MAXIMUM, .service_centre="+15551111111"};
+    const char *setup = "AT+CMGF=1;+CSMP=17,255,0,0;+CSCA=\"+15551111111\",145";
+    s_hold_final_command = setup;
+    uint32_t token;
+    check(modem_service_request_send_sms_with_options("5550102", "Old SIM", &options, &token),
+          "SIM-scoped request admitted");
+    mh_settle();
+    mh_feed("#QSS: 0");
+    s_hold_final_command = NULL;
+    mh_feed("OK");
+    mh_settle();
+    modem_sms_send_result_t result;
+    check((modem_service_pop_sms_send_result)(token, &result) && result.outcome == MODEM_SMS_OUTCOME_CANCELLED &&
+          mh_tx_count_exact("AT+CMGS=\"5550102\"") == 0u &&
+          mh_tx_count_exact("AT+CMGF=1;+CSMP=17,167,0,0;+CSCA=\"+15550000000\",145") == 0u,
+          "SIM invalidation cancels payload and never writes the old SIM's centre back");
+
+    if (!begin_sms_operation_fixture("SMSC late-prompt SIM-change fixture boots")) return;
+    s_sms_flow_fault = SMS_FLOW_FAULT_CMGS_PROMPT_TIMEOUT;
+    check(modem_service_request_send_sms_with_options("5550102", "Must not send", &options, &token),
+          "late-prompt configured SMS admitted");
+    mh_settle();
+    check(mh_tx_count_exact("AT+CMGS=\"5550102\"") == 1u, "test holds an outstanding prompt");
+    mh_feed("#QSS: 0");
+    const uint8_t prompt = '>';
+    mh_rx_push_raw(&prompt, 1u);
+    mh_settle();
+    const uint8_t esc = 0x1bu;
+    check(tx_event_raw(&esc, 1u, 0u) != SIZE_MAX &&
+          tx_event_raw("Must not send", 13u, 0u) == SIZE_MAX,
+          "late prompt after SIM loss is aborted without sending a body");
+    s_sms_flow_fault = SMS_FLOW_FAULT_NONE;
+    mh_advance(600u); mh_settle();
+    check((modem_service_pop_sms_send_result)(token, &result) && result.outcome == MODEM_SMS_OUTCOME_CANCELLED &&
+          !service_probe().sms_mode_restore_pending,
+          "ESC final drains before cancelled-send cleanup completes");
+}
+
 static void test_unicode_send_keeps_direct_delivery(void) {
     if (!begin_sms_operation_fixture("Unicode text-send fixture boots")) return;
     s_hold_final_command = "AT+CMGF=1;+CSMP=17,167,0,8";
@@ -6923,6 +7048,9 @@ static void test_early_sms_profile_order_and_wear(void) {
 }
 
 int main(void) {
+    test_delivery_report_routing();
+    test_configured_sms_send();
+    test_sms_service_centre_sim_change();
     test_early_sms_profile_order_and_wear();
     test_stored_sms_durable_recovery();
     test_stored_sms_call_and_timeout_ownership();

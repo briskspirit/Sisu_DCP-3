@@ -903,7 +903,203 @@ static void test_card_budget_reclaims_consumed(void) {
     assert(business_card_service_pending_first() == unread && boot_faults == 0u);
 }
 
+static const sms_report_t report_fixture = {
+    .first_octet=2u, .reference=17u, .address_type=145u, .status=0u,
+    .recipient="+15551234567", .submitted="26/09/21,12:00:00-16", .discharged="26/09/21,12:01:00-16"
+};
+
+static void test_reports(void) {
+    fresh();
+    size_t len;
+    assert(message_file_report(&file, &report_fixture));
+    assert(message_file_complete(&file) && message_file_control(&file) == SMS_CONTROL_KEEP);
+    assert(message_file_encode(&file, wire, sizeof(wire), &len) && len < 100u);
+    assert(message_file_decode(&decoded, wire, len));
+    assert(memcmp(&decoded.report, &report_fixture, sizeof(report_fixture)) == 0);
+    assert(message_file_content(&decoded, &content) && content.metadata.report &&
+           !content.metadata.binary && content.metadata.report_status == 0u && content.text[0] == 0);
+    for (size_t i = 0; i < len; i++) assert(!message_file_decode(&decoded, wire, i));
+    wire[3] |= MESSAGE_FILE_SENT;
+    assert(!message_file_decode(&decoded, wire, len));
+    wire[3] = MESSAGE_FILE_REPORT;
+    wire[12] = 0; /* embedded NUL in recipient */
+    assert(!message_file_decode(&decoded, wire, len));
+
+    assert(message_service_receive_report(&report_fixture)); drain();
+    assert(status().inbox == 1u && status().received == 1u && status().unread == 1u);
+    uint32_t id = first_id(MESSAGE_INBOX), token;
+    assert(message_service_request_read(MESSAGE_INBOX, id, &token));
+    assert(result(token, true).outcome == MESSAGE_RESULT_OK && content.metadata.report);
+    reopen();
+    assert(status().unread == 0u && first_id(MESSAGE_INBOX) == id);
+    assert(message_service_receive_report(&report_fixture)); drain();
+    assert(status().inbox == 1u && status().received == 0u && status().unread == 0u);
+    sms_report_t pending = report_fixture; pending.status = 0x20u;
+    assert(message_service_receive_report(&pending)); drain();
+    assert(status().inbox == 2u); /* Late pending evidence cannot revert a delivered report. */
+    pending.reference++;
+    assert(message_service_receive_report(&pending)); drain();
+    assert(status().inbox == 3u);
+    make_pdu(pdu[0], 1, 1, 0, 1, "Keep ordinary SMS");
+    assert(message_service_receive(pdu[0])); drain();
+    assert(message_service_request_save("123", "Keep draft", &token));
+    assert(result(token, false).outcome == MESSAGE_RESULT_OK);
+    assert(message_service_request_delete_reports(&token));
+    message_result_t r = result(token, false);
+    assert(r.outcome == MESSAGE_RESULT_OK && r.count == 3u);
+    reopen(); assert(status().inbox == 1u && status().outbox == 1u);
+    assert(message_service_request_read(MESSAGE_INBOX, first_id(MESSAGE_INBOX), &token));
+    assert(result(token, true).outcome == MESSAGE_RESULT_OK && !content.metadata.report);
+
+    busy = true;
+    assert(message_service_receive_report(&report_fixture)); drain();
+    assert(status().queued == 1u && status().inbox == 1u);
+    busy = false; drain(); assert(status().queued == 0u && status().inbox == 2u);
+    sms_report_t invalid = report_fixture; memset(invalid.recipient, '1', sizeof(invalid.recipient));
+    assert(!message_service_receive_report(&invalid) && status().receive_errors == 1u);
+
+    fresh();
+    assert(message_service_receive_report(&report_fixture)); drain();
+    id = first_id(MESSAGE_INBOX);
+    assert(message_file_report(&file, &report_fixture));
+    assert(message_file_encode(&file, wire, sizeof(wire), &len));
+    wire[12] = 0u;
+    assert(storage_object_write(STORAGE_OBJECT_INBOX, id, wire, len) == STORAGE_RECORD_OK);
+    /* Do not reload: the bulk operation must revalidate its still-cached row. */
+    assert(message_service_request_delete_reports(&token));
+    assert(result(token, false).outcome == MESSAGE_RESULT_ERROR);
+    size_t actual;
+    assert(storage_object_read(STORAGE_OBJECT_INBOX, id, wire, sizeof(wire), &actual) == STORAGE_RECORD_OK &&
+           actual == len && wire[12] == 0u && corrupt_detections[STORAGE_OBJECT_INBOX] != 0u);
+    reopen(); assert(status().ready && status().inbox == 0u && boot_faults == 0u);
+}
+
+static void test_report_power_cuts(void) {
+    fresh();
+    make_pdu(pdu[0], 1, 1, 0, 1, "Survives report writes");
+    assert(message_service_receive(pdu[0])); drain();
+    memcpy(baseline, media, sizeof(media));
+    operations = 0;
+    assert(message_service_receive_report(&report_fixture)); drain();
+    unsigned count = operations;
+    assert(count > 0u);
+    for (unsigned point = 1u; point <= count; point++) {
+        for (tear = 0u; tear < 3u; tear++) {
+            storage_lfs_deinit(); memcpy(media, baseline, sizeof(media)); reopen();
+            operations = 0; cut_at = point;
+            if (setjmp(cut) == 0) { assert(message_service_receive_report(&report_fixture)); drain(); assert(false); }
+            cut_at = 0; reopen(); drain();
+            assert(status().ready && status().inbox >= 1u && status().inbox <= 2u && !status().storage_error);
+            assert(message_service_receive_report(&report_fixture)); drain();
+            assert(status().inbox == 2u && boot_faults == 0u);
+        }
+    }
+    printf("report writes: %u torn-write cases passed\n", count * 3u);
+}
+
+static void test_report_delete_power_cuts(void) {
+    fresh();
+    uint32_t token, damaged;
+    make_pdu(pdu[0], 1, 1, 0, 1, "Keep beside reports");
+    assert(message_service_receive(pdu[0])); drain();
+    uint32_t normal = first_id(MESSAGE_INBOX);
+    assert(message_service_request_save("123", "Keep outbox", &token));
+    assert(result(token, false).outcome == MESSAGE_RESULT_OK);
+    sms_report_t report = report_fixture;
+    for (unsigned i = 0u; i < 3u; i++) {
+        report.reference++;
+        assert(message_service_receive_report(&report)); drain();
+    }
+    size_t len;
+    assert(message_file_report(&file, &report));
+    assert(message_file_encode(&file, wire, sizeof(wire), &len));
+    wire[12] = 0u;
+    assert(storage_object_allocate(&damaged) == STORAGE_RECORD_OK);
+    assert(storage_object_write(STORAGE_OBJECT_INBOX, damaged, wire, len) == STORAGE_RECORD_OK);
+    reopen();
+    assert(status().inbox == 4u && corrupt_detections[STORAGE_OBJECT_INBOX] != 0u);
+    memcpy(baseline, media, sizeof(media));
+    operations = 0u;
+    assert(message_service_request_delete_reports(&token));
+    assert(result(token, false).outcome == MESSAGE_RESULT_OK);
+    unsigned count = operations;
+    assert(count > 0u);
+    for (unsigned point = 1u; point <= count; point++) {
+        for (tear = 0u; tear < 3u; tear++) {
+            storage_lfs_deinit(); memcpy(media, baseline, sizeof(media)); reopen();
+            operations = 0u; cut_at = point;
+            if (setjmp(cut) == 0) {
+                assert(message_service_request_delete_reports(&token));
+                drain(); assert(false);
+            }
+            cut_at = 0u; reopen(); drain();
+            assert(status().ready && !status().storage_error && status().inbox >= 1u &&
+                   status().inbox <= 4u && status().outbox == 1u);
+            assert(message_service_request_delete_reports(&token));
+            assert(result(token, false).outcome == MESSAGE_RESULT_OK);
+            reopen();
+            assert(status().inbox == 1u && first_id(MESSAGE_INBOX) == normal && status().outbox == 1u);
+            assert(message_service_request_read(MESSAGE_INBOX, normal, &token));
+            assert(result(token, true).outcome == MESSAGE_RESULT_OK &&
+                   strcmp(content.text, "Keep beside reports") == 0);
+            size_t actual;
+            assert(storage_object_read(STORAGE_OBJECT_INBOX, damaged, wire, sizeof(wire), &actual) == STORAGE_RECORD_OK &&
+                   actual == len && wire[3] == MESSAGE_FILE_REPORT && wire[12] == 0u && boot_faults == 0u);
+        }
+    }
+    printf("report bulk deletion: %u torn-write cases passed\n", count * 3u);
+}
+
+static void test_report_full(void) {
+    fresh();
+    size_t len;
+    assert(message_file_report(&file, &report_fixture));
+    assert(message_file_encode(&file, wire, sizeof(wire), &len));
+    unsigned added = 0u;
+    for (; added < MESSAGE_MAILBOX_LIMIT; added++) {
+        uint32_t id;
+        assert(storage_object_allocate(&id) == STORAGE_RECORD_OK);
+        storage_record_result_t rc = storage_object_write(STORAGE_OBJECT_INBOX, id, wire, len);
+        if (rc == STORAGE_RECORD_FULL) break;
+        assert(rc == STORAGE_RECORD_OK);
+    }
+    reopen();
+    assert(added != 0u && status().inbox == added);
+    sms_report_t report = report_fixture; report.reference++;
+    assert(message_service_receive_report(&report));
+    tick();
+    assert(status().full && status().full_events == 1u && status().queued == 1u &&
+           status().received == 0u && message_service_sleep_ready());
+    uint32_t token;
+    assert(message_service_request_save("123", "Full inbox cannot block outbox", &token));
+    assert(result(token, false).outcome == MESSAGE_RESULT_OK && status().outbox == 1u);
+    assert(message_service_request_delete_reports(&token));
+    message_result_t r;
+    bool done = false;
+    for (unsigned i = 0u; i <= added + 1u; i++) {
+        message_service_tick(++now, NULL);
+        if (message_service_pop_result(token, &r, NULL)) { done = true; break; }
+    }
+    assert(done && r.outcome == MESSAGE_RESULT_OK && r.count == added);
+    message_service_tick(++now, NULL);
+    assert(status().queued == 0u && status().inbox == 1u && status().received == 1u && !status().full);
+    /* The held arrival is published after the erase, not erased with old reports. */
+    assert(message_service_request_read(MESSAGE_INBOX, first_id(MESSAGE_INBOX), &token));
+    assert(result(token, true).outcome == MESSAGE_RESULT_OK && content.metadata.report);
+    reopen(); assert(status().inbox == 1u && status().outbox == 1u);
+
+    fresh();
+    for (unsigned i = 0u; i < 8u; i++) {
+        report.reference++;
+        assert(message_service_receive_report(&report));
+    }
+    assert(!message_service_receive_report(&report) && status().receive_errors == 1u);
+    drain();
+    assert(status().inbox == 8u && status().queued == 0u);
+}
+
 int main(void) {
+    test_reports(); test_report_power_cuts(); test_report_delete_power_cuts(); test_report_full();
     test_codec(); test_mailboxes(); test_multipart(); test_power_cuts(); test_busy_and_full();
     test_sent_copy_and_category_isolation(); test_failed_queue_sleep();
     test_io_retry_and_corrupt_record(); test_publication_conflict_isolation(); test_delete_power_cuts();

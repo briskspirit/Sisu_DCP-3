@@ -141,6 +141,7 @@ typedef enum {
     MODEM_AT_SMS_CMGS_PROMPT,
     MODEM_AT_SMS_CMGS_FINAL,
     MODEM_AT_SMS_TEXT_SETUP,
+    MODEM_AT_SMS_CENTRE_READ,
     MODEM_AT_DIAG_QUERY,        /* one Net Monitor v2 query; always yields on final */
     MODEM_AT_MAINTENANCE,
     MODEM_AT_POWER_OFF,
@@ -213,11 +214,16 @@ typedef struct {
     uint16_t index;
     char number[MODEM_PHONE_MAX + 1u];
     char text[MODEM_SMS_TEXT_MAX + 1u];
-    uint8_t binary[MODEM_SMS_BINARY_MAX];
+    union {
+        uint8_t binary[MODEM_SMS_BINARY_MAX];
+        sms_send_options_t sms_options;
+    };
     uint16_t binary_len;
     uint16_t dest_port;
     uint16_t source_port;
     uint8_t binary_mode;
+    bool sms_options_present;
+    uint32_t sms_sim_generation;
 } modem_request_t;
 
 typedef enum {
@@ -534,6 +540,7 @@ static uint8_t s_sms_wake_retries;
  * priority; text sends must not run with picture-mode CSMP settings. */
 static bool s_sms_mode_restore_pending;
 static bool s_sms_text_parameters_dirty;
+static uint32_t s_sms_sim_generation;
 static uint8_t s_sms_mode_restore_attempts;
 static uint32_t s_sms_mode_restore_retry_ms;
 #define MODEM_SMS_MODE_RESTORE_ATTEMPTS 3u
@@ -1121,6 +1128,7 @@ void modem_service_init(void) {
     direct_ring_reset();
     s_sms_mode_restore_pending = false;
     s_sms_text_parameters_dirty = false;
+    s_sms_sim_generation = 0u;
     s_sms_mode_restore_attempts = 0u;
     s_sms_mode_restore_retry_ms = 0u;
     s_now_ms = time_ms();
@@ -2368,6 +2376,9 @@ static bool queue_sms_request(modem_request_t *request,
     }
 
     request->request_id = request_id;
+    critical_section_enter_blocking(&s_status_lock);
+    request->sms_sim_generation = s_sms_sim_generation;
+    critical_section_exit(&s_status_lock);
     if (!queue_request(request)) {
         critical_section_enter_blocking(&s_sms_lock);
         bool released = modem_sms_state_release_request(request_id, kind);
@@ -2385,15 +2396,23 @@ static bool queue_sms_request(modem_request_t *request,
 
 bool modem_service_request_send_sms(const char *number, const char *text,
                                     uint32_t *request_id_out) {
+    return modem_service_request_send_sms_with_options(number, text, NULL, request_id_out);
+}
+
+bool modem_service_request_send_sms_with_options(const char *number, const char *text,
+    const sms_send_options_t *options, uint32_t *request_id_out) {
     if (request_id_out != NULL) {
         *request_id_out = 0u;
     }
-    if (text == NULL || strlen(text) > MODEM_SMS_TEXT_MAX) return false;
+    if (text == NULL || strlen(text) > MODEM_SMS_TEXT_MAX ||
+        (options != NULL && !sms_send_options_valid(options))) return false;
     modem_request_t request;
     memset(&request, 0, sizeof(request));
     request.type = MODEM_REQ_SEND_SMS;
     copy_bounded(request.number, sizeof(request.number), number);
     copy_bounded(request.text, sizeof(request.text), text);
+    request.sms_options_present = options != NULL;
+    if (options != NULL) request.sms_options = *options;
     return request.number[0] != '\0' &&
            queue_sms_request(&request, MODEM_SMS_REQUEST_SEND_TEXT,
                              request_id_out);
@@ -2869,7 +2888,7 @@ static void direct_feed_raw(uint8_t byte) {
     direct_apply_step(step, tpdu_len);
 }
 
-/* Retry CSMP repair in bounded bursts, without monopolizing the AT channel. */
+/* Retry outgoing-parameter repair without monopolizing the AT channel. */
 static bool sms_mode_restore_start(uint32_t now_ms) {
     if (!s_sms_mode_restore_pending || s_operation != MODEM_OP_NONE || s_active ||
         s_dtr_wake_pending || (s_sms_mode_restore_retry_ms != 0u &&
@@ -2882,7 +2901,7 @@ static bool sms_mode_restore_start(uint32_t now_ms) {
         s_sms_mode_restore_retry_ms = now_ms + MODEM_SMS_MODE_RESTORE_RETRY_MS;
         return false;
     }
-    send_command(MODEM_AT_SMS_MODE_RESTORE, "AT+CMGF=1;+CSMP=17,167,0,0", 5000u, now_ms);
+    send_command(MODEM_AT_SMS_MODE_RESTORE, modem_sms_protocol_restore_command(), 5000u, now_ms);
     return true;
 }
 
@@ -3042,6 +3061,21 @@ static void route_urc(const char *line) {
         s_status.urc_count++;
         critical_section_exit(&s_status_lock);
         direct_feed_line(line);
+    } else if (starts_with(line, "+CDS:")) {
+        sms_report_t report;
+        critical_section_enter_blocking(&s_status_lock);
+        s_status.urc_count++;
+        critical_section_exit(&s_status_lock);
+        if (g_modem_vendor.parse_sms_report == NULL ||
+            !g_modem_vendor.parse_sms_report(line, &report)) {
+            message_service_note_receive_loss();
+            LOGW("modem", "unsupported or malformed SMS status report");
+        } else if (!message_service_receive_report(&report)) {
+            LOGW("modem", "SMS status report admission failed");
+        }
+    } else if (starts_with(line, "+CDSI:")) {
+        message_service_note_receive_loss();
+        LOGW("modem", "unexpected stored status report; direct reporting required");
     } else if (starts_with(line, "+CPIN:")) {
         (void)parse_cpin(line);
         critical_section_enter_blocking(&s_status_lock);
@@ -4028,6 +4062,20 @@ static void send_deferred(uint32_t now_ms) {
         return;
     }
     s_deferred_valid = false;
+    modem_sms_command_kind_t sms_kind;
+    if (sms_protocol_command_from_at(s_deferred_kind, &sms_kind) &&
+        s_current_request.sms_sim_generation != s_sms_sim_generation) {
+        /* A wake-deferred command must not apply an old SIM's SMSC to a new
+         * session. No bytes crossed the wire; retain only valid idle repair. */
+        modem_sms_protocol_request_t request;
+        if (sms_protocol_request_view(&request)) {
+            modem_sms_protocol_on_final(sms_kind, false, &request, &s_sms_protocol_hooks, now_ms);
+        } else finish_operation(false);
+        return;
+    }
+    if (s_deferred_kind == MODEM_AT_SMS_MODE_RESTORE) {
+        copy_bounded(s_deferred_cmd, sizeof(s_deferred_cmd), modem_sms_protocol_restore_command());
+    }
     uint32_t token = s_deferred_call_token;
     s_deferred_call_token = 0u;
     /* Re-enter the common command path after CTS confirms the DTR wake. */
@@ -4597,6 +4645,7 @@ static void finish_command_result(bool ok, const char *line) {
         if (ok) {
             s_sms_mode_restore_pending = false;
             s_sms_text_parameters_dirty = false;
+            modem_sms_protocol_restore_confirmed();
             s_sms_mode_restore_attempts = 0u;
             s_sms_mode_restore_retry_ms = 0u;
             LOGI("modem", "SMS text mode restored after a cancelled operation");
@@ -5282,6 +5331,7 @@ static bool at_kind_is_operation(modem_at_kind_t kind) {
            kind == MODEM_AT_SMS_CMGF_TEXT || kind == MODEM_AT_SMS_CMGS_PROMPT ||
            kind == MODEM_AT_SMS_CMGS_FINAL ||
            kind == MODEM_AT_SMS_TEXT_SETUP ||
+           kind == MODEM_AT_SMS_CENTRE_READ ||
            kind == MODEM_AT_POWER_OFF || kind == MODEM_AT_DEBUG ||
            kind == MODEM_AT_MAINTENANCE;
 }
@@ -5554,6 +5604,7 @@ static bool is_known_urc_line(const char *line) {
            starts_with(line, "+CLIP:") ||
            starts_with(line, "+CMTI:") ||
            starts_with(line, "+CMT:") ||
+           starts_with(line, "+CDS:") ||
            starts_with(line, "+CDSI:") ||
            starts_with(line, "+CPIN:") ||
            starts_with(line, "+PACSP") ||
@@ -6208,6 +6259,7 @@ static bool sms_protocol_command_from_at(modem_at_kind_t at_kind,
     case MODEM_AT_SMS_CMGS_PROMPT:     *out = MODEM_SMS_COMMAND_CMGS_PROMPT; return true;
     case MODEM_AT_SMS_CMGS_FINAL:      *out = MODEM_SMS_COMMAND_CMGS_FINAL; return true;
     case MODEM_AT_SMS_TEXT_SETUP:      *out = MODEM_SMS_COMMAND_TEXT_SETUP; return true;
+    case MODEM_AT_SMS_CENTRE_READ:     *out = MODEM_SMS_COMMAND_CENTRE_READ; return true;
     default: return false;
     }
 }
@@ -6220,6 +6272,7 @@ static modem_at_kind_t sms_protocol_command_to_at(
     case MODEM_SMS_COMMAND_CMGS_PROMPT:     return MODEM_AT_SMS_CMGS_PROMPT;
     case MODEM_SMS_COMMAND_CMGS_FINAL:      return MODEM_AT_SMS_CMGS_FINAL;
     case MODEM_SMS_COMMAND_TEXT_SETUP: return MODEM_AT_SMS_TEXT_SETUP;
+    case MODEM_SMS_COMMAND_CENTRE_READ: return MODEM_AT_SMS_CENTRE_READ;
     default:                                return MODEM_AT_NONE;
     }
 }
@@ -6238,6 +6291,7 @@ static bool sms_protocol_request_view(modem_sms_protocol_request_t *out) {
     out->dest_port = s_current_request.dest_port;
     out->source_port = s_current_request.source_port;
     out->binary_mode = (modem_binary_sms_mode_t)s_current_request.binary_mode;
+    out->options = s_current_request.sms_options_present ? &s_current_request.sms_options : NULL;
     return true;
 }
 
@@ -6330,6 +6384,8 @@ static bool sms_protocol_emit(const modem_sms_protocol_action_t *action) {
         return s_active_kind != MODEM_AT_NONE;
     }
     case MODEM_SMS_ACTION_ABORT_PROMPT:
+        s_active = false;
+        s_active_kind = MODEM_AT_NONE;
         sms_begin_prompt_abort_settle(action->data.abort_prompt.now_ms);
         if (action->data.abort_prompt.restore_after_settle) {
             s_binary_restore_pending = true;
@@ -6397,9 +6453,15 @@ static bool sms_encode_text(const char *text, modem_sms_text_t *out) {
     return g_modem_vendor.encode_sms_text != NULL && g_modem_vendor.encode_sms_text(text, out);
 }
 
+static bool sms_parse_service_centre(const char *line, char *number, size_t cap, uint8_t *type) {
+    return g_modem_vendor.parse_sms_service_centre != NULL &&
+        g_modem_vendor.parse_sms_service_centre(line, number, cap, type);
+}
+
 static const modem_sms_protocol_hooks_t s_sms_protocol_hooks = {
     .emit = sms_protocol_emit,
     .encode_text = sms_encode_text,
+    .parse_service_centre = sms_parse_service_centre,
 };
 
 static bool sms_start_current_request(uint32_t now_ms) {
@@ -6411,7 +6473,8 @@ static bool sms_start_current_request(uint32_t now_ms) {
 
     s_sms_terminal_published = false;
     set_operation_busy(true);
-    if (s_sms_text_parameters_dirty) {
+    if (s_sms_text_parameters_dirty ||
+        s_current_request.sms_sim_generation != s_sms_sim_generation) {
         (void)sms_publish_terminal_for_request(&s_current_request, MODEM_SMS_OUTCOME_ERROR);
         finish_operation(false);
         return true;
@@ -6713,6 +6776,10 @@ static void apply_sim_observation(modem_sim_observation_t observation) {
         s_maintenance_sim_deferred = MODEM_SIM_OBSERVATION_NONE;
     }
     was_ready = s_status.sim_ready;
+    if (was_ready && observation != MODEM_SIM_OBSERVATION_READY) {
+        s_sms_sim_generation++;
+        modem_sms_protocol_sim_changed();
+    }
     s_status.sim_checked = true;
     s_status.sim_present = observation != MODEM_SIM_OBSERVATION_ABSENT;
     s_status.sim_ready = observation == MODEM_SIM_OBSERVATION_READY;
@@ -6810,6 +6877,11 @@ static void modem_enter_off(void) {
     bool was_off = s_state == MODEM_STATE_OFF;
     diag_invalidate_all(s_now_ms);
     cancel_request_session();
+    modem_sms_protocol_init();
+    s_sms_mode_restore_pending = false;
+    s_sms_text_parameters_dirty = false;
+    s_sms_mode_restore_attempts = 0u;
+    s_sms_mode_restore_retry_ms = 0u;
     s_active = false;
     s_active_kind = MODEM_AT_NONE;
     s_operation = MODEM_OP_NONE;

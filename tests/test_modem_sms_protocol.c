@@ -125,9 +125,17 @@ static bool encode_text_fixture(const char *text, modem_sms_text_t *out) {
     return sms_gsm7_from_utf8(text, out->body, MODEM_SMS_TEXT_MAX, &out->length);
 }
 
+static bool parse_centre_fixture(const char *line, char *number, size_t cap, uint8_t *type) {
+    if (strcmp(line, "+CSCA: \"+15550000000\",145") != 0) return false;
+    snprintf(number, cap, "+15550000000");
+    *type = 145u;
+    return true;
+}
+
 static const modem_sms_protocol_hooks_t s_hooks = {
     .emit = capture_emit,
     .encode_text = encode_text_fixture,
+    .parse_service_centre = parse_centre_fixture,
 };
 
 static void reset_fixture(void) {
@@ -575,7 +583,106 @@ static void test_binary_text_setup_variants(void) {
     }
 }
 
+static void test_configured_text_parameters(void) {
+    const unsigned validity[] = {11u, 71u, 167u, 169u, 173u, 255u};
+    const unsigned pid[] = {0u, 34u, 38u, 50u};
+    for (unsigned v = 0u; v < 6u; v++) for (unsigned p = 0u; p < 4u; p++) {
+        for (unsigned flags = 0u; flags < 4u; flags++) {
+            unsigned reply = flags & 1u;
+            reset_fixture();
+            sms_send_options_t options = {.validity=v, .format=p, .reply_same_centre=reply != 0u,
+                                         .delivery_reports=(flags & 2u) != 0u};
+            modem_sms_protocol_request_t r = text_request();
+            r.options = &options;
+            if (reply != 0u) r.text = "{}";
+            char expected[80];
+            snprintf(expected, sizeof(expected), "AT+CMGF=1;+CSMP=%u,%u,%u,%u",
+                     (reply != 0u ? 145u : 17u) | (options.delivery_reports ? 32u : 0u),
+                     validity[v], pid[p], reply != 0u ? 8u : 0u);
+            check(modem_sms_protocol_begin(&r, &s_hooks, 1u), "configured text admitted");
+            check_command(0u, MODEM_SMS_COMMAND_TEXT_SETUP, expected, 5000u, false, false,
+                          "all format/validity/reply/report selections map to exact text-mode parameters");
+            clear_actions();
+            modem_sms_protocol_on_final(MODEM_SMS_COMMAND_TEXT_SETUP, true, &r, &s_hooks, 2u);
+            check_command(0u, MODEM_SMS_COMMAND_CMGS_PROMPT, "AT+CMGS=\"+15551234567\",145",
+                          5000u, false, false, "configured setup advances only after OK");
+            clear_actions();
+            (void)modem_sms_protocol_on_prompt(MODEM_SMS_COMMAND_CMGS_PROMPT, &r, &s_hooks, 3u);
+            modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGS_FINAL, true, &r, &s_hooks, 4u);
+            check_command(1u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0",
+                          5000u, false, false, "configured text cleans up even for GSM7");
+            clear_actions();
+            modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CMGF_TEXT, false, &r, &s_hooks, 5u);
+            check(s_actions[1].outcome == MODEM_SMS_OUTCOME_OK && modem_sms_protocol_settings_restore_needed(),
+                  "accepted configured send remains successful while cleanup needs retry");
+        }
+    }
+}
+
+static void test_service_centre_lifecycle(void) {
+    sms_send_options_t options = {.validity=SMS_VALIDITY_MAXIMUM, .service_centre="+15551111111"};
+    modem_sms_protocol_request_t r = text_request();
+    r.options = &options;
+    for (unsigned outcome = 0u; outcome < 6u; outcome++) {
+        reset_fixture();
+        check(modem_sms_protocol_begin(&r, &s_hooks, 1u), "SMSC override admitted");
+        check_command(0u, MODEM_SMS_COMMAND_CENTRE_READ, "AT+CSCA?", 5000u, false, false,
+                      "original SMSC is read before any mutation");
+        clear_actions();
+        if (outcome != 0u) {
+            check(modem_sms_protocol_parse_line(MODEM_SMS_COMMAND_CENTRE_READ,
+                outcome == 1u ? "+CSCA: broken" : "+CSCA: \"+15550000000\",145",
+                false, false, &r, &s_hooks), "SMSC read response consumed");
+        }
+        if (outcome == 2u) modem_sms_protocol_parse_line(MODEM_SMS_COMMAND_CENTRE_READ,
+            "+CSCA: \"+15550000000\",145", false, false, &r, &s_hooks);
+        modem_sms_protocol_on_final(MODEM_SMS_COMMAND_CENTRE_READ, true, &r, &s_hooks, 2u);
+        if (outcome < 3u) {
+            check(s_action_count == 2u && s_actions[0].outcome == MODEM_SMS_OUTCOME_ERROR &&
+                  !modem_sms_protocol_settings_restore_needed(),
+                  "bare OK, malformed or duplicate SMSC cannot authorize a write");
+            continue;
+        }
+        check_command(0u, MODEM_SMS_COMMAND_TEXT_SETUP,
+            "AT+CMGF=1;+CSMP=17,255,0,0;+CSCA=\"+15551111111\",145", 5000u, false, false,
+            "temporary centre is set only after a verified snapshot");
+        check(strcmp(modem_sms_protocol_restore_command(),
+            "AT+CMGF=1;+CSMP=17,167,0,0;+CSCA=\"+15550000000\",145") == 0,
+            "cleanup holds the original address and type, not the override");
+        if (outcome == 3u) {
+            modem_sms_protocol_cancel();
+            check(modem_sms_protocol_settings_restore_needed() &&
+                  strstr(modem_sms_protocol_restore_command(), "+15550000000") != NULL &&
+                  !modem_sms_protocol_begin(&r, &s_hooks, 3u),
+                  "cancellation keeps the backup and blocks sends until repair");
+            modem_sms_protocol_restore_confirmed();
+            check(modem_sms_protocol_begin(&r, &s_hooks, 4u), "confirmed repair permits another send");
+        } else if (outcome == 4u) {
+            clear_actions();
+            modem_sms_protocol_on_timeout(MODEM_SMS_COMMAND_TEXT_SETUP, &r, &s_hooks, 3u);
+            check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT,
+                "AT+CMGF=1;+CSMP=17,167,0,0;+CSCA=\"+15550000000\",145", 5000u, false, false,
+                "ambiguous setup timeout restores the original centre");
+        } else {
+            modem_sms_protocol_sim_changed();
+            clear_actions();
+            modem_sms_protocol_on_final(MODEM_SMS_COMMAND_TEXT_SETUP, true, &r, &s_hooks, 3u);
+            check_command(0u, MODEM_SMS_COMMAND_CMGF_TEXT, "AT+CMGF=1;+CSMP=17,167,0,0",
+                          5000u, false, false, "SIM loss stops send without copying the old SIM's centre");
+        }
+    }
+    const char *bad[] = {"+", "123;AT", "123\"", "123\r", "12 34"};
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        reset_fixture();
+        snprintf(options.service_centre, sizeof(options.service_centre), "%s", bad[i]);
+        check(!modem_sms_protocol_begin(&r, &s_hooks, 1u) && s_action_count == 0u,
+              "invalid service centre fails before transport use");
+    }
+}
+
 int main(void) {
+    test_configured_text_parameters();
+    test_service_centre_lifecycle();
     test_binary_text_setup_variants();
     test_unicode_text_cleanup();
     test_text_transport();

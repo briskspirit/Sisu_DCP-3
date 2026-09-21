@@ -74,7 +74,7 @@ static void telit_sms_profile_begin(void) {
 static modem_provision_line_t telit_sms_profile_line(const char *line) {
     static const char *const prefixes[] = {"+CMGF:", "+CSDH:", "+CSCS:", "#CSCSEXT:", "+CNMI:"};
     static const uint8_t single[] = {1u, 1u, 0u, 0u};
-    static const uint8_t cnmi[] = {2u, 2u, 0u, 0u, 0u};
+    static const uint8_t cnmi[] = {2u, 2u, 0u, 1u, 0u};
     for (unsigned i = 0u; i < 5u; i++) {
         if (!telit_starts_with(line, prefixes[i])) continue;
         modem_provision_line_t result;
@@ -104,7 +104,7 @@ static modem_provision_line_t telit_sms_profile_finish(bool ok, bool timed_out) 
         ? MODEM_PROVISION_LINE_MATCH : MODEM_PROVISION_LINE_MISMATCH;
 }
 static bool telit_sms_profile_set(char *out, size_t cap) {
-    const char *command = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0;&P0;&W0";
+    const char *command = "AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,1,0;&P0;&W0";
     if (strlen(command) >= cap) return false;
     strcpy(out, command);
     s_sms_profile_save_needed = false;
@@ -150,7 +150,7 @@ const modem_init_step_t TELIT_INIT_STEPS[] = {
         .readback_begin = telit_sms_boot_profile_begin,
         .readback_finish = telit_sms_boot_profile_finish,
     },
-    TELIT_INIT("AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,0,0",
+    TELIT_INIT("AT+CMGF=1;+CSDH=1;+CSCS=\"GSM\";#CSCSEXT=0;+CNMI=2,2,0,1,0",
                2500u, 0u, true, MODEM_DEGRADE_NONE, MODEM_INIT_PREREQ_NONE,
                MODEM_SETTING_PROFILE, NULL),
     /* Keep RF off until GPIO ALT16/ALT17 and the complete #STUNEANT table
@@ -196,7 +196,11 @@ const modem_init_step_t TELIT_INIT_STEPS[] = {
      * every carrier's SMS-DELIVER is routed to the host as +CMT, normalized
      * to a 23.040 PDU, and queued for local littlefs storage. Mode 2 buffers the URC while the
      * TA-TE link is reserved and flushes it afterwards; DTR sleep unchanged. */
-    TELIT_INIT("AT+CNMI=2,2,0,0,0",    2500u, 3u, false, MODEM_DEGRADE_NONE,
+    /* Service 0 lets the modem acknowledge +CMT and +CDS; service 1 would
+     * require a separate, prompt CNMA transaction on this shared AT channel. */
+    TELIT_INIT("AT+CSMS=0",             2500u, 3u, false, MODEM_DEGRADE_NONE,
+               MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION, MODEM_SETTING_RUNTIME, NULL),
+    TELIT_INIT("AT+CNMI=2,2,0,1,0",    2500u, 3u, false, MODEM_DEGRADE_NONE,
                MODEM_INIT_PREREQ_SIM_READY | MODEM_INIT_PREREQ_SIM_COMPLETION, MODEM_SETTING_PROFILE, NULL),
     TELIT_INIT("AT+CLIP=1",             2500u, 3u, false, MODEM_DEGRADE_NONE,
                MODEM_INIT_PREREQ_SIM_READY, MODEM_SETTING_PROFILE, NULL),

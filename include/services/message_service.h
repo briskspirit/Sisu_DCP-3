@@ -3,10 +3,12 @@
 
 #include "services/message_types.h"
 #include "services/datetime_types.h"
+#include "services/sms_report.h"
 
 #define MESSAGE_INCOMPLETE_TTL_SECONDS (7u * 24u * 60u * 60u)
 
 typedef enum { MESSAGE_OP_LIST, MESSAGE_OP_READ, MESSAGE_OP_SAVE, MESSAGE_OP_DELETE,
+               MESSAGE_OP_DELETE_REPORTS,
                MESSAGE_OP_COUNT } message_op_t;
 typedef enum { MESSAGE_RESULT_OK, MESSAGE_RESULT_ERROR, MESSAGE_RESULT_FULL } message_result_code_t;
 typedef struct {
@@ -40,6 +42,8 @@ bool message_service_idle(void);
  * New work and transient BUSY results remain blockers. */
 bool message_service_sleep_ready(void);
 bool message_service_receive(const char *pdu);
+/* Reports are independent network evidence, never an inferred Outbox match. */
+bool message_service_receive_report(const sms_report_t *report);
 /* One tracked external copy at a time. Completion means its contents are
  * durable (possibly as an incomplete fragment), or deliberately filtered.
  * Forgetting a receipt never removes the admitted delivery. */
@@ -59,6 +63,7 @@ bool message_service_request_list(message_mailbox_t mailbox, message_metadata_t 
                                   uint16_t capacity, uint32_t *token);
 bool message_service_request_read(message_mailbox_t mailbox, uint32_t id, uint32_t *token);
 bool message_service_request_delete(message_mailbox_t mailbox, uint32_t id, uint32_t *token);
+bool message_service_request_delete_reports(uint32_t *token);
 bool message_service_request_save(const char *address, const char *text, uint32_t *token);
 /* One outstanding request per kind, including its unconsumed result. A read's
  * content is copied only for the matching token; other operations pass NULL. */

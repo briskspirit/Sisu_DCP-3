@@ -3,7 +3,7 @@
 #include <string.h>
 #include "services/sms_picture_codec.h"
 
-#define KNOWN_FLAGS (MESSAGE_FILE_DRAFT | MESSAGE_FILE_QUARANTINED | MESSAGE_FILE_SENT)
+#define KNOWN_FLAGS (MESSAGE_FILE_DRAFT | MESSAGE_FILE_QUARANTINED | MESSAGE_FILE_SENT | MESSAGE_FILE_REPORT)
 #define CONCAT_WINDOW_SECONDS 86400u
 
 /* Called only by the sole core0 message owner. Reuse decode scratch rather
@@ -105,6 +105,8 @@ static bool same_group(const sms_codec_message_t *a, const sms_codec_message_t *
 
 static bool valid_file(const message_file_t *file) {
     if (file == NULL || (file->flags & ~KNOWN_FLAGS)) return false;
+    if (file->flags & MESSAGE_FILE_REPORT)
+        return file->flags == MESSAGE_FILE_REPORT && file->count == 0u && sms_report_valid(&file->report);
     if (file->flags & MESSAGE_FILE_DRAFT) {
         return !(file->flags & MESSAGE_FILE_QUARANTINED) && file->count == 0u &&
             memchr(file->draft.address, 0, sizeof(file->draft.address)) != NULL &&
@@ -149,6 +151,14 @@ bool message_file_receive(message_file_t *file, const char *pdu) {
     return true;
 }
 
+bool message_file_report(message_file_t *file, const sms_report_t *report) {
+    if (file == NULL || !sms_report_valid(report)) return false;
+    memset(file, 0, sizeof(*file));
+    file->flags = MESSAGE_FILE_REPORT;
+    file->report = *report;
+    return true;
+}
+
 message_merge_t message_file_merge(message_file_t *file, const char *pdu) {
     if (file == NULL || (file->flags & MESSAGE_FILE_DRAFT) || file->count == 0u ||
         file->count > MESSAGE_FILE_PART_LIMIT) return MESSAGE_MERGE_UNRELATED;
@@ -175,7 +185,7 @@ message_merge_t message_file_merge(message_file_t *file, const char *pdu) {
 
 bool message_file_complete(const message_file_t *file) {
     if (!valid_file(file)) return false;
-    if (file->flags & MESSAGE_FILE_DRAFT) return true;
+    if (file->flags & (MESSAGE_FILE_DRAFT | MESSAGE_FILE_REPORT)) return true;
     if (file->count == 0u || file->count > MESSAGE_FILE_PART_LIMIT) return false;
     if (file->flags & MESSAGE_FILE_QUARANTINED) return true;
     sms_codec_message_t *part = &s_part;
@@ -196,7 +206,7 @@ sms_control_filter_t message_file_control(const message_file_t *file) {
         part_decode(&file->parts[0], &s_first) && s_first.pid == 0x40u && !s_first.submit)
         return SMS_CONTROL_TYPE0;
     if (!message_file_complete(file) ||
-        (file->flags & (MESSAGE_FILE_DRAFT | MESSAGE_FILE_QUARANTINED)) ||
+        (file->flags & (MESSAGE_FILE_DRAFT | MESSAGE_FILE_QUARANTINED | MESSAGE_FILE_REPORT)) ||
         !part_decode(&file->parts[0], &s_first)) return SMS_CONTROL_KEEP;
     size_t used = 0u;
     for (uint8_t seq = 1u; seq <= file->count; seq++) {
@@ -222,7 +232,17 @@ bool message_file_encode(const message_file_t *file, uint8_t *dst, size_t cap, s
     memset(dst, 0, 8u);
     dst[0] = 'S'; dst[1] = 'M'; dst[2] = 1u; dst[3] = file->flags;
     size_t used = 8u;
-    if (file->flags & MESSAGE_FILE_DRAFT) {
+    if (file->flags & MESSAGE_FILE_REPORT) {
+        const sms_report_t *r = &file->report;
+        size_t address = strlen(r->recipient);
+        if (cap - used < 44u + address) return false;
+        dst[4] = (uint8_t)address;
+        dst[used++] = r->first_octet; dst[used++] = r->reference;
+        dst[used++] = r->address_type; dst[used++] = r->status;
+        memcpy(dst + used, r->recipient, address); used += address;
+        memcpy(dst + used, r->submitted, 20u); used += 20u;
+        memcpy(dst + used, r->discharged, 20u); used += 20u;
+    } else if (file->flags & MESSAGE_FILE_DRAFT) {
         size_t address = strlen(file->draft.address), text = strlen(file->draft.text);
         if (address > MODEM_SMS_SENDER_MAX || text > MODEM_SMS_TEXT_MAX || cap - used < address + text)
             return false;
@@ -249,7 +269,17 @@ bool message_file_decode(message_file_t *file, const uint8_t *src, size_t len) {
     memset(file, 0, sizeof(*file));
     file->flags = src[3];
     size_t pos = 8u;
-    if (file->flags & MESSAGE_FILE_DRAFT) {
+    if (file->flags & MESSAGE_FILE_REPORT) {
+        if (src[4] == 0u || src[4] > MODEM_SMS_SENDER_MAX || src[6] != 0u ||
+            len != pos + 44u + src[4] || memchr(src + pos + 4u, 0, len - pos - 4u) != NULL)
+            return false;
+        sms_report_t *r = &file->report;
+        r->first_octet = src[pos++]; r->reference = src[pos++];
+        r->address_type = src[pos++]; r->status = src[pos++];
+        memcpy(r->recipient, src + pos, src[4]); pos += src[4];
+        memcpy(r->submitted, src + pos, 20u); pos += 20u;
+        memcpy(r->discharged, src + pos, 20u); pos += 20u;
+    } else if (file->flags & MESSAGE_FILE_DRAFT) {
         if (src[4] > MODEM_SMS_SENDER_MAX || src[6] > MODEM_SMS_TEXT_MAX ||
             len != pos + src[4] + src[6] || memchr(src + pos, 0, len - pos) != NULL) return false;
         memcpy(file->draft.address, src + pos, src[4]); pos += src[4];
@@ -273,6 +303,13 @@ bool message_file_metadata(const message_file_t *file, message_metadata_t *out) 
     memset(out, 0, sizeof(*out));
     out->sent = (file->flags & MESSAGE_FILE_SENT) != 0u;
     out->quarantined = (file->flags & MESSAGE_FILE_QUARANTINED) != 0u;
+    if (file->flags & MESSAGE_FILE_REPORT) {
+        out->report = true;
+        out->report_status = file->report.status;
+        strcpy(out->address, file->report.recipient);
+        strcpy(out->timestamp, file->report.discharged);
+        return true;
+    }
     if (file->flags & MESSAGE_FILE_DRAFT) {
         strcpy(out->address, file->draft.address);
         return true;
@@ -289,6 +326,7 @@ bool message_file_content(const message_file_t *file, message_content_t *out) {
     if (out == NULL || !message_file_complete(file) || !message_file_metadata(file, &out->metadata))
         return false;
     out->text[0] = '\0';
+    if (file->flags & MESSAGE_FILE_REPORT) return true;
     if (file->flags & MESSAGE_FILE_DRAFT) {
         strcpy(out->text, file->draft.text);
         return true;

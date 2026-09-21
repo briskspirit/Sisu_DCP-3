@@ -727,6 +727,12 @@ bool handle_editor_key(app_t *app, uint16_t key, event_type_t event_type, uint32
 }
 
 bool handle_confirm_key(app_t *app, uint16_t key, uint32_t now) {
+    if (app->confirm_context == CONFIRM_CONTEXT_SMS_REPORT_ERASE ||
+        app->confirm_context == CONFIRM_CONTEXT_SMS_REPORT_ERASE_ALL) {
+        if (key == KEY_C || key == KEY_NAVI)
+            messages_confirm_report_erase(app, key == KEY_NAVI, now);
+        return true;
+    }
     if (app->confirm_context == CONFIRM_CONTEXT_PICTURE_MESSAGE_SAVE_FIRST) {
         if (key == KEY_C || key == KEY_NAVI) {
             messages_picture_confirm_save(app, key == KEY_NAVI, now);

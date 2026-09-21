@@ -56,6 +56,49 @@ static uint8_t s_ascii[TELIT_GSM7_SEPTETS_MAX];    /* unpacked 7-bit ASCII (PDU 
 static telit_csv_view_t s_fields[TELIT_3GPP2_HEADER_FIELDS_MAX];
 static char s_3gpp_header[MODEM_SMS_DIRECT_LINE_MAX];
 
+bool telit_parse_sms_service_centre(const char *line, char *number, size_t cap,
+                                    uint8_t *type) {
+    telit_csv_view_t fields[2];
+    size_t count = 0u;
+    uint32_t parsed_type;
+    if (line == NULL || number == NULL || type == NULL ||
+        !telit_view_split_prefixed(line, "+CSCA:", fields, 2u, &count) || count != 2u ||
+        !telit_view_copy_exact(number, cap, fields[0]) ||
+        !sms_service_centre_valid(number, cap) ||
+        !telit_view_parse_u32(fields[1], UINT8_MAX, &parsed_type)) return false;
+    *type = (uint8_t)parsed_type;
+    return true;
+}
+
+bool telit_parse_sms_report(const char *line, sms_report_t *out) {
+    /* ThreadX AT guide +CNMI, text-mode +CDS. Never interpret a short PDU
+     * header, or a proprietary layout, as these seven documented fields. */
+    size_t count = 0u;
+    uint32_t fo, reference, type, status;
+    sms_report_t report = {0};
+    if (line == NULL || out == NULL ||
+        !telit_view_split_prefixed(line, "+CDS:", s_fields, 7u, &count) || count != 7u ||
+        !telit_view_parse_u32(s_fields[0], UINT8_MAX, &fo) ||
+        !telit_view_parse_u32(s_fields[1], UINT8_MAX, &reference) ||
+        !telit_view_parse_u32(s_fields[3], UINT8_MAX, &type) ||
+        !telit_view_parse_u32(s_fields[6], UINT8_MAX, &status) ||
+        !telit_view_copy_exact(report.recipient, sizeof(report.recipient), s_fields[2]) ||
+        !telit_view_copy_exact(report.submitted, sizeof(report.submitted), s_fields[4]) ||
+        !telit_view_copy_exact(report.discharged, sizeof(report.discharged), s_fields[5])) return false;
+    report.first_octet = (uint8_t)fo; report.reference = (uint8_t)reference;
+    report.address_type = (uint8_t)type; report.status = (uint8_t)status;
+    if (!sms_report_valid(&report)) return false;
+    /* Normalize international addresses that omit the printable plus. */
+    if ((type & 0x70u) == 0x10u && report.recipient[0] != '+') {
+        size_t len = strlen(report.recipient);
+        if (len == MODEM_SMS_SENDER_MAX) return false;
+        memmove(report.recipient + 1u, report.recipient, len + 1u);
+        report.recipient[0] = '+';
+    }
+    *out = report;
+    return true;
+}
+
 bool telit_encode_sms_text(const char *text, modem_sms_text_t *out) {
     if (text == NULL || out == NULL || strlen(text) > MODEM_SMS_TEXT_MAX) return false;
     memset(out, 0, sizeof(*out));

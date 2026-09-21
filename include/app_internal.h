@@ -83,6 +83,8 @@ typedef enum {
     CONFIRM_CONTEXT_PICTURE_MESSAGE_ERASE,
     CONFIRM_CONTEXT_PICTURE_MESSAGE_SAVE_FIRST,
     CONFIRM_CONTEXT_TONES_RINGING_VOLUME,
+    CONFIRM_CONTEXT_SMS_REPORT_ERASE,
+    CONFIRM_CONTEXT_SMS_REPORT_ERASE_ALL,
 } confirm_context_t;
 
 void resolve_contact_name(const char *number, char *dst, size_t cap);

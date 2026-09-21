@@ -16,6 +16,8 @@ typedef struct {
     bool sent;
     bool binary;
     bool quarantined;
+    bool report;
+    uint8_t report_status;
     char address[MODEM_SMS_SENDER_MAX + 1u];
     char timestamp[MODEM_SMS_TIMESTAMP_MAX + 1u];
 } message_metadata_t;
