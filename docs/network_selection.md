@@ -51,10 +51,12 @@ dispatching another command into the unfinished response. No cancellation
 cuts modem power. UI preemption detaches the request so late results cannot
 replace a call, shutdown, or unrelated dialog.
 
-[BP] The adapter sends ESC to abort a scan/selection and allows five seconds for
-the final. Telit marks COPS as abortable; this byte and deadline require live
-qualification on the supported module firmware. Asynchronous host processing
-does not guarantee radio service during a modem network scan.
+[BP] The adapter sends CR to abort a scan/selection. ESC did not release the
+live module's scan. Cancellation retains the original command deadline, with
+at least five seconds to drain a final: an ignored abort must not declare a
+healthy, unfinished scan a failed modem. The CR behavior still needs live
+qualification. Asynchronous host processing does not guarantee radio service
+during a modem network scan.
 
 ## Regression Coverage
 

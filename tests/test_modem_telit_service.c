@@ -7492,12 +7492,15 @@ static void test_network_selection(void) {
     modem_service_network_cancel(id + 1u); mh_settle();
     check(!modem_network_cancelled(), "wrong request cannot cancel scan");
     modem_service_network_cancel(id); mh_settle();
-    uint8_t esc = 0x1b;
-    check(mh_tx_event_find(MH_TX_EVENT_RAW, &esc, 1u, 0) != SIZE_MAX,
+    uint8_t abort_byte = '\r';
+    check(mh_tx_event_find(MH_TX_EVENT_RAW, &abort_byte, 1u, 0) != SIZE_MAX,
           "scan cancel emits the adapter abort byte");
     check(modem_service_request_debug_at("AT+CGMI"), "queue work behind cancelled scan"); mh_settle();
     check(mh_tx_count_exact("AT+CGMI") == 0u && network_view().busy,
           "cancelled command retains the channel until its terminal response");
+    mh_advance(6000u);
+    check(mh_status().at_ready && network_view().busy && mh_tx_count_exact("AT+CGMI") == 0u,
+          "an ignored abort keeps draining inside the original scan deadline");
     mh_feed(s_network_scan_response); s_hold_final_command = NULL; mh_feed("OK"); mh_settle();
     check(network_view().result == MODEM_NETWORK_CANCELLED && network_view().count == 0u &&
           mh_tx_count_exact("AT+CGMI") == 1u, "late scan data cannot publish or complete another command");

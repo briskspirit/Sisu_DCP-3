@@ -130,5 +130,6 @@ static bool denied(const char *line) {
 
 const modem_network_backend_t TELIT_NETWORK_BACKEND = {
     .build = build, .identity = identity, .read = read_mode, .scan = scan,
-    .denied = denied, .abort_bytes = "\033", .abort_timeout_ms = 5000u,
+    /* [BP] Qualify CR on the live firmware; ESC did not release a COPS scan. */
+    .denied = denied, .abort_bytes = "\r", .abort_timeout_ms = 5000u,
 };

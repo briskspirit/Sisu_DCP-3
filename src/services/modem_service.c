@@ -1799,7 +1799,11 @@ static void network_drain(uint32_t now_ms, bool timed_out) {
         if (modem_network_command_abortable()) {
             const char *abort = g_modem_vendor.network->abort_bytes;
             modem_uart_hal_write((const uint8_t *)abort, strlen(abort));
-            s_command_deadline_ms = now_ms + g_modem_vendor.network->abort_timeout_ms;
+            uint32_t drain_deadline = now_ms + g_modem_vendor.network->abort_timeout_ms;
+            /* An ignored abort must not turn a still-within-deadline scan
+             * into a broken modem. Keep owning its response until it ends. */
+            if (timed_out || time_diff_ms(drain_deadline, s_command_deadline_ms) > 0)
+                s_command_deadline_ms = drain_deadline;
         } else if (timed_out) {
             s_command_deadline_ms = now_ms + g_modem_vendor.network->abort_timeout_ms;
         }
