@@ -71,6 +71,7 @@ typedef enum {
 } telit_tune_rf_t;
 
 extern const modem_init_step_t TELIT_INIT_STEPS[];
+extern const modem_network_backend_t TELIT_NETWORK_BACKEND;
 extern const modem_provision_step_t TELIT_PROVISION_STEPS[];
 
 bool telit_starts_with(const char *text, const char *prefix);

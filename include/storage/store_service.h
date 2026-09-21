@@ -253,6 +253,7 @@ typedef enum {
      * call-accounting family, separate from the protected warranty record.
      * Appended to preserve every deployed setting key id. */
     STORE_SETTING_CALL_DURATION_LIFETIME,
+    STORE_SETTING_SYSTEM_NETWORK_SIM_OWNER,
     STORE_SETTING_COUNT
 } store_setting_key_t;
 

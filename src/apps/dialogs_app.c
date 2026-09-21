@@ -7,6 +7,7 @@
 
 #include "apps/call_divert_app.h"
 #include "apps/call_waiting_app.h"
+#include "apps/network_selection_app.h"
 #include "apps/calls_app.h"
 #include "apps/messages_app.h"
 #include "apps/phonebook_app.h"
@@ -159,7 +160,8 @@ bool handle_display_message_key(app_t *app, uint16_t key, uint32_t now) {
         }
         return true;
     }
-    if (handle_call_waiting_display_key(app, key, now) ||
+    if (handle_network_selection_display_key(app, key, now) ||
+        handle_call_waiting_display_key(app, key, now) ||
         handle_call_divert_display_key(app, key, now)) {
         return true;
     }
@@ -920,6 +922,7 @@ void open_display(app_t *app, uint8_t record_id, const char *a, const char *b, c
     app->route = APP_ROUTE_DISPLAY_MESSAGE;
     app->display_return_route = return_route;
     app->display_record_id = record_id;
+    if (++app->display_generation == 0u) ++app->display_generation;
     app->display_opened_ms = now;
     app->display_last_frame_ms = now;
     app->display_frame_index = 0u;

@@ -2,6 +2,7 @@
 #include "apps/dialogs_app.h"
 #include "services/input_keys.h"
 #include "services/strings.h"
+#include "services/modem_network.h"
 #include "storage/store_service.h"
 #include "storage/store_operator_logo.h"
 #include "ui/text_layout.h"
@@ -22,6 +23,10 @@ static uint8_t language_at_note;
 static bool profiles_ok;
 static unsigned logo_clears;
 static store_status_t logo_status;
+void modem_service_network_settings_reset(void) {}
+void modem_service_get_network_snapshot(modem_network_snapshot_t *out) {
+    *out = (modem_network_snapshot_t){.mode = MODEM_NETWORK_UNKNOWN};
+}
 
 store_status_t store_operator_logo_clear(void) {
     logo_clears++;
@@ -47,7 +52,7 @@ store_status_t store_setting_set_u8(store_setting_key_t key, uint8_t value) {
     return write_status;
 }
 store_status_t store_setting_set_text(store_setting_key_t key, const char *value) {
-    assert(key == STORE_SETTING_SYSTEM_WELCOME_NOTE && value[0] == '\0');
+    assert((key == STORE_SETTING_SYSTEM_WELCOME_NOTE || key == STORE_SETTING_SYSTEM_NETWORK_SIM_OWNER) && value[0] == '\0');
     writes++;
     if (write_status == STORE_STATUS_OK) diag.dirty_mask |= RESET_UNITS;
     return write_status;
@@ -131,7 +136,7 @@ int main(void) {
     strings_set_language(0x81u);
     submit(&app, 100u);
     erased(&app);
-    assert(writes == 16u && profile_resets == 1u && logo_clears == 1u && app.settings_restore_pending);
+    assert(writes == 17u && profile_resets == 1u && logo_clears == 1u && app.settings_restore_pending);
     unsigned before_notes = notes, before_writes = writes;
     submit(&app, 110u);
     handle_settings_restore_key(&app, KEY_NAVI, EVENT_KEY_HOLD, 120u);

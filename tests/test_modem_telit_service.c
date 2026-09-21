@@ -58,6 +58,10 @@ static bool s_diag_moni_hold_once;
 static bool s_diag_firmware_hold_once;
 static const char *s_rfsts_response;
 static const char *s_cops_response;
+static bool s_register_on_rf_ready;
+static uint8_t s_network_mode;
+static const char *s_network_plmn;
+static const char *s_network_scan_response;
 static const char *s_sim_provider_response;
 static bool s_sim_provider_error;
 static char s_sim_provider_fixture[64];
@@ -678,6 +682,19 @@ static void telit_response(const char *command) {
         mh_rx_push("+CGREG: 2,1,\"00AF\",\"ABCDEF01\",7");
     } else if (strcmp(command, "AT+CEREG?") == 0) {
         mh_rx_push("+CEREG: 2,1,\"00AF\",\"ABCDEF01\",7");
+    } else if (strcmp(command, "AT#CCID") == 0) {
+        mh_rx_push("#CCID: 89014103211118510720");
+    } else if (strcmp(command, "AT+COPS=3,2;+COPS?") == 0) {
+        char line[64];
+        snprintf(line, sizeof(line), "+COPS: %u,2,\"%s\",7", s_network_mode, s_network_plmn);
+        mh_rx_push(line);
+    } else if (strcmp(command, "AT+COPS=?") == 0) {
+        if (s_network_scan_response != NULL) mh_rx_push(s_network_scan_response);
+    } else if (strcmp(command, "AT+COPS=0") == 0) {
+        s_network_mode = 0u;
+    } else if (strcmp(command, "AT+COPS=1,2,\"310410\"") == 0) {
+        s_network_mode = 1u;
+        s_network_plmn = "310410";
     } else if (strcmp(command, "AT+COPS?") == 0) {
         if (s_cops_response != NULL) {
             mh_rx_push(s_cops_response);
@@ -843,6 +860,10 @@ static void telit_response(const char *command) {
             } else {
                 mh_rx_push("#QSS: 2,1");
             }
+        }
+        if (crossed_from_full_functionality && s_register_on_rf_ready) {
+            s_register_on_rf_ready = false;
+            mh_rx_push("+CEREG: 1");
         }
         if (crossed_from_full_functionality &&
             s_fault == TELIT_FAULT_FINAL_CFUN_SET_TIMEOUT_ONCE &&
@@ -1249,6 +1270,10 @@ static void begin_telit(bool rxdiv_configured) {
     s_diag_firmware_hold_once = false;
     s_rfsts_response = NULL;
     s_cops_response = NULL;
+    s_register_on_rf_ready = false;
+    s_network_mode = 0u;
+    s_network_plmn = "310410";
+    s_network_scan_response = "+COPS: (2,\"AT&T\",\"ATT\",\"310410\",7),(1,\"T-Mobile\",\"TMO\",\"310260\",7),,(0-4),(0-2)";
     s_sim_provider_response = NULL;
     s_sim_provider_error = false;
     s_clcc_row = NULL;
@@ -1355,6 +1380,7 @@ static bool boot_until_ready(uint32_t budget_ms) {
         modem_service_test_snapshot_t probe = service_probe();
         if (status.at_ready && !probe.sim_completion_pending &&
             !probe.sim_completion_active &&
+            (!status.sim_ready || !modem_network_work_pending()) &&
             (!status.sim_ready || probe.sms_wake_armed)) {
             return true;
         }
@@ -4008,6 +4034,8 @@ static void test_guarded_scan_and_band_maintenance(void) {
     modem_band_config_t original = s_band_nvm;
     check(modem_service_maintenance_start_band_test(2u),
           "B4 RAM-only band test is admitted");
+    check(modem_service_network_request(MODEM_NETWORK_SCAN, 0, 0) == 0u,
+          "network selection cannot enter an already queued radio-maintenance sequence");
     mh_settle();
     snapshot = maintenance_snapshot();
     size_t first_mutation = tx_first_index("AT#SELBNDMODE=1");
@@ -5279,6 +5307,9 @@ static void test_carrier_refresh_priority(void) {
         begin_telit(true);
         s_cops_response = "+COPS: 0,0,\"Misleading Brand\",7";
         s_hold_final_command = held_commands[i];
+        /* Deliver registration with RF readiness, before the harness settles
+         * every immediately completed startup/background command. */
+        s_register_on_rf_ready = true;
         check(boot_until_ready(30000u), "carrier-priority fixture boots");
         mh_feed("+CEREG: 1");
         mh_advance(1000u);
@@ -7418,7 +7449,113 @@ static void test_call_waiting_network_requests(void) {
           "a call that arrives while waiting is queued prevents a blocking SS dispatch");
 }
 
+static modem_network_snapshot_t network_view(void) {
+    modem_network_snapshot_t out;
+    modem_service_get_network_snapshot(&out);
+    return out;
+}
+
+static uint32_t hold_network_scan(void) {
+    begin_telit(true);
+    check(boot_until_ready(30000u), "network fixture boots and reconciles SIM");
+    check(network_view().ready && network_view().mode == MODEM_NETWORK_AUTOMATIC,
+          "startup reads numeric mode and durably binds it to this SIM");
+    check(mh_tx_count_exact("AT+COPS=?") == 0u, "startup never scans for networks");
+    s_hold_final_command = "AT+COPS=?";
+    uint32_t id = modem_service_network_request(MODEM_NETWORK_SCAN, 0, 0);
+    check(id != 0u, "manual scan is admitted");
+    mh_advance(100u); mh_advance(100u);
+    check(network_view().busy && mh_tx_count_exact("AT+COPS=?") == 1u,
+          "scan holds the single command channel");
+    return id;
+}
+
+static void test_network_selection(void) {
+    uint32_t id = hold_network_scan();
+    mh_feed(s_network_scan_response); s_hold_final_command = NULL; mh_feed("OK");
+    modem_network_snapshot_t view = network_view();
+    check(view.request_id == id && view.result == MODEM_NETWORK_DONE && view.count == 2u,
+          "scan publishes complete generation-qualified list");
+    modem_network_entry_t entry;
+    check(modem_service_get_network_entry(view.list_generation, 0, &entry) &&
+          strcmp(entry.name, "AT&T") == 0, "list resolves network PLMN through our database");
+    id = modem_service_network_request(MODEM_NETWORK_SELECT_MANUAL, view.list_generation, 0);
+    mh_advance(100u); mh_advance(100u);
+    check(id && network_view().result == MODEM_NETWORK_DONE && network_view().mode == MODEM_NETWORK_MANUAL &&
+          mh_tx_count_exact("AT+COPS=1,2,\"310410\"") == 1u, "manual selection verifies numeric readback");
+    id = modem_service_network_request(MODEM_NETWORK_SELECT_AUTO, 0, 0);
+    mh_advance(100u); mh_advance(100u);
+    check(id && network_view().result == MODEM_NETWORK_DONE && network_view().mode == MODEM_NETWORK_AUTOMATIC,
+          "Automatic returns modem to automatic selection");
+
+    id = hold_network_scan();
+    modem_service_network_cancel(id + 1u); mh_settle();
+    check(!modem_network_cancelled(), "wrong request cannot cancel scan");
+    modem_service_network_cancel(id); mh_settle();
+    uint8_t esc = 0x1b;
+    check(mh_tx_event_find(MH_TX_EVENT_RAW, &esc, 1u, 0) != SIZE_MAX,
+          "scan cancel emits the adapter abort byte");
+    check(modem_service_request_debug_at("AT+CGMI"), "queue work behind cancelled scan"); mh_settle();
+    check(mh_tx_count_exact("AT+CGMI") == 0u && network_view().busy,
+          "cancelled command retains the channel until its terminal response");
+    mh_feed(s_network_scan_response); s_hold_final_command = NULL; mh_feed("OK"); mh_settle();
+    check(network_view().result == MODEM_NETWORK_CANCELLED && network_view().count == 0u &&
+          mh_tx_count_exact("AT+CGMI") == 1u, "late scan data cannot publish or complete another command");
+
+    (void)hold_network_scan(); mh_advance(185001u);
+    check(network_view().busy, "scan timeout still drains its final");
+    mh_advance(1u); s_hold_final_command = NULL; mh_feed("ERROR");
+    check(network_view().result == MODEM_NETWORK_NOT_DONE, "timeout is a failure, not a user cancellation");
+    (void)hold_network_scan(); mh_advance(185001u); mh_advance(5001u);
+    check(!mh_status().at_ready, "undrained scan fails closed instead of crossing AT transactions");
+
+    (void)hold_network_scan();
+    mh_feed("RING"); mh_settle();
+    check(modem_network_cancelled() && mh_tx_count_exact("AT+CLCC") == 0u,
+          "incoming call aborts scan without crossing command ownership");
+    s_hold_final_command = NULL; mh_feed("+CME ERROR: 681"); mh_settle();
+    check(mh_tx_count_exact("AT+CLCC") != 0u, "call reconciliation resumes after scan drains");
+
+    (void)hold_network_scan();
+    modem_service_power_off(); mh_settle();
+    check(mh_tx_count_exact(g_modem_vendor.power.off_cmd) == 0u,
+          "power off waits for scan abort final before sending shutdown");
+    s_hold_final_command = NULL; mh_feed("ERROR"); mh_settle();
+    check(!network_view().busy, "power off retires network request");
+
+    id = hold_network_scan(); mh_feed("#QSS: 0");
+    check(modem_network_cancelled() && !network_view().ready, "SIM loss invalidates scan immediately");
+    s_hold_final_command = NULL; mh_feed("ERROR");
+    check(!modem_service_get_network_entry(view.list_generation, 0, &entry),
+          "old-SIM entries are inaccessible after removal");
+
+    (void)hold_network_scan(); mh_feed(s_network_scan_response); s_mh_rx_line_errors++;
+    s_hold_final_command = NULL; mh_feed("OK");
+    check(network_view().result == MODEM_NETWORK_NOT_DONE && network_view().count == 0u,
+          "transport loss invalidates even syntactically valid network rows");
+
+    (void)hold_network_scan();
+    uint32_t received = mh_status().sms_received_count;
+    mh_rx_push("+CMT: \"+15551234567\",\"\",\"26/09/21,12:00:00+00\",145,0,0,0,\"\",129,4");
+    mh_rx_push("test"); mh_settle();
+    check(mh_status().sms_received_count == received + 1u && network_view().busy,
+          "direct SMS reception remains active while the scan owns the AT channel");
+    s_hold_final_command = NULL; mh_feed(s_network_scan_response); mh_feed("OK");
+    check(network_view().result == MODEM_NETWORK_DONE,
+          "interleaved direct SMS does not corrupt scan response parsing");
+
+    begin_telit(true); check(boot_until_ready(30000u), "deferred network fixture boots");
+    settle_dtr_sleep(); s_mh_dtr_wake_works = false;
+    id = modem_service_network_request(MODEM_NETWORK_SELECT_AUTO, 0, 0);
+    mh_settle();
+    check(id && service_probe().deferred_command_valid, "selection waits for CTS before dispatch");
+    mh_feed("#QSS: 0"); s_mh_cts_asserted = true; mh_settle();
+    check(!network_view().busy && !network_view().ready && mh_tx_count_exact("AT+COPS=0") == 0u,
+          "SIM loss cancels a wake-deferred selection before it reaches UART");
+}
+
 int main(void) {
+    test_network_selection();
     test_call_waiting_network_requests();
     test_delivery_report_routing();
     test_configured_sms_send();

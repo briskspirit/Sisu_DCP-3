@@ -38,6 +38,7 @@ void log_write(int level, const char *tag, const char *fmt, ...);
 void log_vwrite(int level, const char *tag, const char *fmt, void *args);
 
 void log_set_level(int level) { (void)level; }
+void modem_service_network_settings_reset(void) {}
 void log_write(int level, const char *tag, const char *fmt, ...) {
     (void)level;
     (void)tag;
@@ -1530,7 +1531,7 @@ static const wire_expectation_t WIRE_EXPECTED[STORE_UNIT_COUNT] = {
     [STORE_UNIT_SETTINGS_CALLS] = {98u, UINT64_C(0x06494ae4b8997cfd)},
     [STORE_UNIT_SETTINGS_PROFILES] = {228u, UINT64_C(0xbdc1090e2e99d1fd)},
     [STORE_UNIT_SETTINGS_CLOCK] = {64u, UINT64_C(0x74cdc936f4b05dbe)},
-    [STORE_UNIT_SETTINGS_SYSTEM] = {199u, UINT64_C(0xb256c8c33d919af1)},
+    [STORE_UNIT_SETTINGS_SYSTEM] = {203u, UINT64_C(0xa2c64632a1ffba70)},
     [STORE_UNIT_CALLS_MISSED] = {86u, UINT64_C(0x5d274c1062d12d57)},
     [STORE_UNIT_CALLS_RECEIVED] = {86u, UINT64_C(0xeccbd2835e818e41)},
     [STORE_UNIT_CALLS_DIALLED] = {86u, UINT64_C(0x5defde58a2af983b)},

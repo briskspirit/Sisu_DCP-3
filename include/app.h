@@ -121,6 +121,7 @@ typedef enum {
     APP_ROUTE_CALCULATOR,
     APP_ROUTE_CONTACT_SERVICE,
     APP_ROUTE_SETTINGS_RESTORE,
+    APP_ROUTE_NETWORK_LIST,
 } app_route_t;
 
 typedef enum {
@@ -207,6 +208,7 @@ typedef struct {
      * one line -- store the whole string and let the renderer wrap it. */
     char display_text[128];
     uint32_t display_opened_ms;
+    uint32_t display_generation;
     uint32_t display_last_frame_ms;
     uint8_t display_frame_index;
     uint8_t display_progress_phase;
@@ -574,6 +576,11 @@ typedef struct {
     uint32_t settings_restore_started_ms;
     uint32_t call_waiting_request_id;
     uint32_t call_waiting_display_request_id;
+    uint32_t network_request_id;
+    uint32_t network_display_generation;
+    uint32_t network_list_generation;
+    uint8_t network_selected, network_view_start;
+    bool network_manual_requested;
     uint8_t call_divert_menu_kind;
     uint8_t call_divert_menu_selected;
     uint8_t call_divert_condition_index;

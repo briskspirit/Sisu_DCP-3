@@ -20,6 +20,7 @@
 #include "apps/react_app.h"
 #include "apps/rotation_app.h"
 #include "apps/settings_app.h"
+#include "apps/network_selection_app.h"
 #include "apps/service_codes_app.h"
 #include "apps/snake_app.h"
 #include "apps/standby_app.h"
@@ -252,6 +253,8 @@ static bool dispatch_event(app_t *app, const input_event_t *event) {
         return handle_settings_menu_key(app, key, now);
     case APP_ROUTE_SETTINGS_VALUE:
         return handle_settings_value_key(app, key, now);
+    case APP_ROUTE_NETWORK_LIST:
+        return handle_network_selection_key(app, key, now);
     case APP_ROUTE_SETTINGS_WELCOME_OPTIONS:
         return handle_settings_welcome_options_key(app, key, now);
     default:
@@ -549,6 +552,9 @@ void app_router_render(const app_t *app, framebuffer_t *fb) {
         break;
     case APP_ROUTE_SETTINGS_VALUE:
         render_settings_value(app, fb);
+        break;
+    case APP_ROUTE_NETWORK_LIST:
+        render_network_selection(app, fb);
         break;
     case APP_ROUTE_SETTINGS_WELCOME_OPTIONS:
         render_settings_welcome_options(app, fb);

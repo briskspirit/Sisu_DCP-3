@@ -2,8 +2,11 @@
 
 #include <stddef.h>
 
-#define MODEM_LINE_LENGTH_MASK 0x01ffu
+#define MODEM_LINE_LENGTH_MASK 0x0fffu
 #define MODEM_LINE_OVERFLOW    0x8000u
+
+_Static_assert(MODEM_LINE_FRAMER_CAP - 1u <= MODEM_LINE_LENGTH_MASK,
+               "line length must fit in the framer state");
 
 void modem_line_framer_reset(modem_line_framer_t *framer) {
     if (framer != NULL) {

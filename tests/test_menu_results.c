@@ -8,6 +8,7 @@
 #include "apps/menu_shortcuts.h"
 #include "services/input_keys.h"
 #include "services/strings.h"
+#include "services/modem_network.h"
 #include "storage/store_service.h"
 
 static int s_failures;
@@ -21,6 +22,14 @@ static char s_preview[64];
 static char s_code[STORE_TEXT_MAX + 1u] = "12345";
 static store_status_t s_write_status = STORE_STATUS_OK;
 static call_waiting_action_t s_waiting_action;
+static bool s_network_requested;
+void modem_service_network_settings_reset(void) {}
+void modem_service_get_network_snapshot(modem_network_snapshot_t *out) {
+    *out = (modem_network_snapshot_t){.ready = true, .mode = MODEM_NETWORK_AUTOMATIC};
+}
+void open_network_selection(app_t *app, bool manual, uint32_t now) {
+    (void)manual; (void)now; s_network_requested = true; app->route = APP_ROUTE_DISPLAY_MESSAGE;
+}
 int32_t time_diff_ms(uint32_t a, uint32_t b) { return (int32_t)(a - b); }
 
 /* This fixture exercises real Settings/Call-register actions through the
@@ -147,7 +156,6 @@ static void test_unavailable_settings(void) {
     }
     static const struct { settings_menu_kind_t menu; uint8_t row, choices; } cases[] = {
         {SETTINGS_MENU_CALL, 4u, 2u},
-        {SETTINGS_MENU_PHONE, 3u, 2u},
         {SETTINGS_MENU_SECURITY, 0u, 2u}, {SETTINGS_MENU_SECURITY, 1u, 3u},
         {SETTINGS_MENU_SECURITY, 2u, 3u}, {SETTINGS_MENU_SECURITY, 3u, 2u},
     };
@@ -410,8 +418,8 @@ static void test_numeric_settings(void) {
     check(app.route == APP_ROUTE_SETTINGS_VALUE && app.menu_shortcut_pending,
           "manual network selection honors its deferred item flag");
     menu_shortcuts_tick(&app, 12556u);
-    expect_not_done(&app, APP_ROUTE_SETTINGS_MENU,
-                    "numeric manual selection retains unsupported-operation handling");
+    check(s_network_requested && app.route == APP_ROUTE_DISPLAY_MESSAGE,
+          "numeric manual selection starts a real network request");
 }
 
 int main(void) {

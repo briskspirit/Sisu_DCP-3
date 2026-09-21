@@ -49,6 +49,8 @@ claim is the current best understanding, not a measured fact.
 
 ## UI And Protocol Records
 
+- [Network selection](network_selection.md): live Automatic/Manual selection,
+  SIM ownership, native lists, and bounded command cancellation.
 - [Numeric menu shortcuts](menu_shortcuts.md): original timing and numbering,
   app-owned actions, editor handoffs, and regression coverage.
 - [Business cards](business_cards.md): native Send entry, received-card menus,

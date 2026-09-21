@@ -4,7 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define MODEM_LINE_FRAMER_CAP 512u
+/* COPS scan returns its complete operator list on a single line. */
+#define MODEM_LINE_FRAMER_CAP 4096u
 
 typedef enum {
     MODEM_LINE_FRAMER_NONE = 0,
@@ -14,8 +15,7 @@ typedef enum {
 
 typedef struct {
     char line[MODEM_LINE_FRAMER_CAP];
-    /* Low nine bits are the buffered length; bit 15 marks discard-until-LF.
-     * One state word avoids padding this always-resident 512-byte object. */
+    /* Low twelve bits are length; bit 15 marks discard-until-LF. */
     uint16_t state;
 } modem_line_framer_t;
 

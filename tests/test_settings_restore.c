@@ -8,6 +8,8 @@
 #include "storage/store_operator_logo.h"
 
 static int s_failures;
+static unsigned s_network_resets;
+void modem_service_network_settings_reset(void) { s_network_resets++; }
 static uint8_t s_values[STORE_SETTING_COUNT];
 static bool s_touched[STORE_SETTING_COUNT];
 static unsigned s_u8_writes;
@@ -116,10 +118,10 @@ static void test_factory_restore_contract(void) {
           "factory restore preserves board calibration settings");
     check(!s_touched[STORE_SETTING_CALL_DURATION_LIFETIME],
           "factory restore preserves lifetime accounting");
-    check(s_text_writes == 1u &&
-              s_text_key == STORE_SETTING_SYSTEM_WELCOME_NOTE &&
+    check(s_text_writes == 2u && s_network_resets == 1u &&
+              s_text_key == STORE_SETTING_SYSTEM_NETWORK_SIM_OWNER &&
               s_text_value[0] == '\0',
-          "factory restore erases only the welcome note text");
+          "factory restore erases welcome note and SIM-bound selection ownership");
     check(s_profile_resets == 1u,
           "factory restore resets profile customizations exactly once");
     check(s_logo_clears == 1u, "factory restore clears the saved operator logo");

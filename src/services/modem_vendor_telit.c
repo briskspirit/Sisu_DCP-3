@@ -192,6 +192,7 @@ const modem_vendor_t g_modem_vendor = {
         .message_waiting_timeout_ms = 5000u,
         .parse_message_waiting_row = telit_parse_message_waiting_row,
     },
+    .network = &TELIT_NETWORK_BACKEND,
     .signal_query = {
         .query_cmd = "AT#RFSTS",
         .response_prefix = "#RFSTS:",

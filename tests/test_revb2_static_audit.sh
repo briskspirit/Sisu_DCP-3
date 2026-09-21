@@ -172,6 +172,7 @@ reject_pattern_except \
     --glob '!tools/tune_dynamic_ant/main.c' \
     --glob '!src/services/modem_vendor_telit*.c' \
     --glob '!tests/test_modem_vendor_telit.c' \
+    --glob '!tests/test_modem_network.c' \
     --glob '!tests/test_modem_telit_service.c'
 reject_pattern_except \
     'gpio_put[[:space:]]*\([[:space:]]*MODEM_PIN_(ON_OFF|HW_SHUTDOWN)[[:space:]]*,[[:space:]]*true[[:space:]]*\)' \

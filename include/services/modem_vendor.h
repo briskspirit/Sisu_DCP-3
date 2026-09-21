@@ -19,6 +19,7 @@
 #include "services/call_types.h"
 #include "services/modem_diag.h"
 #include "services/modem_maintenance.h"
+#include "services/modem_network.h"
 #include "services/modem_signal.h"
 #include "services/modem_sms_direct.h"
 #include "services/modem_sms_text.h"
@@ -321,6 +322,7 @@ typedef struct modem_vendor {
     bool (*parse_clcc_row)(const char *line, modem_clcc_row_t *out);
     modem_call_control_t call;
     modem_supplementary_vendor_t supplementary;
+    const modem_network_backend_t *network;
     modem_signal_query_t signal_query;
     modem_sim_provider_query_t sim_provider_query;
     /* Diagnostic parse/finalize callbacks run while the generic service holds

@@ -10,6 +10,7 @@
 #include "services/call_waiting_types.h"
 #include "services/modem_diag.h"
 #include "services/modem_maintenance.h"
+#include "services/modem_network.h"
 #include "services/modem_signal.h"
 #include "services/sms_types.h"
 
@@ -302,6 +303,15 @@ bool modem_service_maintenance_exit_antenna(void);
 void modem_service_maintenance_cancel(void);
 void modem_service_get_maintenance_snapshot(
     modem_maintenance_snapshot_t *out);
+/* Core-0 network-selection owner. A scan can interrupt radio service; callers
+ * must keep its progress UI cancellable. Entries are generation-qualified. */
+void modem_service_get_network_snapshot(modem_network_snapshot_t *out);
+bool modem_service_get_network_entry(uint32_t generation, uint8_t index,
+                                     modem_network_entry_t *out);
+uint32_t modem_service_network_request(modem_network_action_t action,
+                                       uint32_t generation, uint8_t index);
+void modem_service_network_cancel(uint32_t request_id);
+void modem_service_network_settings_reset(void);
 /* RevB2/Telit Net Monitor v2 diagnostics. Selecting a group replaces the
  * previous subscription generation; duplicate requests coalesce while queued
  * or active. The service yields after every AT command and never polls while a

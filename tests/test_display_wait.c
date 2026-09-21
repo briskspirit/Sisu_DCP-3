@@ -11,6 +11,9 @@
 #include "apps/call_divert_app.h"
 #include "apps/call_waiting_app.h"
 
+bool handle_network_selection_display_key(app_t *app, uint16_t key, uint32_t now) {
+    (void)app; (void)key; (void)now; return false;
+}
 bool handle_call_waiting_display_key(app_t *app, uint16_t key, uint32_t now) {
     (void)app; (void)key; (void)now; return false;
 }

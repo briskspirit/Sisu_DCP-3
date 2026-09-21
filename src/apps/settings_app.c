@@ -6,6 +6,8 @@
 
 #include "apps/dialogs_app.h"
 #include "apps/call_waiting_app.h"
+#include "apps/network_selection_app.h"
+#include "services/modem_service.h"
 #include "apps/main_menu_app.h"
 #include "apps/profiles_app.h"
 #include "services/feature_gates.h"
@@ -216,9 +218,12 @@ bool settings_restore_factory_defaults(void) {
     for (size_t i = 0u; i < ARRAY_COUNT(defaults); i++) {
         if (store_setting_set_u8(defaults[i].key, defaults[i].value) != STORE_STATUS_OK) return false;
     }
-    return store_setting_set_text(STORE_SETTING_SYSTEM_WELCOME_NOTE, "") == STORE_STATUS_OK &&
-           profiles_restore_factory_defaults() &&
-           store_operator_logo_clear() == STORE_STATUS_OK;
+    if (store_setting_set_text(STORE_SETTING_SYSTEM_WELCOME_NOTE, "") != STORE_STATUS_OK ||
+        store_setting_set_text(STORE_SETTING_SYSTEM_NETWORK_SIM_OWNER, "") != STORE_STATUS_OK ||
+        !profiles_restore_factory_defaults() || store_operator_logo_clear() != STORE_STATUS_OK)
+        return false;
+    modem_service_network_settings_reset();
+    return true;
 }
 
 static bool restore_owns_display(const app_t *app) {
@@ -802,9 +807,14 @@ static const char *settings_menu_preview(settings_menu_kind_t kind, uint8_t sele
     /* Keep the original two-line menu layout without inventing SIM/network
      * state for operations that are not implemented. */
     if ((kind == SETTINGS_MENU_CALL && selected == 4u) ||
-        (kind == SETTINGS_MENU_PHONE && selected == 3u) ||
         (kind == SETTINGS_MENU_SECURITY && selected < 4u)) {
         return "--";
+    }
+    if (kind == SETTINGS_MENU_PHONE && selected == 3u) {
+        modem_network_snapshot_t view;
+        modem_service_get_network_snapshot(&view);
+        if (!view.ready || (view.mode != MODEM_NETWORK_AUTOMATIC && view.mode != MODEM_NETWORK_MANUAL))
+            return "--";
     }
     if (kind == SETTINGS_MENU_CALL) {
         static const settings_value_kind_t map[] = {
@@ -1000,6 +1010,11 @@ static uint8_t settings_current_value(settings_value_kind_t kind) {
     if (kind == SETTINGS_VALUE_CALL_WAITING) {
         return 4u;
     }
+    if (kind == SETTINGS_VALUE_NETWORK) {
+        modem_network_snapshot_t view;
+        modem_service_get_network_snapshot(&view);
+        return view.ready && view.mode == MODEM_NETWORK_MANUAL ? 1u : 0u;
+    }
     store_setting_get_u8(settings_value_store_key(kind), &value);
     return value;
 }
@@ -1030,6 +1045,10 @@ static const char *settings_value_label(settings_value_kind_t kind, uint8_t valu
 static bool apply_settings_value(app_t *app, uint32_t now) {
     uint8_t count = 0u;
     settings_value_kind_t kind = (settings_value_kind_t)app->settings_value_kind;
+    if (kind == SETTINGS_VALUE_NETWORK) {
+        open_network_selection(app, app->settings_value_selected == 1u, now);
+        return true;
+    }
     if (kind == SETTINGS_VALUE_CALL_WAITING) {
         static const call_waiting_action_t actions[] = {
             CALL_WAITING_ACTIVATE, CALL_WAITING_CANCEL, CALL_WAITING_QUERY,

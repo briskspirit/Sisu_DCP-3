@@ -445,6 +445,11 @@ bool store_service_flush_all(void) {
     if (!s_mh_store_flush_leaves_dirty) s_mh_store_dirty = false;
     return true;
 }
+bool store_service_unit_ready(store_unit_t unit) {
+    (void)unit;
+    return s_mh_store_ready;
+}
+static char s_mh_network_owner[STORE_TEXT_MAX + 1u];
 void store_service_get_diag(store_diag_snapshot_t *out) {
     if (out == NULL) return;
     memset(out, 0, sizeof(*out));
@@ -465,6 +470,10 @@ store_status_t store_setting_get_u8(store_setting_key_t key, uint8_t *out_value)
 store_status_t store_setting_get_text(store_setting_key_t key, char *out_text,
                                       uint8_t out_cap) {
     if (!s_mh_store_ready) return STORE_STATUS_NOT_READY;
+    if (key == STORE_SETTING_SYSTEM_NETWORK_SIM_OWNER && out_text != NULL && out_cap != 0u) {
+        snprintf(out_text, out_cap, "%s", s_mh_network_owner);
+        return STORE_STATUS_OK;
+    }
     if (key != STORE_SETTING_SYSTEM_NETMON_RADIO_RECOVERY ||
         out_text == NULL || out_cap == 0u) {
         return STORE_STATUS_INVALID_ARGUMENT;
@@ -476,6 +485,11 @@ store_status_t store_setting_get_text(store_setting_key_t key, char *out_text,
 store_status_t store_setting_set_text(store_setting_key_t key,
                                       const char *text) {
     if (!s_mh_store_ready) return STORE_STATUS_NOT_READY;
+    if (key == STORE_SETTING_SYSTEM_NETWORK_SIM_OWNER && text != NULL && strlen(text) <= STORE_TEXT_MAX) {
+        strcpy(s_mh_network_owner, text);
+        s_mh_store_dirty = true;
+        return STORE_STATUS_OK;
+    }
     if (key != STORE_SETTING_SYSTEM_NETMON_RADIO_RECOVERY || text == NULL ||
         strlen(text) > STORE_TEXT_MAX) {
         return STORE_STATUS_INVALID_ARGUMENT;

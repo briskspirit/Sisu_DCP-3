@@ -2306,6 +2306,13 @@ static void command_status(void) {
     printf("[debug] operator source=%s plmn=%s/%s\n", operator_source,
            plmn_valid ? status.signal.mcc : "--",
            plmn_valid ? status.signal.mnc : "--");
+    modem_network_snapshot_t network;
+    modem_service_get_network_snapshot(&network);
+    printf("[debug] network ready=%u mode=%u busy=%u id=%lu action=%u result=%u list=%lu/%u plmn=%s\n",
+           network.ready, (unsigned)network.mode, network.busy,
+           (unsigned long)network.request_id, (unsigned)network.action,
+           (unsigned)network.result, (unsigned long)network.list_generation,
+           network.count, network.plmn);
     printf("[debug] signal seq=%lu rat=%u valid=%02x channel=%lu cell=%08lx rssi=%d rsrp=%d rsrq_x2=%d sinr_x10=%d age=%lums\n",
            (unsigned long)status.signal.sequence,
            (unsigned)status.signal.rat,
