@@ -143,7 +143,8 @@ bool telit_tune_repair_required(void);
 
 bool telit_parse_ecam(const char *line, modem_call_event_t *out);
 bool telit_build_call_command(call_txn_kind_t kind, const char *number,
-                              uint8_t target_id, char *out, size_t out_cap,
+                              uint8_t target_id, call_caller_id_t caller_id,
+                              char *out, size_t out_cap,
                               uint32_t *timeout_ms);
 bool telit_build_dtmf_command(char symbol, char *out, size_t out_cap,
                               uint32_t *timeout_ms);

@@ -454,6 +454,14 @@ void store_service_get_diag(store_diag_snapshot_t *out) {
             (uint16_t)(1u << STORE_UNIT_SETTINGS_SYSTEM);
     }
 }
+static uint8_t s_mh_own_number;
+store_status_t store_setting_get_u8(store_setting_key_t key, uint8_t *out_value) {
+    if (!s_mh_store_ready) return STORE_STATUS_NOT_READY;
+    if (key != STORE_SETTING_CALL_OWN_NUMBER_SENDING || out_value == NULL)
+        return STORE_STATUS_INVALID_ARGUMENT;
+    *out_value = s_mh_own_number;
+    return STORE_STATUS_OK;
+}
 store_status_t store_setting_get_text(store_setting_key_t key, char *out_text,
                                       uint8_t out_cap) {
     if (!s_mh_store_ready) return STORE_STATUS_NOT_READY;
@@ -667,6 +675,7 @@ void mh_begin(void) {
     s_mh_sim_ready = true;
     s_mh_sim_interface_active = true;
     s_mh_store_ready = true;
+    s_mh_own_number = 0u;
     s_mh_store_flush_ok = true;
     s_mh_store_flush_leaves_dirty = false;
     s_mh_store_dirty = false;

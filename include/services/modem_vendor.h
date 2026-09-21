@@ -226,6 +226,7 @@ typedef struct {
     uint32_t clcc_timeout_ms;
     bool progress_finals_may_complete_command;
     bool (*build_command)(call_txn_kind_t kind, const char *number, uint8_t target_id,
+                          call_caller_id_t caller_id,
                           char *out, size_t out_cap, uint32_t *timeout_ms);
     bool (*build_dtmf_command)(char symbol, char *out, size_t out_cap,
                                uint32_t *timeout_ms);

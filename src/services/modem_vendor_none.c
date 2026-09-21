@@ -27,11 +27,13 @@ static bool none_parse_clcc_row(const char *line, modem_clcc_row_t *out) {
 }
 
 static bool none_build_call_command(call_txn_kind_t kind, const char *number,
-                                    uint8_t target_id, char *out,
+                                    uint8_t target_id, call_caller_id_t caller_id,
+                                    char *out,
                                     size_t out_cap, uint32_t *timeout_ms) {
     (void)kind;
     (void)number;
     (void)target_id;
+    (void)caller_id;
     (void)out;
     (void)out_cap;
     if (timeout_ms != NULL) {

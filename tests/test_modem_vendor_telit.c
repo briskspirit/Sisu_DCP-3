@@ -73,7 +73,7 @@ static bool build_call(call_txn_kind_t kind, const char *number,
     char command[64];
     uint32_t timeout = 0u;
     bool ok = g_modem_vendor.call.build_command(
-        kind, number, target, command, sizeof(command), &timeout);
+        kind, number, target, CALL_CALLER_ID_NETWORK, command, sizeof(command), &timeout);
     check(ok, "call builder accepted supported operation");
     if (!ok) {
         return false;
@@ -567,7 +567,7 @@ static void test_production_descriptor(void) {
 
 static void test_call_builders(void) {
     (void)build_call(CALL_TXN_DIAL, "+14155550123", 0u,
-                     "ATD+14155550123;", 30000u);
+                     "AT+CLIR=0;D+14155550123;", 30000u);
     (void)build_call(CALL_TXN_ANSWER, NULL, 0u, "ATA", 15000u);
     (void)build_call(CALL_TXN_HOLD, NULL, 0u, "AT+CHLD=2", 25000u);
     (void)build_call(CALL_TXN_SWAP, NULL, 0u, "AT+CHLD=2", 25000u);
@@ -584,27 +584,42 @@ static void test_call_builders(void) {
     char command[32];
     uint32_t timeout = 0u;
     check(!g_modem_vendor.call.build_command(
-              CALL_TXN_NONE, NULL, 0u, command, sizeof(command), &timeout),
+              CALL_TXN_NONE, NULL, 0u, CALL_CALLER_ID_NETWORK, command, sizeof(command), &timeout),
           "NONE operation rejected");
     check(!g_modem_vendor.call.build_command(
-              CALL_TXN_DIAL, "123\rAT#SHDN", 0u, command,
+              CALL_TXN_DIAL, "123\rAT#SHDN", 0u, CALL_CALLER_ID_NETWORK, command,
               sizeof(command), &timeout),
           "dial command injection rejected");
     check(!g_modem_vendor.call.build_command(
-              CALL_TXN_DIAL, "12;34", 0u, command,
+              CALL_TXN_DIAL, "12;34", 0u, CALL_CALLER_ID_NETWORK, command,
               sizeof(command), &timeout),
           "embedded dial terminator rejected");
     check(!g_modem_vendor.call.build_command(
-              CALL_TXN_RELEASE_LEG, NULL, 0u, command,
+              CALL_TXN_RELEASE_LEG, NULL, 0u, CALL_CALLER_ID_NETWORK, command,
               sizeof(command), &timeout),
           "zero target rejected");
     check(!g_modem_vendor.call.build_command(
               CALL_TXN_RELEASE_LEG, NULL, MODEM_CALL_ID_MAX + 1u,
-              command, sizeof(command), &timeout),
+              CALL_CALLER_ID_NETWORK, command, sizeof(command), &timeout),
           "out-of-domain target rejected");
     check(!g_modem_vendor.call.build_command(
-              CALL_TXN_DIAL, "12345", 0u, command, 4u, &timeout),
+              CALL_TXN_DIAL, "12345", 0u, CALL_CALLER_ID_NETWORK, command, 4u, &timeout),
           "short output buffer rejected");
+
+    check(g_modem_vendor.call.build_command(
+              CALL_TXN_DIAL, "+14155550123", 0u, CALL_CALLER_ID_SEND,
+              command, sizeof(command), &timeout) &&
+              strcmp(command, "AT+CLIR=2;D+14155550123;") == 0,
+          "send own number disables CLIR before dialing");
+    check(g_modem_vendor.call.build_command(
+              CALL_TXN_DIAL, "+14155550123", 0u, CALL_CALLER_ID_HIDE,
+              command, sizeof(command), &timeout) &&
+              strcmp(command, "AT+CLIR=1;D+14155550123;") == 0,
+          "hide own number enables CLIR before dialing");
+    check(!g_modem_vendor.call.build_command(
+              CALL_TXN_DIAL, "12345", 0u, (call_caller_id_t)3,
+              command, sizeof(command), &timeout),
+          "invalid caller presentation is not silently dialed with a default");
 
     check(g_modem_vendor.call.build_dtmf_command(
               '5', command, sizeof(command), &timeout) &&

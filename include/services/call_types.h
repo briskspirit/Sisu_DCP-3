@@ -21,6 +21,12 @@
 #define MODEM_PHONE_MAX 32u
 
 typedef enum {
+    CALL_CALLER_ID_NETWORK = 0,
+    CALL_CALLER_ID_SEND,
+    CALL_CALLER_ID_HIDE,
+} call_caller_id_t;
+
+typedef enum {
     MODEM_CALL_IDLE = 0,
     MODEM_CALL_RINGING,
     MODEM_CALL_DIALING,

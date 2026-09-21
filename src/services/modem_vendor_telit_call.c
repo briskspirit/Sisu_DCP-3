@@ -86,7 +86,7 @@ static bool telit_dial_number_valid(const char *number) {
 }
 
 bool telit_build_call_command(call_txn_kind_t kind, const char *number,
-                              uint8_t target_id, char *out,
+                              uint8_t target_id, call_caller_id_t caller_id, char *out,
                               size_t out_cap, uint32_t *timeout_ms) {
     if (out == NULL || out_cap == 0u || timeout_ms == NULL) {
         return false;
@@ -97,11 +97,17 @@ bool telit_build_call_command(call_txn_kind_t kind, const char *number,
     int written = -1;
     switch (kind) {
     case CALL_TXN_DIAL:
-        if (!telit_dial_number_valid(number)) {
+        if (!telit_dial_number_valid(number) ||
+            (unsigned)caller_id > CALL_CALLER_ID_HIDE) {
             return false;
         }
         timeout = 30000u;
-        written = snprintf(out, out_cap, "ATD%s;", number);
+        /* ThreadX AT guide Rev.4 pp.25,427: an ERROR stops the command line.
+         * Never dial if the requested presentation policy cannot be applied.
+         * Reapply even NETWORK so a previous profile's CLIR cannot leak in. */
+        written = snprintf(out, out_cap, "AT+CLIR=%u;D%s;",
+                           caller_id == CALL_CALLER_ID_HIDE ? 1u :
+                           caller_id == CALL_CALLER_ID_SEND ? 2u : 0u, number);
         break;
     case CALL_TXN_ANSWER:
         fixed = "ATA";

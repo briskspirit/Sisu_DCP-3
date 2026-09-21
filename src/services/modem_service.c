@@ -209,7 +209,7 @@ typedef struct {
     uint32_t call_token;     /* 0 for non-call requests; model correlation otherwise */
     uint32_t request_id;     /* async-result correlation; 0 = internal/no owner */
     call_forward_request_t call_forward;
-
+    call_caller_id_t caller_id;
 
     uint16_t index;
     char number[MODEM_PHONE_MAX + 1u];
@@ -671,6 +671,7 @@ static bool model_build_call_request(const modem_request_t *request,
     uint8_t target = model_request_target(request, kind);
     return g_modem_vendor.call.build_command != NULL &&
            g_modem_vendor.call.build_command(kind, number, target,
+                                             request->caller_id,
                                              command, command_cap, timeout_ms) &&
            *timeout_ms != 0u;
 }
@@ -2098,6 +2099,17 @@ bool modem_service_request_dial(const char *number) {
     copy_bounded(request.number, sizeof(request.number), number);
     if (request.number[0] == '\0') {
         return false;
+    }
+    uint8_t own_number;
+    if (store_setting_get_u8(STORE_SETTING_CALL_OWN_NUMBER_SENDING,
+                             &own_number) != STORE_STATUS_OK) {
+        return false;
+    }
+    switch (own_number) {
+    case 0u: request.caller_id = CALL_CALLER_ID_NETWORK; break;
+    case 1u: request.caller_id = CALL_CALLER_ID_SEND; break;
+    case 2u: request.caller_id = CALL_CALLER_ID_HIDE; break;
+    default: return false;
     }
     /* #2: clear the latched 2nd-MO failure at ACCEPT time -- not just when this request
      * is later dispatched (start_next_request). Otherwise, while the dial sits queued

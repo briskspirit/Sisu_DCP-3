@@ -3464,7 +3464,7 @@ static void test_pg_and_cts_faults_fail_closed(void) {
     check(boot_until_ready(30000u),
           "retained live module recovers through PWRMON/CTS and fresh init");
     mh_advance(2000u);
-    check(mh_tx_count_exact("ATD15551234567;") == 0u,
+    check(mh_tx_count_exact("AT+CLIR=0;D15551234567;") == 0u,
           "recovery never dispatches a stale pre-failure dial");
 }
 
@@ -3872,7 +3872,7 @@ static void test_diag_scheduler_atomicity_and_preemption(void) {
     check(snapshot.scheduler.cancelled == 1u,
           "call admission cancels the remaining diagnostic group");
     mh_feed("OK");
-    check(mh_tx_count_exact("ATD15551234567;") == 1u &&
+    check(mh_tx_count_exact("AT+CLIR=0;D15551234567;") == 1u &&
               mh_tx_count_exact("AT#MONI") == 0u,
           "dial runs at the first command boundary before any next diag row");
     modem_service_get_diag_snapshot(&snapshot);
@@ -4055,7 +4055,7 @@ static void test_scan_maintenance_yields_to_call(void) {
     mh_settle();
 
     check(mh_tx_count_exact("AT#NWSCANTMR?") == 0u &&
-              tx_first_index("ATD15551234567;") != SIZE_MAX &&
+              tx_first_index("AT+CLIR=0;D15551234567;") != SIZE_MAX &&
               maintenance_snapshot().error ==
                   MODEM_MAINTENANCE_ERROR_CANCELLED,
           "call skips scan readback immediately after the current final");
@@ -4556,7 +4556,7 @@ static void test_band_recovery_and_call_preemption(void) {
     check(modem_service_request_dial("15551234567"),
           "dial is retained while a band test is active");
     mh_settle();
-    size_t dial_index = tx_first_index("ATD15551234567;");
+    size_t dial_index = tx_first_index("AT+CLIR=0;D15551234567;");
     size_t restore_index = tx_first_index("AT#SELBNDMODE=0");
     check(dial_index != SIZE_MAX && dial_index >= before_call &&
               restore_index != SIZE_MAX && restore_index < dial_index &&
@@ -4616,7 +4616,7 @@ static void test_deferred_band_mutation_keeps_its_phase(void) {
     mh_settle();
     size_t mutation = tx_first_index("AT#SELBNDMODE=1");
     size_t restore = tx_first_index("AT#SELBNDMODE=0");
-    size_t dial = tx_first_index("ATD15551234567;");
+    size_t dial = tx_first_index("AT+CLIR=0;D15551234567;");
     check(mutation != SIZE_MAX && restore != SIZE_MAX && dial != SIZE_MAX &&
               mutation < restore && restore < dial &&
               s_mh_radio_recovery[0] == '\0',
@@ -4775,7 +4775,7 @@ static void test_guarded_antenna_maintenance(void) {
           "dial is retained while manual antenna ownership is active");
     mh_settle();
     size_t restore_cfun = tx_last_index("AT+CFUN=5");
-    size_t dial = tx_last_index("ATD15551234567;");
+    size_t dial = tx_last_index("AT+CLIR=0;D15551234567;");
     snapshot = maintenance_snapshot();
     check(restore_cfun != SIZE_MAX && restore_cfun >= before_call &&
               dial != SIZE_MAX && restore_cfun < dial &&
@@ -5650,6 +5650,46 @@ static void test_call_forward_queue_cancellation(void) {
               result.request_id == request_id &&
               result.outcome == CALL_FORWARD_OUTCOME_CANCELLED,
           "ordinary session cancellation still owns an in-flight query");
+}
+
+static void test_caller_id_dial_policy(void) {
+    static const char *commands[] = {
+        "AT+CLIR=0;D15551234567;",
+        "AT+CLIR=2;D15551234567;",
+        "AT+CLIR=1;D15551234567;",
+    };
+    for (uint8_t setting = 0u; setting < 3u; setting++) {
+        begin_telit(true);
+        check(boot_until_ready(30000u), "caller ID fixture boots");
+        mh_settle();
+        s_hold_final_command = "AT+CSQ";
+        check(modem_service_request_debug_at("AT+CSQ"), "hold dial queue head");
+        mh_settle();
+        s_mh_own_number = setting;
+        check(modem_service_request_dial("15551234567"), "dial snapshots caller ID preference");
+        s_mh_own_number = (uint8_t)((setting + 1u) % 3u);
+        s_hold_final_command = commands[setting];
+        mh_feed("OK");
+        mh_settle();
+        check(mh_tx_count_exact(commands[setting]) == 1u &&
+                  mh_tx_count_exact("AT+CLIR?") == 0u &&
+                  service_probe().command_active,
+              "dial uses its queued preference without a blocking CLIR interrogation");
+        s_hold_final_command = NULL;
+        mh_feed("ERROR");
+        mh_settle();
+        check(mh_tx_count_exact("ATD15551234567;") == 0u &&
+                  mh_tx_count_exact(commands[setting]) == 1u &&
+                  mh_status().call_state == MODEM_CALL_IDLE,
+              "CLIR/dial rejection has no bare-dial or automatic retry fallback");
+    }
+    begin_telit(true);
+    check(boot_until_ready(30000u), "invalid caller ID fixture boots");
+    s_mh_own_number = 3u;
+    check(!modem_service_request_dial("15551234567"), "invalid saved caller ID rejects dialing");
+    s_mh_own_number = 0u;
+    s_mh_store_ready = false;
+    check(!modem_service_request_dial("15551234567"), "unreadable caller ID does not default to sending");
 }
 
 static void test_call_forward_sim_isolation(void) {
@@ -7248,6 +7288,7 @@ int main(void) {
     test_mwi_error_fixture_has_no_body();
     test_supplementary_refresh_recovery();
     test_call_forward_queue_cancellation();
+    test_caller_id_dial_policy();
     test_call_forward_sim_isolation();
     test_newer_call_forward_result_survives_old_final();
     test_ringtone_transport_and_recovery();
