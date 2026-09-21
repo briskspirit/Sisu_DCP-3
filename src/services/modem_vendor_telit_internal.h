@@ -148,6 +148,8 @@ bool telit_build_call_command(call_txn_kind_t kind, const char *number,
                               uint32_t *timeout_ms);
 bool telit_build_dtmf_command(char symbol, char *out, size_t out_cap,
                               uint32_t *timeout_ms);
+bool telit_build_call_waiting(call_waiting_action_t action, char *out, size_t out_cap);
+bool telit_parse_call_waiting_row(const char *line, call_waiting_row_t *out);
 uint8_t telit_call_forward_step_count(const call_forward_request_t *request);
 bool telit_build_call_forward_step(const call_forward_request_t *request,
                                    uint8_t step, char *out, size_t out_cap);

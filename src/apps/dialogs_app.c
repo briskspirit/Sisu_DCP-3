@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "apps/call_divert_app.h"
+#include "apps/call_waiting_app.h"
 #include "apps/calls_app.h"
 #include "apps/messages_app.h"
 #include "apps/phonebook_app.h"
@@ -158,7 +159,8 @@ bool handle_display_message_key(app_t *app, uint16_t key, uint32_t now) {
         }
         return true;
     }
-    if (handle_call_divert_display_key(app, key, now)) {
+    if (handle_call_waiting_display_key(app, key, now) ||
+        handle_call_divert_display_key(app, key, now)) {
         return true;
     }
     if (key == KEY_C || key == KEY_NAVI) {
@@ -907,6 +909,7 @@ bool tick_editor(app_t *app, uint32_t now) {
 }
 
 void open_display(app_t *app, uint8_t record_id, const char *a, const char *b, const char *c, app_route_t return_route, uint32_t now) {
+    app->call_waiting_display_request_id = 0u;
     /* Display record 0x20 is shared. Any generic dialog open relinquishes a
      * call-divert detail sequence; show_status_detail() explicitly claims the
      * newly opened record again after this function returns. */

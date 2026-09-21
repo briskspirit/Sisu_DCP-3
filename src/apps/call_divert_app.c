@@ -280,7 +280,8 @@ static bool result_can_present(const app_t *app) {
         return false;
     }
     if (app->route == APP_ROUTE_DISPLAY_MESSAGE) {
-        return app->display_record_id == CALL_DIVERT_REQUEST_RECORD_ID;
+        return app->display_record_id == CALL_DIVERT_REQUEST_RECORD_ID &&
+               app->call_waiting_display_request_id == 0u;
     }
     return app->route == APP_ROUTE_STANDBY ||
            app->route == APP_ROUTE_CALL_DIVERT_MENU;

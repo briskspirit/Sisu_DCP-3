@@ -15,6 +15,13 @@ static supplementary_refresh_t
     s_refresh[MODEM_SUPPLEMENTARY_REFRESH_COUNT];
 static modem_supplementary_cache_t s_cache;
 
+static uint32_t s_call_waiting_next_request_id;
+static call_waiting_result_t s_call_waiting_result;
+static bool s_call_waiting_result_pending;
+static bool s_call_waiting_invalid;
+static bool s_call_waiting_voice_seen;
+static bool s_call_waiting_active;
+
 static uint32_t s_call_forward_next_request_id;
 static call_forward_result_t s_call_forward_result;
 static bool s_call_forward_result_pending;
@@ -149,11 +156,15 @@ void modem_supplementary_init(void) {
     s_call_forward_next_request_id = 0u;
     memset(&s_call_forward_result, 0, sizeof(s_call_forward_result));
     s_call_forward_result_pending = false;
+    s_call_waiting_next_request_id = 0u;
+    memset(&s_call_waiting_result, 0, sizeof(s_call_waiting_result));
+    s_call_waiting_result_pending = false;
     modem_supplementary_reset_transient();
 }
 
 void modem_supplementary_reset_transient(void) {
     modem_supplementary_call_forward_reset();
+    modem_supplementary_call_waiting_begin();
     voice_mailbox_reset_collect();
     message_waiting_reset_collect();
     modem_supplementary_refresh_reset_all();
@@ -266,6 +277,61 @@ bool modem_supplementary_call_forward_pop_result(call_forward_result_t *out) {
     *out = s_call_forward_result;
     s_call_forward_result_pending = false;
     return true;
+}
+
+uint32_t modem_supplementary_call_waiting_next_request_id(void) {
+    if (++s_call_waiting_next_request_id == 0u) ++s_call_waiting_next_request_id;
+    return s_call_waiting_next_request_id;
+}
+
+void modem_supplementary_call_waiting_publish_result(const call_waiting_result_t *result) {
+    if (result == NULL || result->request_id == 0u) return;
+    uint32_t delta = result->request_id - s_call_waiting_result.request_id;
+    if (!s_call_waiting_result_pending || (delta != 0u && delta < UINT32_C(0x80000000))) {
+        s_call_waiting_result = *result;
+        s_call_waiting_result_pending = true;
+    }
+}
+
+bool modem_supplementary_call_waiting_pop_result(call_waiting_result_t *out) {
+    if (out == NULL || !s_call_waiting_result_pending) return false;
+    *out = s_call_waiting_result;
+    s_call_waiting_result_pending = false;
+    return true;
+}
+
+void modem_supplementary_call_waiting_begin(void) {
+    s_call_waiting_invalid = false;
+    s_call_waiting_voice_seen = false;
+    s_call_waiting_active = false;
+}
+
+void modem_supplementary_call_waiting_collect(const call_waiting_row_t *row) {
+    if (row == NULL) {
+        s_call_waiting_invalid = true;
+    } else if ((row->class_mask & 1u) != 0u) {
+        if (s_call_waiting_voice_seen && s_call_waiting_active != row->active)
+            s_call_waiting_invalid = true;
+        s_call_waiting_voice_seen = true;
+        s_call_waiting_active = row->active;
+    }
+}
+
+bool modem_supplementary_call_waiting_finish(uint32_t request_id,
+    call_waiting_action_t action, bool ok, bool timed_out, bool registered) {
+    bool query = action == CALL_WAITING_QUERY;
+    call_waiting_result_t result = {.request_id = request_id, .action = action};
+    if (timed_out || (ok && query && (s_call_waiting_invalid || !s_call_waiting_voice_seen))) {
+        result.outcome = CALL_WAITING_UNKNOWN;
+    } else if (!ok) {
+        result.outcome = registered ? CALL_WAITING_NOT_DONE : CALL_WAITING_NO_NETWORK;
+    } else {
+        result.outcome = CALL_WAITING_SUCCESS;
+        result.status_known = query;
+        result.active = query && s_call_waiting_active;
+    }
+    modem_supplementary_call_waiting_publish_result(&result);
+    return result.outcome == CALL_WAITING_SUCCESS;
 }
 
 void modem_supplementary_call_forward_begin(uint8_t step_count) {

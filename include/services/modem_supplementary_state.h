@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "services/call_forward_types.h"
+#include "services/call_waiting_types.h"
 
 #define MODEM_SUPPLEMENTARY_REFRESH_RETRY_MS 1000u
 #define MODEM_SUPPLEMENTARY_REFRESH_RETRY_LIMIT 1u
@@ -52,6 +53,13 @@ void modem_supplementary_call_forward_publish_result(
 bool modem_supplementary_call_forward_pop_result(call_forward_result_t *out);
 
 void modem_supplementary_call_forward_begin(uint8_t step_count);
+uint32_t modem_supplementary_call_waiting_next_request_id(void);
+void modem_supplementary_call_waiting_publish_result(const call_waiting_result_t *result);
+bool modem_supplementary_call_waiting_pop_result(call_waiting_result_t *out);
+void modem_supplementary_call_waiting_begin(void);
+void modem_supplementary_call_waiting_collect(const call_waiting_row_t *row);
+bool modem_supplementary_call_waiting_finish(uint32_t request_id,
+    call_waiting_action_t action, bool ok, bool timed_out, bool registered);
 void modem_supplementary_call_forward_reset(void);
 void modem_supplementary_call_forward_collect_row(
     const call_forward_row_t *row);

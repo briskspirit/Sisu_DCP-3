@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "apps/dialogs_app.h"
+#include "apps/call_waiting_app.h"
 #include "apps/main_menu_app.h"
 #include "apps/profiles_app.h"
 #include "services/feature_gates.h"
@@ -1005,6 +1006,14 @@ static const char *settings_value_label(settings_value_kind_t kind, uint8_t valu
 static bool apply_settings_value(app_t *app, uint32_t now) {
     uint8_t count = 0u;
     settings_value_kind_t kind = (settings_value_kind_t)app->settings_value_kind;
+    if (kind == SETTINGS_VALUE_CALL_WAITING) {
+        static const call_waiting_action_t actions[] = {
+            CALL_WAITING_ACTIVATE, CALL_WAITING_CANCEL, CALL_WAITING_QUERY,
+        };
+        uint8_t selected = app->settings_value_selected;
+        open_call_waiting_request(app, selected < 3u ? actions[selected] : CALL_WAITING_NONE, now);
+        return true;
+    }
     if (kind != SETTINGS_VALUE_AUTOMATIC_REDIAL &&
         kind != SETTINGS_VALUE_SPEED_DIALLING &&
         kind != SETTINGS_VALUE_OWN_NUMBER &&

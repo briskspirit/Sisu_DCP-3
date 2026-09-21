@@ -23,6 +23,9 @@ static void check_admissions_rejected(void) {
           "DTMF sequence rejected");
     check(!modem_service_request_call_waiting_answer(), "waiting answer rejected");
     check(!modem_service_request_call_waiting_reject(), "waiting reject rejected");
+    uint32_t waiting_id = 99u;
+    check(!modem_service_request_call_waiting(CALL_WAITING_QUERY, &waiting_id) && waiting_id == 0u,
+          "waiting service query is rejected without a backend");
     check(!modem_service_request_call_swap(), "swap rejected");
     check(!modem_service_call_hold_available(), "hold unavailable");
     check(!modem_service_request_call_hold(), "hold rejected");

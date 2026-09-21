@@ -837,6 +837,7 @@ run test_clock_date_logic    src/apps/clock_date_logic.c
 run test_clock_editor_app    src/apps/clock/app.c src/apps/clock/editor.c src/apps/clock_date_logic.c src/audio/audio_levels.c src/services/key_utils.c "${DEAD_CODE_FLAGS[@]}"
 run test_call_forward_mmi    src/services/call_forward_mmi.c
 run test_call_divert_app     src/apps/call_divert_app.c src/services/call_forward_mmi.c "${DEAD_CODE_FLAGS[@]}"
+run test_call_waiting_app    src/apps/call_waiting_app.c
 run test_call_options_logic  src/apps/call_options_logic.c
 run test_call_newcall_preserve src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # New-call snapshot/restore; whole app compiled, unreachable code stripped
 run test_call_waiting_handoff src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # generation-qualified remote-release handoff

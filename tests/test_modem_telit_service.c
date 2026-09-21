@@ -7186,7 +7186,158 @@ static void test_early_sms_profile_order_and_wear(void) {
           "an unavailable early snapshot is repaired by strict completion without permanent degradation");
 }
 
+static uint32_t start_waiting_test(call_waiting_action_t action) {
+    begin_telit(true);
+    check(boot_until_ready(30000u), "call waiting fixture boots");
+    mh_feed("+CEREG: 1");
+    mh_settle();
+    check(mh_tx_count_exact("AT+CCWA=1,2") == 0u &&
+          mh_tx_count_exact("AT+CCWA=1,1,1") == 0u && mh_tx_count_exact("AT+CCWA=1,0,1") == 0u,
+          "startup enables waiting notifications without interrogating or changing network service");
+    s_hold_final_command = action == CALL_WAITING_QUERY ? "AT+CCWA=1,2" :
+                          action == CALL_WAITING_ACTIVATE ? "AT+CCWA=1,1,1" : "AT+CCWA=1,0,1";
+    uint32_t id = 0u;
+    check(modem_service_request_call_waiting(action, &id) && id != 0u, "waiting request admitted");
+    mh_settle();
+    check(mh_tx_count_exact(s_hold_final_command) == 1u && service_probe().command_active,
+          "waiting request reaches UART and holds the channel until its final");
+    return id;
+}
+
+static void test_call_waiting_network_requests(void) {
+    static const char *rows[] = {
+        "+CCWA: 1,1\r\n+CCWA: 0,2", "+CCWA: 0,7", "", "+CCWA: 1,2",
+        "+CCWA: 0,1\r\n+CCWA: 1,1", "+CCWA: 2,1",
+    };
+    for (unsigned i = 0u; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        uint32_t id = start_waiting_test(CALL_WAITING_QUERY);
+        if (rows[i][0] != '\0') mh_feed(rows[i]);
+        if (i == 0u) {
+            unsigned received = s_mh_local_received;
+            feed_direct("+CMT: \"15551230000\",\"\",\"20260916210000\",129,4098,0,8,2", "OK");
+            mh_feed("+CCWA: \"15551230000\",129,1");
+            check(service_probe().command_active && mh_status().ring_active &&
+                      s_mh_local_received == received + 1u,
+                  "SMS body and waiting caller URC cannot consume a network status request");
+        }
+        s_hold_final_command = NULL;
+        mh_feed("OK");
+        call_waiting_result_t result;
+        check(modem_service_pop_call_waiting_result(&result) && result.request_id == id &&
+                  result.outcome == (i < 2u ? CALL_WAITING_SUCCESS : CALL_WAITING_UNKNOWN) &&
+                  result.status_known == (i < 2u) && result.active == (i == 0u),
+              "only explicit consistent voice evidence yields a waiting status");
+    }
+    for (unsigned action = CALL_WAITING_ACTIVATE; action <= CALL_WAITING_CANCEL; action++) {
+        for (unsigned failure = 0u; failure < 3u; failure++) {
+            uint32_t id = start_waiting_test((call_waiting_action_t)action);
+            if (failure == 2u) {
+                mh_feed("#QSS: 0"); mh_feed("#QSS: 3"); mh_feed("+CEREG: 1");
+            }
+            s_hold_final_command = NULL;
+            mh_feed(failure == 1u ? "ERROR" : "OK");
+            call_waiting_result_t result;
+            check(modem_service_pop_call_waiting_result(&result) && result.request_id == id &&
+                      result.outcome == (failure == 0u ? CALL_WAITING_SUCCESS :
+                                         failure == 1u ? CALL_WAITING_NOT_DONE : CALL_WAITING_UNKNOWN),
+                  "waiting mutations report success, rejection, or old-SIM uncertainty accurately");
+        }
+    }
+    uint32_t id = start_waiting_test(CALL_WAITING_QUERY);
+    size_t debug_before = mh_tx_count_exact("AT+CGMM");
+    check(modem_service_request_debug_at("AT+CGMM"), "queue work behind waiting query");
+    mh_advance(g_modem_vendor.supplementary.command_timeout_ms + 1u);
+    call_waiting_result_t result;
+    check(modem_service_pop_call_waiting_result(&result) && result.request_id == id &&
+              result.outcome == CALL_WAITING_UNKNOWN && service_probe().command_active &&
+              mh_tx_count_exact("AT+CGMM") == debug_before,
+          "waiting timeout reports uncertainty but drains the non-abortable command");
+    s_hold_final_command = NULL;
+    mh_feed("+CCWA: 1,1"); mh_feed("OK"); mh_settle();
+    check(!modem_service_pop_call_waiting_result(&result) &&
+              mh_tx_count_exact("AT+CGMM") == debug_before + 1u,
+          "late waiting final releases queued work without publishing a second result");
+
+    id = start_waiting_test(CALL_WAITING_ACTIVATE);
+    modem_service_power_off();
+    check(modem_service_pop_call_waiting_result(&result) && result.request_id == id &&
+              result.outcome == CALL_WAITING_UNKNOWN,
+          "power-off cannot claim that an on-wire waiting mutation was cancelled");
+    check(service_probe().power_off_pending && service_probe().command_active &&
+              mh_tx_count_exact("AT#SHDN") == 0u,
+          "power-off must not overlap the non-abortable waiting command");
+    s_hold_final_command = NULL; mh_feed("OK"); mh_settle();
+    check(mh_tx_count_exact("AT#SHDN") == 1u && !modem_service_pop_call_waiting_result(&result),
+          "the cancelled waiting final releases one shutdown without changing its result");
+
+    for (unsigned shutdown = 0u; shutdown < 2u; shutdown++) {
+        id = start_waiting_test(CALL_WAITING_QUERY);
+        check(modem_service_request_debug_at("AT+CGMM"), "queue work before unreleased waiting query");
+        mh_advance(g_modem_vendor.supplementary.command_timeout_ms + 1u);
+        if (shutdown) modem_service_power_off();
+        mh_advance(5001u);
+        check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+                  service_probe().failed_module_may_be_live && s_mh_rail_enabled &&
+                  mh_tx_count_exact("AT+CGMM") == 0u && mh_tx_count_exact("AT#SHDN") == 0u &&
+                  service_probe().request_queue_depth == 0u,
+              "an unreleased waiting command fails safely without a second command or rail cut");
+        check(modem_service_take_power_off_failure() == (shutdown != 0u),
+              "waiting drain failure reports an unconfirmed requested shutdown");
+        s_hold_final_command = NULL; mh_feed("OK"); mh_settle();
+        check(service_probe().state == MODEM_SERVICE_TEST_STATE_FAILED &&
+                  mh_tx_count_exact("AT+CGMM") == 0u && mh_tx_count_exact("AT#SHDN") == 0u,
+              "a final after waiting drain exhaustion cannot revive cancelled work");
+    }
+
+    begin_telit(true); check(boot_until_ready(30000u), "queued waiting fixture boots");
+    mh_feed("+CEREG: 1");
+    mh_settle();
+    s_hold_final_command = "AT+CSQ";
+    check(modem_service_request_debug_at("AT+CSQ"), "hold waiting queue head"); mh_settle();
+    check(modem_service_request_call_waiting(CALL_WAITING_CANCEL, &id) &&
+              modem_service_cancel_queued_call_waiting(id), "Quit removes queued waiting mutation");
+    check(modem_service_request_call_waiting(CALL_WAITING_QUERY, &id), "queue waiting query before SIM removal");
+    mh_feed("#QSS: 0"); s_hold_final_command = NULL; mh_feed("OK"); mh_settle();
+    check(modem_service_pop_call_waiting_result(&result) && result.outcome == CALL_WAITING_CANCELLED &&
+              mh_tx_count_exact("AT+CCWA=1,0,1") == 0u && mh_tx_count_exact("AT+CCWA=1,2") == 0u,
+          "neither cancelled nor old-SIM waiting requests reach UART");
+
+    begin_telit(true); check(boot_until_ready(30000u), "deferred waiting fixture boots");
+    mh_feed("+CEREG: 1"); mh_settle(); settle_dtr_sleep();
+    s_mh_dtr_wake_works = false;
+    check(modem_service_request_call_waiting(CALL_WAITING_ACTIVATE, &id), "admit wake-deferred waiting mutation");
+    mh_settle();
+    check(service_probe().deferred_command_valid, "waiting mutation waits for CTS");
+    mh_feed("#QSS: 0"); s_mh_cts_asserted = true; mh_settle();
+    check(modem_service_pop_call_waiting_result(&result) && result.outcome == CALL_WAITING_CANCELLED &&
+              mh_tx_count_exact("AT+CCWA=1,1,1") == 0u,
+          "SIM loss cancels wake-deferred waiting before any mutation reaches UART");
+
+    id = start_waiting_test(CALL_WAITING_QUERY);
+    mh_feed("+CEREG: 0");
+    uint32_t newer = 0u;
+    check(modem_service_request_call_waiting(CALL_WAITING_QUERY, &newer) && newer != id,
+          "new no-network waiting result has a separate identity");
+    s_hold_final_command = NULL;
+    mh_feed("+CCWA: 1,1"); mh_feed("OK");
+    check(modem_service_pop_call_waiting_result(&result) && result.request_id == newer &&
+              result.outcome == CALL_WAITING_NO_NETWORK && !modem_service_pop_call_waiting_result(&result),
+          "an older waiting final cannot overwrite a newer visible failure");
+
+    begin_telit(true); check(boot_until_ready(30000u), "waiting call-priority fixture boots");
+    mh_feed("+CEREG: 1"); mh_settle();
+    s_hold_final_command = "AT+CSQ";
+    check(modem_service_request_debug_at("AT+CSQ"), "hold call-priority queue head"); mh_settle();
+    check(modem_service_request_call_waiting(CALL_WAITING_QUERY, &id), "queue waiting status before a call arrives");
+    mh_feed("RING"); mh_feed("#ECAM: 0,6,1,,,");
+    s_hold_final_command = NULL; mh_feed("OK"); mh_settle();
+    check(modem_service_pop_call_waiting_result(&result) && result.outcome == CALL_WAITING_NOT_DONE &&
+              mh_tx_count_exact("AT+CCWA=1,2") == 0u,
+          "a call that arrives while waiting is queued prevents a blocking SS dispatch");
+}
+
 int main(void) {
+    test_call_waiting_network_requests();
     test_delivery_report_routing();
     test_configured_sms_send();
     test_sms_service_centre_sim_change();

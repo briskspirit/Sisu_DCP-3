@@ -566,6 +566,30 @@ static void test_production_descriptor(void) {
 }
 
 static void test_call_builders(void) {
+    char waiting_command[32];
+    static const char *waiting_commands[] = {
+        "AT+CCWA=1,1,1", "AT+CCWA=1,0,1", "AT+CCWA=1,2",
+    };
+    for (unsigned i = 0; i < 3u; i++) {
+        check(g_modem_vendor.supplementary.build_call_waiting(
+                  (call_waiting_action_t)(i + 1u), waiting_command, sizeof(waiting_command)) &&
+                  strcmp(waiting_command, waiting_commands[i]) == 0,
+              "call waiting maps network actions without disabling notifications");
+    }
+    check(!g_modem_vendor.supplementary.build_call_waiting(CALL_WAITING_NONE, waiting_command, sizeof(waiting_command)) &&
+          !g_modem_vendor.supplementary.build_call_waiting(CALL_WAITING_QUERY, waiting_command, 4u),
+          "call waiting rejects invalid action and short buffers");
+    call_waiting_row_t waiting;
+    check(g_modem_vendor.supplementary.parse_call_waiting_row("+CCWA: 1,7", &waiting) &&
+              waiting.active && waiting.class_mask == 7u,
+          "call waiting parses the status and class mask");
+    static const char *invalid_waiting[] = {
+        "+CCWA: 1", "+CCWA: 2,1", "+CCWA: 1,0", "+CCWA: 1,256",
+        "+CCWA: -1,1", "+CCWA: 1,1,0", "+CCWA: \"123\",129,1", "+CCWA: \"1\",1",
+    };
+    for (unsigned i = 0; i < sizeof(invalid_waiting) / sizeof(invalid_waiting[0]); i++)
+        check(!g_modem_vendor.supplementary.parse_call_waiting_row(invalid_waiting[i], &waiting),
+              "malformed or unsolicited waiting lines are not network status");
     (void)build_call(CALL_TXN_DIAL, "+14155550123", 0u,
                      "AT+CLIR=0;D+14155550123;", 30000u);
     (void)build_call(CALL_TXN_ANSWER, NULL, 0u, "ATA", 15000u);

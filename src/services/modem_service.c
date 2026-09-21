@@ -134,6 +134,8 @@ typedef enum {
     MODEM_AT_CALL_DTMF,
     MODEM_AT_CALL_SUPPLEMENTARY,
     MODEM_AT_CALL_FORWARD,
+    MODEM_AT_CALL_WAITING,
+    MODEM_AT_CALL_WAITING_DRAIN,
     MODEM_AT_VOICE_MAILBOX,
     MODEM_AT_MESSAGE_WAITING,
     MODEM_AT_SMS_BINARY_TEXT_SETUP,
@@ -177,6 +179,7 @@ typedef enum {
     MODEM_OP_DTMF,
     MODEM_OP_CALL_SUPPLEMENTARY,
     MODEM_OP_CALL_FORWARD,
+    MODEM_OP_CALL_WAITING,
     MODEM_OP_VOICE_MAILBOX,
     MODEM_OP_MESSAGE_WAITING,
     MODEM_OP_SEND_SMS,
@@ -196,6 +199,7 @@ typedef enum {
     MODEM_REQ_RELEASE_ACTIVE,
     MODEM_REQ_RELEASE_LEG, /* release a specific call id; id in .index */
     MODEM_REQ_CALL_FORWARD,
+    MODEM_REQ_CALL_WAITING,
     MODEM_REQ_VOICE_MAILBOX,
     MODEM_REQ_MESSAGE_WAITING,
     MODEM_REQ_SEND_SMS,
@@ -209,6 +213,7 @@ typedef struct {
     uint32_t call_token;     /* 0 for non-call requests; model correlation otherwise */
     uint32_t request_id;     /* async-result correlation; 0 = internal/no owner */
     call_forward_request_t call_forward;
+    call_waiting_action_t call_waiting;
     call_caller_id_t caller_id;
 
     uint16_t index;
@@ -400,6 +405,9 @@ static bool maintenance_flush_recovery_record(void);
 static bool call_forward_request_valid(const call_forward_request_t *request,
                                        uint8_t *step_count_out);
 static void call_forward_parse_row(const char *line);
+static void call_waiting_finish(bool ok, bool timed_out);
+static void call_waiting_push_result(uint32_t id, call_waiting_action_t action,
+                                     call_waiting_outcome_t outcome);
 static void call_forward_finish_step(bool ok, bool timed_out);
 static void call_forward_finish(bool ok, bool timed_out);
 static void call_forward_push_result(uint32_t request_id,
@@ -542,6 +550,7 @@ static bool s_sms_mode_restore_pending;
 static bool s_sms_text_parameters_dirty;
 static uint32_t s_sim_session_generation;
 static bool s_call_forward_dispatched;
+static bool s_call_waiting_dispatched;
 static uint8_t s_sms_mode_restore_attempts;
 static uint32_t s_sms_mode_restore_retry_ms;
 #define MODEM_SMS_MODE_RESTORE_ATTEMPTS 3u
@@ -1132,6 +1141,7 @@ void modem_service_init(void) {
     s_sms_text_parameters_dirty = false;
     s_sim_session_generation = 0u;
     s_call_forward_dispatched = false;
+    s_call_waiting_dispatched = false;
     s_sms_mode_restore_attempts = 0u;
     s_sms_mode_restore_retry_ms = 0u;
     s_now_ms = time_ms();
@@ -2301,7 +2311,7 @@ bool modem_service_request_call_forward(const call_forward_request_t *request,
     return true;
 }
 
-bool modem_service_cancel_queued_call_forward(uint32_t request_id) {
+static bool cancel_queued_supplementary(modem_request_type_t type, uint32_t request_id) {
     if (request_id == 0u || !s_request_lock_ready) {
         return false;
     }
@@ -2312,7 +2322,7 @@ bool modem_service_cancel_queued_call_forward(uint32_t request_id) {
         uint8_t index =
             (uint8_t)((s_request_head + offset) % MODEM_REQUEST_QUEUE_LEN);
         modem_request_t *candidate = &s_request_queue[index];
-        if (candidate->type != MODEM_REQ_CALL_FORWARD ||
+        if (candidate->type != type ||
             candidate->request_id != request_id) {
             continue;
         }
@@ -2337,6 +2347,53 @@ bool modem_service_cancel_queued_call_forward(uint32_t request_id) {
     }
     critical_section_exit(&s_request_lock);
     return removed;
+}
+
+bool modem_service_cancel_queued_call_forward(uint32_t request_id) {
+    return cancel_queued_supplementary(MODEM_REQ_CALL_FORWARD, request_id);
+}
+
+bool modem_service_cancel_queued_call_waiting(uint32_t request_id) {
+    return cancel_queued_supplementary(MODEM_REQ_CALL_WAITING, request_id);
+}
+
+bool modem_service_request_call_waiting(call_waiting_action_t action, uint32_t *request_id_out) {
+    if (request_id_out != NULL) *request_id_out = 0u;
+    char command[MODEM_PROVISION_COMMAND_MAX];
+    if (!s_request_lock_ready || !s_status_lock_ready ||
+        !g_modem_vendor.supplementary.supported ||
+        g_modem_vendor.supplementary.build_call_waiting == NULL ||
+        g_modem_vendor.supplementary.parse_call_waiting_row == NULL ||
+        g_modem_vendor.supplementary.call_waiting_response_prefix == NULL ||
+        g_modem_vendor.supplementary.command_timeout_ms == 0u ||
+        !g_modem_vendor.supplementary.build_call_waiting(action, command, sizeof(command)))
+        return false;
+    modem_request_t request = {.type = MODEM_REQ_CALL_WAITING, .call_waiting = action};
+    critical_section_enter_blocking(&s_request_lock);
+    request.request_id = modem_supplementary_call_waiting_next_request_id();
+    critical_section_exit(&s_request_lock);
+    critical_section_enter_blocking(&s_status_lock);
+    request.sim_session_generation = s_sim_session_generation;
+    bool ready = s_status.sim_ready;
+    bool registered = s_status.network_registered;
+    bool idle = s_call_projection.call_state == MODEM_CALL_IDLE;
+    critical_section_exit(&s_status_lock);
+    if (!ready || !registered || !idle) {
+        call_waiting_push_result(request.request_id, action,
+            ready && idle && !registered ? CALL_WAITING_NO_NETWORK : CALL_WAITING_NOT_DONE);
+    } else if (!queue_request(&request)) {
+        return false;
+    }
+    if (request_id_out != NULL) *request_id_out = request.request_id;
+    return true;
+}
+
+bool modem_service_pop_call_waiting_result(call_waiting_result_t *out) {
+    if (!s_status_lock_ready) return false;
+    critical_section_enter_blocking(&s_status_lock);
+    bool ready = modem_supplementary_call_waiting_pop_result(out);
+    critical_section_exit(&s_status_lock);
+    return ready;
 }
 
 bool modem_service_pop_call_forward_result(call_forward_result_t *out) {
@@ -3316,6 +3373,19 @@ static void process_timeout(uint32_t now_ms) {
         call_forward_finish_step(false, true);
         return;
     }
+    if (kind == MODEM_AT_CALL_WAITING) {
+        call_waiting_finish(false, true);
+        /* CCWA is non-abortable: its late final must not finish another command. */
+        s_active = true;
+        s_active_kind = MODEM_AT_CALL_WAITING_DRAIN;
+        s_command_deadline_ms = now_ms + 5000u;
+        return;
+    }
+    if (kind == MODEM_AT_CALL_WAITING_DRAIN) {
+        s_power_off_failure_pending = s_power_off_pending;
+        modem_fail_power_state("call waiting did not release AT channel", true);
+        return;
+    }
 
     if (kind == MODEM_AT_CALL_FORWARD_FLAGS) {
         modem_supplementary_call_forward_flags_finish(false, now_ms);
@@ -3926,6 +3996,24 @@ static void start_next_request(uint32_t now_ms) {
         }
         break;
     }
+    case MODEM_REQ_CALL_WAITING: {
+        char command[MODEM_PROVISION_COMMAND_MAX];
+        s_operation = MODEM_OP_CALL_WAITING;
+        set_operation_busy(true);
+        s_call_waiting_dispatched = false;
+        modem_supplementary_call_waiting_begin();
+        if (s_current_request.sim_session_generation != s_sim_session_generation ||
+            !status_sim_ready_snapshot() || !s_status.network_registered ||
+            call_model_session_active(&s_call_model) ||
+            !g_modem_vendor.supplementary.build_call_waiting(
+                s_current_request.call_waiting, command, sizeof(command))) {
+            call_waiting_finish(false, false);
+        } else {
+            send_command(MODEM_AT_CALL_WAITING, command,
+                         g_modem_vendor.supplementary.command_timeout_ms, now_ms);
+        }
+        break;
+    }
     case MODEM_REQ_CALL_FORWARD: {
         char command[MODEM_PROVISION_COMMAND_MAX];
         uint8_t step_count = 0u;
@@ -4105,6 +4193,13 @@ static void send_deferred(uint32_t now_ms) {
     if (s_deferred_kind == MODEM_AT_SMS_MODE_RESTORE) {
         copy_bounded(s_deferred_cmd, sizeof(s_deferred_cmd), modem_sms_protocol_restore_command());
     }
+    if (s_deferred_kind == MODEM_AT_CALL_WAITING &&
+        (s_current_request.sim_session_generation != s_sim_session_generation ||
+         !status_sim_ready_snapshot() || !s_status.network_registered ||
+         call_model_session_active(&s_call_model))) {
+        call_waiting_finish(false, false);
+        return;
+    }
     uint32_t token = s_deferred_call_token;
     s_deferred_call_token = 0u;
     /* Re-enter the common command path after CTS confirms the DTR wake. */
@@ -4131,6 +4226,11 @@ static void modem_fail_before_dispatch(uint32_t now_ms) {
     if (kind == MODEM_AT_PROVISION_REBOOT) {
         modem_fail_power_state(
             "CTS wake timeout before provisioning reboot dispatch", true);
+        return;
+    }
+    if (kind == MODEM_AT_CALL_WAITING) {
+        call_waiting_finish(false, false);
+        modem_fail_power_state("CTS wake timeout before call waiting dispatch", true);
         return;
     }
     if (kind == MODEM_AT_CALL_FORWARD) {
@@ -4392,6 +4492,7 @@ static bool send_raw_command_with_token(modem_at_kind_t kind, const char *cmd,
     if (kind == MODEM_AT_CALL_FORWARD) {
         s_call_forward_dispatched = true;
     }
+    if (kind == MODEM_AT_CALL_WAITING) s_call_waiting_dispatched = true;
 
     modem_sms_command_kind_t sms_kind;
     if (sms_protocol_command_from_at(kind, &sms_kind)) {
@@ -4643,6 +4744,14 @@ static void finish_command_result(bool ok, const char *line) {
             provision_begin_reboot_wait(s_now_ms);
         } else {
             modem_fail_power_state("provisioning reboot command rejected", true);
+        }
+    } else if (kind == MODEM_AT_CALL_WAITING) {
+        call_waiting_finish(ok, false);
+    } else if (kind == MODEM_AT_CALL_WAITING_DRAIN) {
+        /* The result was already reported at timeout. This final only drains. */
+        if (s_power_off_pending) {
+            s_power_off_pending = false;
+            modem_begin_power_off(s_now_ms);
         }
     } else if (kind == MODEM_AT_CALL_FORWARD) {
         call_forward_finish_step(ok, false);
@@ -5358,7 +5467,8 @@ static bool at_kind_is_operation(modem_at_kind_t kind) {
     return kind == MODEM_AT_CALL_DIAL || kind == MODEM_AT_CALL_ANSWER ||
            kind == MODEM_AT_CALL_HANGUP || kind == MODEM_AT_CALL_DTMF ||
            kind == MODEM_AT_CALL_SUPPLEMENTARY ||
-           kind == MODEM_AT_CALL_FORWARD || kind == MODEM_AT_VOICE_MAILBOX ||
+           kind == MODEM_AT_CALL_FORWARD || kind == MODEM_AT_CALL_WAITING ||
+           kind == MODEM_AT_VOICE_MAILBOX ||
            kind == MODEM_AT_MESSAGE_WAITING ||
            kind == MODEM_AT_SMS_BINARY_TEXT_SETUP ||
            kind == MODEM_AT_SMS_CMGF_TEXT || kind == MODEM_AT_SMS_CMGS_PROMPT ||
@@ -5501,6 +5611,18 @@ static bool parse_expected_line(const char *line) {
                 s_sim_provider_line_invalid = true;
             }
             s_sim_provider_line_seen = true;
+            return true;
+        }
+        break;
+    case MODEM_AT_CALL_WAITING:
+    case MODEM_AT_CALL_WAITING_DRAIN:
+        if (starts_with(line, g_modem_vendor.supplementary.call_waiting_response_prefix) &&
+            !is_ccwa_urc(line)) {
+            if (s_active_kind == MODEM_AT_CALL_WAITING) {
+                call_waiting_row_t row;
+                modem_supplementary_call_waiting_collect(
+                    g_modem_vendor.supplementary.parse_call_waiting_row(line, &row) ? &row : NULL);
+            }
             return true;
         }
         break;
@@ -5716,6 +5838,7 @@ static bool observe_vendor_aux_line(const char *line) {
 
 static void finish_operation(bool ok) {
     bool was_call_forward = s_operation == MODEM_OP_CALL_FORWARD;
+    bool was_call_waiting = s_operation == MODEM_OP_CALL_WAITING;
     bool was_dtmf = s_operation == MODEM_OP_DTMF;
     if (!ok) {
         critical_section_enter_blocking(&s_status_lock);
@@ -5727,6 +5850,10 @@ static void finish_operation(bool ok) {
     if (was_call_forward) {
         s_call_forward_dispatched = false;
         modem_supplementary_call_forward_reset();
+    }
+    if (was_call_waiting) {
+        s_call_waiting_dispatched = false;
+        modem_supplementary_call_waiting_begin();
     }
     if (was_dtmf) {
         s_dtmf_cancel_requested = false;
@@ -6064,6 +6191,36 @@ static void call_forward_finish(bool ok, bool timed_out) {
     finish_operation(semantic_ok);
 }
 
+static void call_waiting_push_result(uint32_t id, call_waiting_action_t action,
+                                     call_waiting_outcome_t outcome) {
+    call_waiting_result_t result = {.request_id = id, .action = action, .outcome = outcome};
+    critical_section_enter_blocking(&s_status_lock);
+    modem_supplementary_call_waiting_publish_result(&result);
+    critical_section_exit(&s_status_lock);
+}
+
+static void call_waiting_finish(bool ok, bool timed_out) {
+    uint32_t id = s_current_request.request_id;
+    call_waiting_action_t action = s_current_request.call_waiting;
+    critical_section_enter_blocking(&s_status_lock);
+    bool current = s_status.sim_ready &&
+                   s_current_request.sim_session_generation == s_sim_session_generation;
+    bool semantic_ok = false;
+    if (!current) {
+        call_waiting_result_t result = {
+            .request_id = id, .action = action,
+            .outcome = s_call_waiting_dispatched && action != CALL_WAITING_QUERY
+                ? CALL_WAITING_UNKNOWN : CALL_WAITING_CANCELLED,
+        };
+        modem_supplementary_call_waiting_publish_result(&result);
+    } else {
+        semantic_ok = modem_supplementary_call_waiting_finish(
+            id, action, ok, timed_out, s_status.network_registered);
+    }
+    critical_section_exit(&s_status_lock);
+    finish_operation(semantic_ok || !current);
+}
+
 static void voice_mailbox_parse_row(const char *line) {
     modem_voice_mailbox_row_t row;
     if (g_modem_vendor.supplementary.parse_voice_mailbox_row == NULL ||
@@ -6128,6 +6285,8 @@ static void cancel_request(const modem_request_t *request,
         return;
     }
     model_cancel_request(request);
+    if (request->type == MODEM_REQ_CALL_WAITING)
+        call_waiting_push_result(request->request_id, request->call_waiting, CALL_WAITING_CANCELLED);
     if (request->type == MODEM_REQ_CALL_FORWARD) {
         call_forward_push_result(request->request_id,
                                  &request->call_forward,
@@ -6148,6 +6307,8 @@ static void cancel_request_session(void) {
         call_forward_request_t call_forward;
         bool is_call_forward;
         bool call_forward_uncertain;
+        call_waiting_action_t call_waiting;
+        bool call_waiting_uncertain;
         modem_sms_request_kind_t sms_kind;
         modem_sms_outcome_t sms_outcome;
 
@@ -6175,6 +6336,10 @@ static void cancel_request_session(void) {
             .call_token = s_current_request.call_token,
             .request_id = s_current_request.request_id,
             .call_forward = s_current_request.call_forward,
+            .call_waiting = s_current_request.type == MODEM_REQ_CALL_WAITING
+                ? s_current_request.call_waiting : CALL_WAITING_NONE,
+            .call_waiting_uncertain = s_current_request.type == MODEM_REQ_CALL_WAITING &&
+                s_call_waiting_dispatched && s_current_request.call_waiting != CALL_WAITING_QUERY,
             .is_call_forward =
                 s_current_request.type == MODEM_REQ_CALL_FORWARD,
             .call_forward_uncertain =
@@ -6203,6 +6368,8 @@ static void cancel_request_session(void) {
             .call_token = request->call_token,
             .request_id = request->request_id,
             .call_forward = request->call_forward,
+            .call_waiting = request->type == MODEM_REQ_CALL_WAITING
+                ? request->call_waiting : CALL_WAITING_NONE,
             .is_call_forward = request->type == MODEM_REQ_CALL_FORWARD,
         };
         cancelled[cancelled_count - 1u].is_sms =
@@ -6229,6 +6396,9 @@ static void cancel_request_session(void) {
 
     for (uint8_t i = 0u; i < cancelled_count; i++) {
         model_cancel_token(cancelled[i].call_token);
+        if (cancelled[i].call_waiting != CALL_WAITING_NONE)
+            call_waiting_push_result(cancelled[i].request_id, cancelled[i].call_waiting,
+                cancelled[i].call_waiting_uncertain ? CALL_WAITING_UNKNOWN : CALL_WAITING_CANCELLED);
         if (cancelled[i].is_call_forward) {
             call_forward_push_result(cancelled[i].request_id,
                                      &cancelled[i].call_forward,
@@ -7360,12 +7530,19 @@ static void modem_begin_power_off(uint32_t now_ms) {
         return;
     }
     cancel_request_session();
+    if (s_active && s_active_kind == MODEM_AT_CALL_WAITING) {
+        /* Cancellation retires the UI owner, not the non-abortable AT command. */
+        finish_operation(true);
+        s_active_kind = MODEM_AT_CALL_WAITING_DRAIN;
+        s_command_deadline_ms += 5000u;
+    }
     if (s_active && (s_active_kind == MODEM_AT_SIM_PROVIDER ||
                      s_active_kind == MODEM_AT_SIM_PROVIDER_DRAIN ||
                      s_active_kind == MODEM_AT_SMS_RECOVERY ||
-                     s_active_kind == MODEM_AT_SMS_RECOVERY_DRAIN)) {
+                     s_active_kind == MODEM_AT_SMS_RECOVERY_DRAIN ||
+                     s_active_kind == MODEM_AT_CALL_WAITING_DRAIN)) {
         s_power_off_pending = true;
-        LOGI("modem", "power-off waiting for the non-abortable storage read");
+        LOGI("modem", "power-off waiting for the non-abortable AT command");
         return;
     }
     if (s_active) {

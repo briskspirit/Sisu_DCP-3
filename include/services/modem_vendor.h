@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "services/call_forward_types.h"
+#include "services/call_waiting_types.h"
 #include "services/call_types.h"
 #include "services/modem_diag.h"
 #include "services/modem_maintenance.h"
@@ -253,6 +254,10 @@ typedef struct {
                                     char *out, size_t out_cap);
     bool (*parse_call_forward_row)(const char *line,
                                    call_forward_row_t *out);
+    const char *call_waiting_response_prefix;
+    bool (*build_call_waiting)(call_waiting_action_t action,
+                               char *out, size_t out_cap);
+    bool (*parse_call_waiting_row)(const char *line, call_waiting_row_t *out);
     /* Local flags only: automatic refresh must never start a network SS
      * transaction. Rows use parse_aux_urc; NONE means flags are unavailable. */
     const char *call_forward_flags_query_cmd;

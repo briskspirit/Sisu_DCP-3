@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "apps/settings_app.h"
+#include "apps/call_waiting_app.h"
 #include "apps/call_register_app.h"
 #include "apps/dialogs_app.h"
 #include "services/input_keys.h"
@@ -18,6 +19,10 @@ static app_route_t s_return;
 static char s_preview[64];
 static char s_code[STORE_TEXT_MAX + 1u] = "12345";
 static store_status_t s_write_status = STORE_STATUS_OK;
+static call_waiting_action_t s_waiting_action;
+void open_call_waiting_request(app_t *app, call_waiting_action_t action, uint32_t now) {
+    (void)now; s_waiting_action = action; app->route = APP_ROUTE_DISPLAY_MESSAGE;
+}
 
 static void check(bool ok, const char *what) {
     if (!ok) { fprintf(stderr, "FAIL: %s\n", what); s_failures++; }
@@ -96,8 +101,18 @@ static void expect_not_done(const app_t *app, app_route_t back, const char *what
 }
 
 static void test_unavailable_settings(void) {
+    for (uint8_t choice = 0u; choice < 3u; choice++) {
+        app_t app = {0};
+        unsigned writes = s_writes;
+        open_settings_menu(&app, SETTINGS_MENU_CALL, 2u);
+        handle_settings_menu_key(&app, KEY_NAVI, 10u);
+        app.settings_value_selected = choice;
+        handle_settings_value_key(&app, KEY_NAVI, 20u);
+        check(s_waiting_action == (call_waiting_action_t)(choice + 1u) && s_writes == writes,
+              "waiting actions request the network without saving invented state");
+    }
     static const struct { settings_menu_kind_t menu; uint8_t row, choices; } cases[] = {
-        {SETTINGS_MENU_CALL, 2u, 3u}, {SETTINGS_MENU_CALL, 4u, 2u},
+        {SETTINGS_MENU_CALL, 4u, 2u},
         {SETTINGS_MENU_PHONE, 3u, 2u},
         {SETTINGS_MENU_SECURITY, 0u, 2u}, {SETTINGS_MENU_SECURITY, 1u, 3u},
         {SETTINGS_MENU_SECURITY, 2u, 3u}, {SETTINGS_MENU_SECURITY, 3u, 2u},

@@ -3,6 +3,7 @@
 #include "app_status_runtime.h"
 #include "apps/calculator_app.h"
 #include "apps/call_divert_app.h"
+#include "apps/call_waiting_app.h"
 #include "apps/calls_app.h"
 #include "apps/clock_app.h"
 #include "apps/dialogs_app.h"
@@ -126,6 +127,7 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
     if (tick_call_divert(app, now_ms)) {
         changed = true;
     }
+    changed |= tick_call_waiting(app, now_ms);
     if (tick_service_codes(app, now_ms)) {
         changed = true;
     }

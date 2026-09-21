@@ -556,6 +556,8 @@ typedef struct {
     bool settings_restore_pending;
     uint8_t settings_restore_stars;
     uint32_t settings_restore_started_ms;
+    uint32_t call_waiting_request_id;
+    uint32_t call_waiting_display_request_id;
     uint8_t call_divert_menu_kind;
     uint8_t call_divert_menu_selected;
     uint8_t call_divert_condition_index;

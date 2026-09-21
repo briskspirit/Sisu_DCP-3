@@ -9,6 +9,11 @@
 #include <string.h>
 
 #include "apps/call_divert_app.h"
+#include "apps/call_waiting_app.h"
+
+bool handle_call_waiting_display_key(app_t *app, uint16_t key, uint32_t now) {
+    (void)app; (void)key; (void)now; return false;
+}
 #include "apps/dialogs_app.h"
 #include "apps/phonebook_app.h"
 #include "apps/profiles_app.h"

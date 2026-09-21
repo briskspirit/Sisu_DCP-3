@@ -105,6 +105,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/apps/calculator_app.c
     src/apps/game_common.c
     src/apps/call_divert_app.c
+    src/apps/call_waiting_app.c
     src/apps/call_register_app.c
     src/apps/call_options_logic.c
     src/apps/calls_app.c

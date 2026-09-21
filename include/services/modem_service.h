@@ -7,6 +7,7 @@
 
 #include "services/call_types.h"
 #include "services/call_forward_types.h"
+#include "services/call_waiting_types.h"
 #include "services/modem_diag.h"
 #include "services/modem_maintenance.h"
 #include "services/modem_signal.h"
@@ -234,6 +235,9 @@ bool modem_service_request_call_forward(const call_forward_request_t *request,
  * eventual result remains request-id scoped. */
 bool modem_service_cancel_queued_call_forward(uint32_t request_id);
 bool modem_service_pop_call_forward_result(call_forward_result_t *out);
+bool modem_service_request_call_waiting(call_waiting_action_t action, uint32_t *request_id_out);
+bool modem_service_cancel_queued_call_waiting(uint32_t request_id);
+bool modem_service_pop_call_waiting_result(call_waiting_result_t *out);
 /* SIM-provided number discovered through the selected backend. Manual phone
  * settings remain an app-level override and are intentionally not mixed into
  * this cache. */

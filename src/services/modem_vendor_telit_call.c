@@ -85,6 +85,34 @@ static bool telit_dial_number_valid(const char *number) {
     return true;
 }
 
+bool telit_build_call_waiting(call_waiting_action_t action, char *out, size_t out_cap) {
+    const char *command;
+    switch (action) {
+    case CALL_WAITING_ACTIVATE: command = "AT+CCWA=1,1,1"; break;
+    case CALL_WAITING_CANCEL: command = "AT+CCWA=1,0,1"; break;
+    /* ThreadX requires queries to omit class; retain notifications in all modes. */
+    case CALL_WAITING_QUERY: command = "AT+CCWA=1,2"; break;
+    default: return false;
+    }
+    if (out == NULL || out_cap <= strlen(command)) return false;
+    memcpy(out, command, strlen(command) + 1u);
+    return true;
+}
+
+bool telit_parse_call_waiting_row(const char *line, call_waiting_row_t *out) {
+    telit_csv_view_t fields[2];
+    size_t count = 0u;
+    uint32_t active, class_mask;
+    if (out == NULL || line == NULL || strchr(line, '"') != NULL ||
+        !telit_view_split_prefixed(line, "+CCWA:", fields, 2u, &count) || count != 2u ||
+        !telit_view_parse_u32(fields[0], 1u, &active) ||
+        !telit_view_parse_u32(fields[1], 255u, &class_mask) || class_mask == 0u) {
+        return false;
+    }
+    *out = (call_waiting_row_t){.active = active != 0u, .class_mask = (uint8_t)class_mask};
+    return true;
+}
+
 bool telit_build_call_command(call_txn_kind_t kind, const char *number,
                               uint8_t target_id, call_caller_id_t caller_id, char *out,
                               size_t out_cap, uint32_t *timeout_ms) {
