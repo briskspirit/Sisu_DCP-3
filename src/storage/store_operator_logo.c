@@ -254,6 +254,18 @@ store_status_t store_operator_logo_get(operator_logo_t *out) {
     return STORE_STATUS_OK;
 }
 
+store_status_t store_operator_logo_clear(void) {
+    if (!store_service_ready() || !store_service_unit_ready(STORE_UNIT_OPERATOR_LOGO))
+        return STORE_STATUS_NOT_READY;
+    if (!s_logos.saved) return STORE_STATUS_OK;
+    store_status_t status = mark_dirty();
+    if (status == STORE_STATUS_OK) {
+        s_logos.saved = false;
+        memset(&s_logos.logo, 0, sizeof(s_logos.logo));
+    }
+    return status;
+}
+
 store_status_t store_operator_logo_pending_save(uint32_t id) {
     operator_logo_t logo;
     store_status_t status = store_operator_logo_pending_get(id, &logo);

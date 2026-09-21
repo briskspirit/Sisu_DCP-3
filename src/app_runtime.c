@@ -32,6 +32,7 @@
 #include "storage/store_service.h"
 
 void app_runtime_init(app_t *app) {
+    reset_settings_restore(app);
     app->route = APP_ROUTE_POWER_OFF;
     app->power_on_pending = false;
     app->powerup_stage = APP_POWERUP_DONE;
@@ -56,6 +57,7 @@ void app_runtime_init(app_t *app) {
 bool app_runtime_tick(app_t *app, uint32_t now_ms) {
     bool changed = false;
     if (store_service_contact_service_required()) {
+        reset_settings_restore(app);
         if (app->route != APP_ROUTE_POWER_OFF && app->route != APP_ROUTE_CONTACT_SERVICE) {
             enter_contact_service(app, now_ms);
             changed = true;
@@ -74,6 +76,7 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
     if (tick_power_off(app, now_ms)) {
         changed = true;
     }
+    changed |= tick_settings_restore(app, now_ms);
 
     if (tick_standby(app, now_ms)) {
         changed = true;

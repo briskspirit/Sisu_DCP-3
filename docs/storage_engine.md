@@ -136,6 +136,40 @@ The host tests pin the delay boundary and uptime wrap. This reproduces the UI
 timer model and startup phase, not the original hardware's self-test execution
 time from battery insertion.
 
+## Restore Factory Settings
+
+Settings > Restore factory settings asks for the stored security code before
+changing anything. The prompt uses the existing masked security-code layout
+and translated strings. A wrong code shows `Code error`; cancelled input makes
+no writes. An unreadable, empty or malformed stored code cannot authorize a
+reset. The default code is `12345`. Existing digit-only codes of up to ten
+digits remain accepted, matching the current change-code editor's limit;
+this is compatibility with Sisu settings, not Nokia's documented five-digit
+code limit.
+
+The reset applies the existing Settings/profile defaults, removes the saved
+operator logo so standby returns to the carrier name, and preserves the
+security code, active profile selection, user records, call lists, divert
+history, calibration, modem provisioning and battery state. It does not issue
+SIM-security or modem-reset commands. Pending received logos and their delivery
+receipts remain intact. Nokia's
+[3210 user guide](https://ringtones.specialtyansweringservice.net/wp-content/uploads/2014/08/manuals/nokia-3210-userguide.pdf)
+describes the code requirement and retained user data under menu 4-4 (page 55).
+
+The UI waits for the calls, profiles, system settings and operator-logo records to leave the
+store's dirty mask before showing `Settings restored` and applying the reset
+language. It uses normal deferred commits, including audio/flash arbitration.
+Rejected writes, unavailable/degraded records or a 30-second wait show
+`Not done`, never a success acknowledgement. Battery notes keep priority;
+calls, alarms or power-off suppress a late reset dialog.
+
+Each record replacement is atomic, but the four-record reset is not one
+transaction. A power cut or failed write can leave some settings reset and
+others unchanged. `Not done` means completion was not confirmed, not that
+earlier changes were rolled back. Host tests cover admission, masking,
+interruptions, deferred/failed writes and a littlefs-backed reboot, including
+byte-for-byte preservation of unrelated records.
+
 ## User Space Budgets
 
 The 384 KiB user volume has these starting budgets:

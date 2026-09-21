@@ -201,6 +201,56 @@ static void test_saved_cache_before_mutations(void) {
     }
 }
 
+static void test_clear_saved_logo(void) {
+    fresh();
+    uint8_t payload[133] = {0x13,0x01,0x84,0,72,14,1,0xa5};
+    make_part(payload, sizeof(payload), 1u, 1u, 0u);
+    assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK); commit();
+    uint32_t saved_id = store_operator_logo_pending_first();
+    assert(store_operator_logo_pending_save(saved_id) == STORE_STATUS_OK); commit();
+
+    /* The clear must preserve a committed image even if no getter has run. */
+    operator_logo_t logo;
+    fail_admission = true;
+    assert(store_operator_logo_clear() == STORE_STATUS_STORAGE_ERROR);
+    fail_admission = false;
+    assert(store_operator_logo_get(&logo) == STORE_STATUS_OK && logo.pixels[0] == 0xa5u);
+    diag.ready = false;
+    assert(store_operator_logo_clear() == STORE_STATUS_NOT_READY);
+    diag.ready = true;
+    diag.unavailable_mask = 1u << STORE_UNIT_OPERATOR_LOGO;
+    assert(store_operator_logo_clear() == STORE_STATUS_NOT_READY);
+    diag.unavailable_mask = 0u;
+    assert(diag.dirty_mask == 0u);
+    assert(store_operator_logo_clear() == STORE_STATUS_OK);
+    assert(store_operator_logo_get(&logo) == STORE_STATUS_OK && logo.pixels[0] == 0xa5u);
+    diag.degraded_mask = 1u << STORE_UNIT_OPERATOR_LOGO;
+    assert(store_operator_logo_commit_status() == STORE_STATUS_STORAGE_ERROR);
+    assert(store_operator_logo_get(&logo) == STORE_STATUS_OK && logo.pixels[0] == 0xa5u);
+    diag.degraded_mask = 0u;
+    reboot();
+    assert(store_operator_logo_get(&logo) == STORE_STATUS_OK && logo.pixels[0] == 0xa5u);
+
+    make_part(payload, sizeof(payload), 1u, 1u, 1u);
+    assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK); commit();
+    uint32_t pending_id = store_operator_logo_pending_first();
+    assert(pending_id != 0u && pending_id != saved_id);
+    assert(store_operator_logo_clear() == STORE_STATUS_OK);
+    assert(store_operator_logo_commit_status() == STORE_STATUS_NOT_READY);
+    commit();
+    assert(store_operator_logo_get(&logo) == STORE_STATUS_NOT_FOUND);
+    reboot();
+    assert(store_operator_logo_get(&logo) == STORE_STATUS_NOT_FOUND);
+    assert(store_operator_logo_pending_first() == pending_id);
+    assert(store_operator_logo_pending_get(pending_id, &logo) == STORE_STATUS_OK && logo.pixels[0] == 0xa5u);
+    assert(store_operator_logo_clear() == STORE_STATUS_OK && diag.dirty_mask == 0u);
+    /* Old retransmissions remain consumed; they cannot bring the logo back. */
+    make_part(payload, sizeof(payload), 1u, 1u, 0u);
+    assert(store_operator_logo_receive(&part, ++now) == STORE_STATUS_OK && diag.dirty_mask == 0u);
+    assert(store_operator_logo_pending_first() == pending_id);
+    assert(store_operator_logo_get(&logo) == STORE_STATUS_NOT_FOUND);
+}
+
 static void test_rejected_receipts_reusable(void) {
     for (unsigned durable = 0u; durable < 2u; durable++) {
         fresh();
@@ -278,6 +328,7 @@ static void test_exact_recovery_receipt_wins(void) {
 int main(void) {
     test_baseline();
     test_saved_cache_before_mutations();
+    test_clear_saved_logo();
     test_rejected_receipts_reusable();
     test_invalidated_recovery_receipt();
     test_exact_recovery_receipt_wins();

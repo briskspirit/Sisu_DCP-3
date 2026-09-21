@@ -17,5 +17,8 @@ store_status_t store_operator_logo_pending_save(uint32_t id);
 store_status_t store_operator_logo_pending_discard(uint32_t id);
 /* Returns only the last durably committed saved image. */
 store_status_t store_operator_logo_get(operator_logo_t *out);
+/* Clears the saved image, preserving receive receipts and pending messages.
+ * OK queues the change; commit_status proves its durability. */
+store_status_t store_operator_logo_clear(void);
 
 #endif

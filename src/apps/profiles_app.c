@@ -365,18 +365,23 @@ void profile_restore_from_headset(void) {
     set_active_profile(saved);
 }
 
-void profiles_restore_factory_defaults(void) {
+bool profiles_restore_factory_defaults(void) {
     /* v6.00 restore dispatcher 0x00292878 resets the per-profile tone
      * configuration. Keep profile selection state intact: an inserted Headset
      * remains the active accessory profile, while all five editable profiles
      * return to their traced defaults. */
     for (uint8_t profile = 0u; profile < PROFILE_TOTAL; profile++) {
         for (uint8_t kind = 0u; kind < PROFILE_SETTING_COUNT; kind++) {
-            store_setting_set_u8(PROFILE_SETTING_KEYS[profile][kind],
-                                 PROFILE_DEFAULTS[profile][kind]);
+            if (store_setting_set_u8(PROFILE_SETTING_KEYS[profile][kind],
+                                     PROFILE_DEFAULTS[profile][kind]) != STORE_STATUS_OK) return false;
         }
     }
-    profile_sync_active_settings();
+    uint8_t active = profile_active_index();
+    for (uint8_t kind = 0u; kind < PROFILE_SETTING_COUNT; kind++) {
+        if (store_setting_set_u8(PROFILE_ACTIVE_KEYS[kind],
+                                 PROFILE_DEFAULTS[active][kind]) != STORE_STATUS_OK) return false;
+    }
+    return true;
 }
 
 static profile_setting_kind_t normalize_profile_setting_kind(profile_setting_kind_t kind) {

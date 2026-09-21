@@ -8,6 +8,7 @@
 #include <string.h>
 
 static operator_logo_t saved;
+static bool has_saved = true;
 static uint32_t pending = 7u;
 static store_status_t admission = STORE_STATUS_OK, commit_status = STORE_STATUS_OK;
 static unsigned saves, discards, notes;
@@ -24,6 +25,7 @@ store_status_t store_operator_logo_pending_get(uint32_t id, operator_logo_t *out
     return STORE_STATUS_OK;
 }
 store_status_t store_operator_logo_get(operator_logo_t *out) {
+    if (!has_saved) return STORE_STATUS_NOT_FOUND;
     *out = saved;
     return STORE_STATUS_OK;
 }
@@ -122,5 +124,12 @@ int main(void) {
     assert(operator_logo_update_network(&app, &status));
     status.at_ready = false;
     assert(operator_logo_update_network(&app, &status) && !app.operator_logo_visible);
+    status.at_ready = true;
+    assert(operator_logo_update_network(&app, &status) && app.operator_logo_visible);
+    strcpy(app.operator_name, "Verizon");
+    has_saved = false;
+    assert(operator_logo_update_network(&app, &status) && !app.operator_logo_visible);
+    assert(strcmp(app.operator_name, "Verizon") == 0);
+    assert(!operator_logo_update_network(&app, &status));
     return 0;
 }

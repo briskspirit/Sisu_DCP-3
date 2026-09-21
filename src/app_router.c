@@ -40,6 +40,8 @@ bool app_router_handle_event(app_t *app, const input_event_t *event) {
     }
 
     switch (app->route) {
+    case APP_ROUTE_SETTINGS_RESTORE:
+        return handle_settings_restore_key(app, key, event->type, now);
     case APP_ROUTE_CONTACT_SERVICE:
         return true;
     case APP_ROUTE_POWERUP:
@@ -248,6 +250,9 @@ bool app_router_handle_event(app_t *app, const input_event_t *event) {
 
 void app_router_render(const app_t *app, framebuffer_t *fb) {
     switch (app->route) {
+    case APP_ROUTE_SETTINGS_RESTORE:
+        render_settings_restore(app, fb);
+        break;
     case APP_ROUTE_CONTACT_SERVICE:
         render_contact_service(app, fb);
         break;

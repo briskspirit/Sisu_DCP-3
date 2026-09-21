@@ -32,7 +32,7 @@ uint8_t strings_language_count(void) { return 1u; }
 uint8_t strings_language_id_at(uint8_t index) { (void)index; return 1u; }
 const char *strings_language_self_name_at(uint8_t index) { (void)index; return "English"; }
 void strings_set_language(uint8_t id) { (void)id; s_language_applies++; }
-void profiles_restore_factory_defaults(void) {}
+bool profiles_restore_factory_defaults(void) { return true; }
 bool board_diag_headset_inserted(void) { return true; }
 
 store_status_t store_setting_get_u8(store_setting_key_t key, uint8_t *value) {

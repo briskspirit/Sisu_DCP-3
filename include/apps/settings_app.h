@@ -19,18 +19,23 @@ void open_settings_menu(app_t *app, settings_menu_kind_t kind, uint8_t selected)
 bool handle_settings_menu_key(app_t *app, uint16_t key, uint32_t now);
 bool handle_settings_value_key(app_t *app, uint16_t key, uint32_t now);
 bool handle_settings_welcome_options_key(app_t *app, uint16_t key, uint32_t now);
+bool handle_settings_restore_key(app_t *app, uint16_t key, event_type_t type, uint32_t now);
+bool tick_settings_restore(app_t *app, uint32_t now);
+void reset_settings_restore(app_t *app);
 
 void render_settings_menu(const app_t *app, framebuffer_t *fb);
 void render_settings_value(const app_t *app, framebuffer_t *fb);
 void render_settings_welcome_options(const app_t *app, framebuffer_t *fb);
+void render_settings_restore(const app_t *app, framebuffer_t *fb);
 
 void settings_submit_welcome_editor(app_t *app, uint32_t now);
 void settings_cancel_editor(app_t *app, uint32_t now);
 void settings_submit_pin_request_editor(app_t *app, uint32_t now);
 void settings_submit_access_code_editor(app_t *app, uint32_t now);
 
-/* Restore the user-visible Settings tree and profile customizations. Does not
- * erase user data, service provisioning, calibration, or lifetime counters. */
-void settings_restore_factory_defaults(void);
+/* Restore the Settings tree, profile customizations and saved operator logo. Does not
+ * erase user data, service provisioning, calibration, or lifetime counters.
+ * Queues RAM changes only; the authorized UI waits for their durable commits. */
+bool settings_restore_factory_defaults(void);
 
 #endif

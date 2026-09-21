@@ -9,7 +9,10 @@
 #include "services/feature_gates.h"
 #include "services/board_diag_service.h"
 #include "services/input_keys.h"
+#include "services/key_utils.h"
+#include "services/timebase.h"
 #include "storage/store_service.h"
+#include "storage/store_operator_logo.h"
 #include "services/strings.h"
 
 typedef enum {
@@ -163,30 +166,165 @@ static uint8_t settings_access_max_len(uint8_t kind);
 static void return_to_settings_parent(app_t *app);
 static void settings_show_saved(app_t *app, uint32_t now);
 
-void settings_restore_factory_defaults(void) {
-    store_setting_set_u8(STORE_SETTING_SETTINGS_AUTOMATIC_REDIAL, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_SPEED_DIALLING, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_PHONE_LINE, 0u);
-    store_setting_set_u8(STORE_SETTING_CALL_OWN_NUMBER_SENDING, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_AUTOMATIC_ANSWER, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_CELL_INFO_DISPLAY, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_NETWORK_SELECTION, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_LIGHTS, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_CONFIRM_SIM_ACTIONS, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_PIN_CODE_REQUEST, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_FIXED_DIALLING, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_CLOSED_USER_GROUP, 0u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_PHONE_SECURITY, 17u);
-    store_setting_set_u8(STORE_SETTING_SETTINGS_PHONE_LINE_CHANGE_ALLOWED, 1u);
-    store_setting_set_u8(STORE_SETTING_SYSTEM_LANGUAGE, 0u);
-    store_setting_set_text(STORE_SETTING_SYSTEM_WELCOME_NOTE, "");
-    profiles_restore_factory_defaults();
+#define SETTINGS_RESTORE_UNITS ((UINT32_C(1) << STORE_UNIT_SETTINGS_CALLS) | \
+                               (UINT32_C(1) << STORE_UNIT_SETTINGS_PROFILES) | \
+                               (UINT32_C(1) << STORE_UNIT_SETTINGS_SYSTEM) | \
+                               (UINT32_C(1) << STORE_UNIT_OPERATOR_LOGO))
+#define SETTINGS_RESTORE_TIMEOUT_MS 30000u
 
-    /* Automatic currently resolves to English until SIM/network language
-     * selection exists, but preserve the sentinel so future auto-detect starts
-     * working without another factory reset. Apply it before the confirmation
-     * note is rendered. */
-    strings_set_language(0u);
+static void erase_restore_code(char *code, size_t size) {
+    volatile char *p = code;
+    while (size-- != 0u) *p++ = '\0';
+}
+
+void reset_settings_restore(app_t *app) {
+    erase_restore_code(app->settings_restore_code, sizeof(app->settings_restore_code));
+    app->settings_restore_active = false;
+    app->settings_restore_pending = false;
+    app->settings_restore_stars = 0u;
+    app->settings_restore_started_ms = 0u;
+}
+
+static bool restore_storage_available(const store_diag_snapshot_t *diag) {
+    return diag->ready && diag->boot_faults == 0u &&
+        ((diag->unavailable_mask | diag->degraded_mask) & SETTINGS_RESTORE_UNITS) == 0u;
+}
+
+bool settings_restore_factory_defaults(void) {
+    store_diag_snapshot_t diag;
+    store_service_get_diag(&diag);
+    if (!restore_storage_available(&diag)) return false;
+    static const struct { store_setting_key_t key; uint8_t value; } defaults[] = {
+        {STORE_SETTING_SETTINGS_AUTOMATIC_REDIAL, 0u},
+        {STORE_SETTING_SETTINGS_SPEED_DIALLING, 0u},
+        {STORE_SETTING_SETTINGS_PHONE_LINE, 0u},
+        {STORE_SETTING_CALL_OWN_NUMBER_SENDING, 0u},
+        {STORE_SETTING_SETTINGS_AUTOMATIC_ANSWER, 0u},
+        {STORE_SETTING_SETTINGS_CELL_INFO_DISPLAY, 0u},
+        {STORE_SETTING_SETTINGS_NETWORK_SELECTION, 0u},
+        {STORE_SETTING_SETTINGS_LIGHTS, 0u},
+        {STORE_SETTING_SETTINGS_CONFIRM_SIM_ACTIONS, 0u},
+        {STORE_SETTING_SETTINGS_PIN_CODE_REQUEST, 0u},
+        {STORE_SETTING_SETTINGS_FIXED_DIALLING, 0u},
+        {STORE_SETTING_SETTINGS_CLOSED_USER_GROUP, 0u},
+        {STORE_SETTING_SETTINGS_PHONE_SECURITY, 17u},
+        {STORE_SETTING_SETTINGS_PHONE_LINE_CHANGE_ALLOWED, 1u},
+        {STORE_SETTING_SYSTEM_LANGUAGE, 0u},
+    };
+    for (size_t i = 0u; i < ARRAY_COUNT(defaults); i++) {
+        if (store_setting_set_u8(defaults[i].key, defaults[i].value) != STORE_STATUS_OK) return false;
+    }
+    return store_setting_set_text(STORE_SETTING_SYSTEM_WELCOME_NOTE, "") == STORE_STATUS_OK &&
+           profiles_restore_factory_defaults() &&
+           store_operator_logo_clear() == STORE_STATUS_OK;
+}
+
+static bool restore_owns_display(const app_t *app) {
+    return app->route == APP_ROUTE_SETTINGS_RESTORE ||
+        (app->route == APP_ROUTE_DISPLAY_MESSAGE &&
+         app->display_return_route == APP_ROUTE_SETTINGS_RESTORE);
+}
+
+static void finish_settings_restore(app_t *app, bool ok, uint32_t now) {
+    bool show = app->settings_restore_active && restore_owns_display(app);
+    reset_settings_restore(app);
+    if (ok) strings_set_language(0u);
+    if (!show) return;
+    open_settings_menu(app, SETTINGS_MENU_ROOT, 3u);
+    open_display_sid(app, ok ? 3u : 32u, ok ? 0x1c3u : 0x210u,
+                     ok ? "Settings\nrestored" : "Not done", APP_ROUTE_SETTINGS_MENU, now);
+}
+
+bool tick_settings_restore(app_t *app, uint32_t now) {
+    if (!app->settings_restore_active && !app->settings_restore_pending) return false;
+    if (!restore_owns_display(app)) {
+        erase_restore_code(app->settings_restore_code, sizeof(app->settings_restore_code));
+        app->settings_restore_active = false;
+    }
+    if (!app->settings_restore_pending) return false;
+    /* Battery notes temporarily cover this route. Do not replace them with
+     * the reset result; finish when they close, or silently after power-off. */
+    if (app->route == APP_ROUTE_DISPLAY_MESSAGE &&
+        app->display_return_route == APP_ROUTE_SETTINGS_RESTORE) return false;
+    store_diag_snapshot_t diag;
+    store_service_get_diag(&diag);
+    if (!restore_storage_available(&diag)) {
+        finish_settings_restore(app, false, now);
+    } else if ((diag.dirty_mask & SETTINGS_RESTORE_UNITS) == 0u) {
+        finish_settings_restore(app, true, now);
+    } else if (time_diff_ms(now, app->settings_restore_started_ms + SETTINGS_RESTORE_TIMEOUT_MS) >= 0) {
+        finish_settings_restore(app, false, now);
+    } else return false;
+    return true;
+}
+
+bool handle_settings_restore_key(app_t *app, uint16_t key, event_type_t type, uint32_t now) {
+    if (app->route != APP_ROUTE_SETTINGS_RESTORE || !app->settings_restore_active ||
+        app->settings_restore_pending) return true;
+    char *input = app->settings_restore_code;
+    size_t len = strlen(input);
+    if (key == KEY_C && (type == EVENT_KEY_DOWN || type == EVENT_KEY_HOLD)) {
+        if (len == 0u) {
+            reset_settings_restore(app);
+            open_settings_menu(app, SETTINGS_MENU_ROOT, 3u);
+        } else if (type == EVENT_KEY_HOLD) {
+            erase_restore_code(input, sizeof(app->settings_restore_code));
+        } else input[len - 1u] = '\0';
+        app->dirty = true;
+        return true;
+    }
+    if (type != EVENT_KEY_DOWN) return true;
+    char digit = key_digit(key);
+    if (digit >= '0' && digit <= '9') {
+        if (len < sizeof(app->settings_restore_code) - 1u) {
+            input[len] = digit;
+            input[len + 1u] = '\0';
+            app->dirty = true;
+        }
+        return true;
+    }
+    if (key != KEY_NAVI || len == 0u) return true;
+    char stored[STORE_TEXT_MAX + 1u] = {0};
+    store_diag_snapshot_t diag;
+    store_service_get_diag(&diag);
+    bool readable = restore_storage_available(&diag) &&
+        store_setting_get_text(STORE_SETTING_SECURITY_CODE, stored, sizeof(stored)) == STORE_STATUS_OK;
+    /* Accept existing digit-only codes up to the current change-code limit;
+     * malformed/unavailable storage must never authorize a reset. */
+    size_t stored_len = strlen(stored);
+    readable = readable && stored_len > 0u && stored_len < sizeof(app->settings_restore_code) &&
+               strspn(stored, "0123456789") == stored_len;
+    bool matches = readable && strcmp(input, stored) == 0;
+    erase_restore_code(stored, sizeof(stored));
+    erase_restore_code(input, sizeof(app->settings_restore_code));
+    if (!readable) {
+        finish_settings_restore(app, false, now);
+    } else if (!matches) {
+        open_display_sid(app, 0u, 0x145u, "Code\nerror", APP_ROUTE_SETTINGS_RESTORE, now);
+    } else if (!settings_restore_factory_defaults()) {
+        finish_settings_restore(app, false, now);
+    } else {
+        app->settings_restore_pending = true;
+        app->settings_restore_stars = (uint8_t)len;
+        app->settings_restore_started_ms = now;
+        app->dirty = true;
+    }
+    return true;
+}
+
+void render_settings_restore(const app_t *app, framebuffer_t *fb) {
+    fb_clear(fb, false);
+    const font_t *font = asset_font(FONT_FS2);
+    fb_bitmap(fb, 14u, 0, 0, true, true);
+    draw_text_block(fb, font, ts_or(0x29au, "Security\ncode:"), 0, 7, FB_WIDTH, 9, 2u);
+    char stars[sizeof(app->settings_restore_code)];
+    size_t len = app->settings_restore_pending ? app->settings_restore_stars
+                                             : strlen(app->settings_restore_code);
+    if (len >= sizeof(stars)) len = sizeof(stars) - 1u;
+    memset(stars, '*', len);
+    stars[len] = '\0';
+    fb_text(fb, font, stars, 0, 28, true, FB_WIDTH);
+    if (!app->settings_restore_pending) draw_softkey(fb, ts_or(0x2e9u, "OK"));
 }
 
 void open_settings_menu(app_t *app, settings_menu_kind_t kind, uint8_t selected) {
@@ -234,8 +372,10 @@ bool handle_settings_menu_key(app_t *app, uint16_t key, uint32_t now) {
         } else if (selected == 2u) {
             open_settings_menu(app, SETTINGS_MENU_SECURITY, 0u);
         } else {
-            settings_restore_factory_defaults();
-            open_display_sid(app, 3u, 0x1c3u, "Settings\nrestored", APP_ROUTE_SETTINGS_MENU, now);
+            reset_settings_restore(app);
+            app->settings_restore_active = true;
+            app->route = APP_ROUTE_SETTINGS_RESTORE;
+            app->dirty = true;
         }
         return true;
     }

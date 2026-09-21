@@ -19,6 +19,7 @@
 
 static int s_failures;
 static uint8_t s_settings[STORE_SETTING_COUNT];
+static store_setting_key_t s_rejected_key = STORE_SETTING_COUNT;
 static unsigned s_personalise_opens;
 static uint8_t s_personalise_profile;
 
@@ -39,6 +40,7 @@ store_status_t store_setting_get_u8(store_setting_key_t key,
 }
 
 store_status_t store_setting_set_u8(store_setting_key_t key, uint8_t value) {
+    if (key == s_rejected_key) return STORE_STATUS_NOT_READY;
     if ((unsigned)key >= STORE_SETTING_COUNT) {
         return STORE_STATUS_INVALID_ARGUMENT;
     }
@@ -215,7 +217,7 @@ static void test_factory_restore_resets_all_tones_and_preserves_selection(void) 
     s_settings[STORE_SETTING_PROFILE_ACTIVE] = 4u;
     s_settings[STORE_SETTING_PROFILE_SAVED] = 2u;
 
-    profiles_restore_factory_defaults();
+    check(profiles_restore_factory_defaults(), "factory restore accepts all profile writes");
 
     check(s_settings[STORE_SETTING_PROFILE_ACTIVE] == 4u,
           "factory restore preserves active Headset profile");
@@ -231,6 +233,11 @@ static void test_factory_restore_resets_all_tones_and_preserves_selection(void) 
         check(s_settings[active_keys[kind]] == defaults[4][kind],
               "factory restore resynchronizes active-profile tone mirror");
     }
+    s_rejected_key = profile_keys[0][0];
+    check(!profiles_restore_factory_defaults(), "factory restore reports rejected profile writes");
+    s_rejected_key = active_keys[PROFILE_SETTING_COUNT - 1u];
+    check(!profiles_restore_factory_defaults(), "factory restore reports rejected active mirror writes");
+    s_rejected_key = STORE_SETTING_COUNT;
 }
 
 int main(void) {

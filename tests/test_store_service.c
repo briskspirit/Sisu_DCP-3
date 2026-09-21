@@ -17,6 +17,7 @@
 #include <assert.h>
 #include <setjmp.h>
 
+#include "apps/settings_app.h"
 #include "services/backlight_service.h"
 #include "services/lcd_calibration.h"
 #include "services/sms_deliver_codec.h"
@@ -2070,6 +2071,81 @@ static void test_persistent_wire_contract(void) {
     }
 }
 
+static void test_factory_restore_persistence(void) {
+    static uint8_t payload[STORAGE_RECORD_MAX_PAYLOAD];
+    uint64_t before[STORE_UNIT_COUNT];
+    const uint32_t reset_units = (1u << STORE_UNIT_SETTINGS_CALLS) |
+        (1u << STORE_UNIT_SETTINGS_PROFILES) | (1u << STORE_UNIT_SETTINGS_SYSTEM) |
+        (1u << STORE_UNIT_OPERATOR_LOGO);
+    fresh_store();
+    populate_wire_fixture();
+    assert(store_setting_set_text(STORE_SETTING_SECURITY_CODE, "54321") == STORE_STATUS_OK);
+    assert(store_setting_set_u8(STORE_SETTING_PROFILE_SAVED, 2u) == STORE_STATUS_OK);
+    assert(store_setting_set_u32(STORE_SETTING_CALL_DURATION_LIFETIME, 123456u) == STORE_STATUS_OK);
+    assert(store_setting_set_u32(STORE_SETTING_SYSTEM_LCD_TUNING,
+                                LCD_CALIBRATION_PACK(54u, 2u, 5u)) == STORE_STATUS_OK);
+    assert(store_setting_set_u16(STORE_SETTING_SYSTEM_MODEM_PROVISION_VERSION, 7u) == STORE_STATUS_OK);
+    sms_codec_message_t part = {.binary = true, .has_ports = true,
+        .dest_port = OPERATOR_LOGO_PORT, .dcs = 0xf5u, .binary_len = 133u,
+        .binary_data = {0x13, 0x01, 0x84, 0, 72, 14, 1, 0xa5}};
+    strcpy(part.address, "+15551234567");
+    strcpy(part.timestamp, "26/09/20,12:00:00");
+    assert(store_operator_logo_receive(&part, 0u) == STORE_STATUS_OK);
+    flush_commits();
+    uint32_t logo_id = store_operator_logo_pending_first();
+    assert(logo_id != 0u && store_operator_logo_pending_save(logo_id) == STORE_STATUS_OK);
+    flush_commits();
+    operator_logo_t logo;
+    assert(store_operator_logo_get(&logo) == STORE_STATUS_OK && logo.pixels[0] == 0xa5u);
+    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+        size_t len;
+        assert(read_unit_payload(unit, payload, sizeof(payload), &len));
+        before[unit] = fnv1a64(payload, len);
+    }
+
+    assert_true(settings_restore_factory_defaults(), "factory restore admitted on healthy store");
+    store_diag_snapshot_t diag;
+    store_service_get_diag(&diag);
+    assert_true((diag.dirty_mask & reset_units) == reset_units,
+                "factory restore acceptance is not a durable commit");
+    s_fake_op_busy = true;
+    for (uint32_t t = 4000u; t < 5000u; t += 40u) store_service_tick(t);
+    store_service_get_diag(&diag);
+    assert_true(s_fake_busy_ops != 0u && (diag.dirty_mask & reset_units) != 0u &&
+                diag.degraded_mask == 0u, "busy flash leaves restore pending, not degraded");
+    s_fake_op_busy = false;
+    for (uint32_t t = 5000u; t < 9000u; t += 40u) store_service_tick(t);
+    store_service_get_diag(&diag);
+    assert_eq_u32(0u, diag.dirty_mask, "factory restore eventually commits");
+    assert_true(store_service_init() == STORE_STATUS_OK, "factory restore survives reboot");
+    assert_true(store_operator_logo_get(&logo) == STORE_STATUS_NOT_FOUND,
+                "factory restore removes the saved operator logo durably");
+    assert(store_operator_logo_pending_first() == 0u);
+    assert(store_operator_logo_receive(&part, 0u) == STORE_STATUS_OK);
+    store_service_get_diag(&diag);
+    assert(diag.dirty_mask == 0u && store_operator_logo_pending_first() == 0u);
+    for (store_unit_t unit = 0; unit < STORE_UNIT_COUNT; unit++) {
+        if ((reset_units & (1u << unit)) != 0u) continue;
+        size_t len;
+        assert(read_unit_payload(unit, payload, sizeof(payload), &len));
+        assert_eq_u64(before[unit], fnv1a64(payload, len), "factory restore preserves unrelated record bytes");
+    }
+    uint8_t u8;
+    uint16_t u16;
+    uint32_t u32;
+    char text[STORE_TEXT_MAX + 1u];
+    assert(store_setting_get_u8(STORE_SETTING_CALL_OWN_NUMBER_SENDING, &u8) == STORE_STATUS_OK && u8 == 0u);
+    assert(store_setting_get_u8(STORE_SETTING_SYSTEM_LANGUAGE, &u8) == STORE_STATUS_OK && u8 == 0u);
+    assert(store_setting_get_text(STORE_SETTING_SYSTEM_WELCOME_NOTE, text, sizeof(text)) == STORE_STATUS_OK && text[0] == '\0');
+    assert(store_setting_get_u8(STORE_SETTING_PROFILE_RINGING_VOLUME, &u8) == STORE_STATUS_OK && u8 == 9u);
+    assert(store_setting_get_u8(STORE_SETTING_PROFILE_ACTIVE, &u8) == STORE_STATUS_OK && u8 == 3u);
+    assert(store_setting_get_u8(STORE_SETTING_PROFILE_SAVED, &u8) == STORE_STATUS_OK && u8 == 2u);
+    assert(store_setting_get_text(STORE_SETTING_SECURITY_CODE, text, sizeof(text)) == STORE_STATUS_OK && strcmp(text, "54321") == 0);
+    assert(store_setting_get_u32(STORE_SETTING_CALL_DURATION_LIFETIME, &u32) == STORE_STATUS_OK && u32 == 123456u);
+    assert(store_setting_get_u32(STORE_SETTING_SYSTEM_LCD_TUNING, &u32) == STORE_STATUS_OK && u32 == LCD_CALIBRATION_PACK(54u, 2u, 5u));
+    assert(store_setting_get_u16(STORE_SETTING_SYSTEM_MODEM_PROVISION_VERSION, &u16) == STORE_STATUS_OK && u16 == 7u);
+}
+
 static void test_default_initialization_power_cuts(void) {
     static uint8_t snapshot[FAKE_NVM_CAPACITY];
     static uint8_t expected[STORE_UNIT_COUNT][STORAGE_RECORD_MAX_PAYLOAD];
@@ -2646,6 +2722,7 @@ int main(void) {
     test_unit_handler_registry();
     test_exact_dirty_unit_mapping();
     test_persistent_wire_contract();
+    test_factory_restore_persistence();
     test_battery_learning_payload_and_persistence();
     test_charge_supervisor_payload_and_persistence();
     test_corrupt_picture_payload_is_preserved();

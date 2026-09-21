@@ -120,6 +120,7 @@ typedef enum {
     APP_ROUTE_SNAKE_LAST_VIEW,
     APP_ROUTE_CALCULATOR,
     APP_ROUTE_CONTACT_SERVICE,
+    APP_ROUTE_SETTINGS_RESTORE,
 } app_route_t;
 
 typedef enum {
@@ -550,6 +551,11 @@ typedef struct {
     uint8_t settings_access_kind;
     uint8_t settings_access_step;
     char settings_access_new_code[11];
+    char settings_restore_code[11];
+    bool settings_restore_active;
+    bool settings_restore_pending;
+    uint8_t settings_restore_stars;
+    uint32_t settings_restore_started_ms;
     uint8_t call_divert_menu_kind;
     uint8_t call_divert_menu_selected;
     uint8_t call_divert_condition_index;
