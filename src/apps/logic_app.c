@@ -1,4 +1,5 @@
 #include "apps/logic_app.h"
+#include "apps/menu_shortcuts.h"
 #include "apps/game_common.h"
 
 #include <stdio.h>
@@ -493,6 +494,17 @@ static uint8_t logic_menu_items(const app_t *app, logic_menu_item_t *items, uint
     ADD_ITEM(LOGIC_ITEM_INSTRUCTIONS, 0x162u, "Instructions");
 #undef ADD_ITEM
     return count;
+}
+
+bool logic_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    logic_menu_item_t items[5];
+    view->selected = &app->logic_menu_selected;
+    view->view_start = &app->game_option_view_start;
+    view->context = app->logic_menu_variant;
+    view->count = logic_menu_items(app, items, (uint8_t)ARRAY_COUNT(items));
+    /* Stock dynamic game actions (0x002dbd84..0x002dbe48) use flag 0x04. */
+    view->immediate_mask = (1u << view->count) - 1u;
+    return true;
 }
 
 static int8_t logic_menu_index_for_kind(const app_t *app, logic_item_kind_t kind) {

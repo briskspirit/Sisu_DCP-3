@@ -1,4 +1,5 @@
 #include "apps/main_menu_app.h"
+#include "apps/menu_shortcuts.h"
 
 #include "app_internal.h"
 #include "apps/calculator_app.h"
@@ -80,6 +81,17 @@ static void main_menu_step(app_t *app, int8_t delta, uint32_t now_ms);
 
 void open_main_menu(app_t *app, uint32_t now_ms) {
     open_main_menu_at(app, 0u, now_ms);
+    menu_shortcuts_begin(app, now_ms);
+}
+
+bool main_menu_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    view->selected = &app->menu_index;
+    view->count = (uint8_t)ARRAY_COUNT(MAIN_MENU);
+    for (uint8_t i = 0u; i < view->count; i++) {
+        if (!main_menu_entry_visible(i)) view->hidden_mask |= UINT64_C(1) << i;
+    }
+    view->immediate_mask = 1u << 6; /* Calculator: stock item flag 0x04. */
+    return true;
 }
 
 void open_main_menu_at(app_t *app, uint8_t selected, uint32_t now_ms) {

@@ -5,6 +5,7 @@
 #include "apps/call_waiting_app.h"
 #include "apps/call_register_app.h"
 #include "apps/dialogs_app.h"
+#include "apps/menu_shortcuts.h"
 #include "services/input_keys.h"
 #include "services/strings.h"
 #include "storage/store_service.h"
@@ -20,6 +21,39 @@ static char s_preview[64];
 static char s_code[STORE_TEXT_MAX + 1u] = "12345";
 static store_status_t s_write_status = STORE_STATUS_OK;
 static call_waiting_action_t s_waiting_action;
+int32_t time_diff_ms(uint32_t a, uint32_t b) { return (int32_t)(a - b); }
+
+/* This fixture exercises real Settings/Call-register actions through the
+ * shortcut controller. Other applications are covered by their own fixtures. */
+#define NO_SHORTCUT_VIEW(name) \
+    bool name(app_t *app, menu_shortcut_view_t *view) { \
+        (void)app; (void)view; return false; \
+    }
+NO_SHORTCUT_VIEW(main_menu_shortcut_view)
+NO_SHORTCUT_VIEW(phonebook_shortcut_view)
+NO_SHORTCUT_VIEW(messages_shortcut_view)
+NO_SHORTCUT_VIEW(call_divert_shortcut_view)
+NO_SHORTCUT_VIEW(clock_shortcut_view)
+NO_SHORTCUT_VIEW(tones_shortcut_view)
+void tones_shortcut_selected(app_t *app, uint32_t now) { (void)app; (void)now; }
+NO_SHORTCUT_VIEW(profiles_shortcut_view)
+NO_SHORTCUT_VIEW(games_shortcut_view)
+NO_SHORTCUT_VIEW(snake_shortcut_view)
+NO_SHORTCUT_VIEW(rotation_shortcut_view)
+NO_SHORTCUT_VIEW(memory_shortcut_view)
+NO_SHORTCUT_VIEW(react_shortcut_view)
+NO_SHORTCUT_VIEW(logic_shortcut_view)
+NO_SHORTCUT_VIEW(pacman_shortcut_view)
+
+void app_router_select_menu(app_t *app, uint32_t now) {
+    switch (app->route) {
+    case APP_ROUTE_SETTINGS_MENU: handle_settings_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_SETTINGS_VALUE: handle_settings_value_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_CALL_REGISTER_MENU: handle_call_register_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_CALL_REGISTER_METRIC: handle_call_register_metric_key(app, KEY_NAVI, now); break;
+    default: break;
+    }
+}
 void open_call_waiting_request(app_t *app, call_waiting_action_t action, uint32_t now) {
     (void)now; s_waiting_action = action; app->route = APP_ROUTE_DISPLAY_MESSAGE;
 }
@@ -302,10 +336,67 @@ static void test_call_register_results(void) {
           "real call timers can still be cleared");
 }
 
+static void shortcut_press(app_t *app, uint16_t key, uint32_t now) {
+    input_event_t event = {.type = EVENT_KEY_DOWN, .code = key, .when_ms = now};
+    check(menu_shortcuts_handle(app, &event), "number is consumed by the real menu shortcut");
+    event.type = EVENT_KEY_UP;
+    menu_shortcuts_handle(app, &event);
+}
+
+static void test_numeric_settings(void) {
+    app_t app = {0};
+    unsigned before = s_writes;
+    open_settings_menu(&app, SETTINGS_MENU_ROOT, 0u);
+    menu_shortcuts_begin(&app, 0u);
+    shortcut_press(&app, KEY_1, 10u);
+    shortcut_press(&app, KEY_1, 20u);
+    shortcut_press(&app, KEY_2, 30u);
+    check(app.route == APP_ROUTE_SETTINGS_VALUE && app.settings_value_selected == 1u &&
+          app.settings_value_view_start == 1u && s_writes == before,
+          "4-1-1-2 selects Off without an early write");
+    menu_shortcuts_tick(&app, 1566u);
+    check(app.route == APP_ROUTE_DISPLAY_MESSAGE && s_record == 3u &&
+          s_values[STORE_SETTING_SETTINGS_AUTOMATIC_REDIAL] == 0u && s_writes == before + 1u,
+          "numeric setting commits through the normal save/result path exactly once");
+
+    open_settings_menu(&app, SETTINGS_MENU_CALL, 0u);
+    menu_shortcuts_begin(&app, 2000u);
+    shortcut_press(&app, KEY_3, 2010u);
+    shortcut_press(&app, KEY_3, 2020u);
+    menu_shortcuts_tick(&app, 3556u);
+    check(s_waiting_action == CALL_WAITING_QUERY,
+          "4-1-3-3 invokes the real network status request");
+
+    before = s_writes;
+    open_settings_menu(&app, SETTINGS_MENU_SECURITY, 0u);
+    menu_shortcuts_begin(&app, 4000u);
+    shortcut_press(&app, KEY_1, 4010u);
+    shortcut_press(&app, KEY_1, 4020u);
+    menu_shortcuts_tick(&app, 5556u);
+    expect_not_done(&app, APP_ROUTE_SETTINGS_MENU, "numeric path does not bypass unsupported SIM security");
+    check(s_writes == before, "unsupported numeric action never saves a simulated result");
+
+    open_settings_menu(&app, SETTINGS_MENU_PHONE, 0u);
+    menu_shortcuts_begin(&app, 6000u);
+    shortcut_press(&app, KEY_3, 6010u);
+    check(app.route == APP_ROUTE_EDITOR && app.editor_context == EDITOR_CONTEXT_SETTINGS_WELCOME_NOTE &&
+          !app.menu_shortcut_active, "welcome-note shortcut hands over to the existing editor immediately");
+
+    open_settings_menu(&app, SETTINGS_MENU_CALL, 0u);
+    menu_shortcuts_begin(&app, 7000u);
+    shortcut_press(&app, KEY_1, 7010u);
+    shortcut_press(&app, KEY_2, 7020u);
+    s_write_status = STORE_STATUS_INVALID_ARGUMENT;
+    menu_shortcuts_tick(&app, 8556u);
+    expect_not_done(&app, APP_ROUTE_SETTINGS_VALUE, "numeric save failure retains ordinary error handling");
+    s_write_status = STORE_STATUS_OK;
+}
+
 int main(void) {
     test_unavailable_settings();
     test_local_preferences();
     test_call_register_results();
+    test_numeric_settings();
     if (s_failures) return 1;
     puts("menu result tests passed");
     return 0;

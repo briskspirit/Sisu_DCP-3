@@ -1,4 +1,5 @@
 #include "apps/settings_app.h"
+#include "apps/menu_shortcuts.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -435,6 +436,26 @@ bool handle_settings_menu_key(app_t *app, uint16_t key, uint32_t now) {
         }
         return true;
     }
+    return true;
+}
+
+bool settings_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    if (app->route == APP_ROUTE_SETTINGS_VALUE) {
+        settings_value_options((settings_value_kind_t)app->settings_value_kind, &view->count);
+        view->selected = &app->settings_value_selected;
+        view->view_start = &app->settings_value_view_start;
+        view->context = app->settings_value_kind;
+        return true;
+    }
+    settings_menu_kind_t kind = (settings_menu_kind_t)app->settings_menu_kind;
+    view->count = settings_menu_count(kind);
+    view->selected = &app->settings_menu_selected;
+    view->context = kind;
+    for (uint8_t i = 0u; i < view->count; i++) {
+        if (!settings_menu_item_visible(kind, i)) view->hidden_mask |= UINT64_C(1) << i;
+    }
+    if (kind == SETTINGS_MENU_PHONE) view->immediate_mask = 1u << 2;
+    if (kind == SETTINGS_MENU_ACCESS_CODES) view->immediate_mask = 7u;
     return true;
 }
 

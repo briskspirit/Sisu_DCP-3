@@ -1,4 +1,5 @@
 #include "apps/memory_app.h"
+#include "apps/menu_shortcuts.h"
 #include "apps/game_common.h"
 
 #include <stdio.h>
@@ -646,6 +647,17 @@ static uint8_t memory_menu_items(const app_t *app, memory_menu_item_t *items, ui
     ADD_ITEM(MEMORY_ITEM_INSTRUCTIONS, ts_or(0x162u, "Instructions"));
 #undef ADD_ITEM
     return count;
+}
+
+bool memory_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    memory_menu_item_t items[6];
+    view->selected = &app->memory_menu_selected;
+    view->view_start = &app->game_option_view_start;
+    view->context = app->memory_menu_variant;
+    view->count = memory_menu_items(app, items, (uint8_t)ARRAY_COUNT(items));
+    /* Stock dynamic game actions (0x002dbd84..0x002dbe48) use flag 0x04. */
+    view->immediate_mask = (1u << view->count) - 1u;
+    return true;
 }
 
 static int8_t memory_menu_index_for_kind(const app_t *app, memory_item_kind_t kind) {

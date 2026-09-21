@@ -162,6 +162,16 @@ typedef struct {
     uint32_t menu_next_frame_ms;
     uint32_t menu_keyguard_armed_until_ms;
     bool menu_keyguard_armed; /* gate (not a 0-deadline sentinel: avoids the wrap-to-0 hole) */
+    bool menu_shortcut_active;
+    bool menu_shortcut_pending;
+    uint8_t menu_shortcut_digits;
+    uint8_t menu_shortcut_number;
+    uint8_t menu_shortcut_selected;
+    uint16_t menu_shortcut_held_key;
+    app_route_t menu_shortcut_route;
+    uint32_t menu_shortcut_context;
+    uint32_t menu_shortcut_deadline_ms;
+    char menu_shortcut_path[24];
     char input_text[31];
     uint8_t input_len;
     app_standby_action_t input_action;

@@ -49,6 +49,8 @@ claim is the current best understanding, not a measured fact.
 
 ## UI And Protocol Records
 
+- [Numeric menu shortcuts](menu_shortcuts.md): original timing and numbering,
+  app-owned actions, editor handoffs, and regression coverage.
 - [Business cards](business_cards.md): native Send entry, received-card menus,
   vCard decoding, and restart-safe contact saves.
 - [Operator logos](operator_logos.md): binary receive/show/save/discard,

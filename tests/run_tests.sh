@@ -816,6 +816,8 @@ run test_audio_levels        src/audio/audio_levels.c
 run test_game_common         src/apps/game_common.c src/audio/audio_levels.c
 run test_framebuffer         src/ui/framebuffer.c
 run test_menu_visible        src/ui/menu_visible.c
+run test_menu_shortcuts      src/apps/menu_shortcuts.c src/services/key_utils.c
+run test_menu_shortcut_views src/apps/main_menu_app.c src/apps/phonebook_app.c src/apps/messages/app.c src/apps/settings_app.c src/apps/call_register_app.c src/apps/call_divert_app.c src/apps/clock/app.c src/apps/tones/app.c src/apps/profiles_app.c src/apps/games_app.c src/apps/snake_app.c src/apps/rotation_app.c src/apps/memory_app.c src/apps/react_app.c src/apps/logic_app.c src/apps/pacman_app.c src/services/feature_gates.c src/ui/menu_visible.c "${DEAD_CODE_FLAGS[@]}"
 run test_status_chrome       src/ui/status_chrome.c src/ui/framebuffer.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c"
 run test_signal_bars         src/ui/signal_bars.c
 run test_storage_journal     src/storage/storage_journal.c
@@ -847,7 +849,7 @@ run test_settings_restore   src/apps/settings_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_factory_reset_ui src/apps/settings_app.c src/services/key_utils.c src/services/feature_gates.c \
     src/ui/ui.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c src/services/strings.c \
     "$GENERATED_SRC_DIR/assets_data.c" "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
-run test_menu_results       src/apps/settings_app.c src/apps/call_register_app.c src/services/feature_gates.c "${DEAD_CODE_FLAGS[@]}"
+run test_menu_results       src/apps/settings_app.c src/apps/call_register_app.c src/apps/menu_shortcuts.c src/services/key_utils.c src/services/feature_gates.c "${DEAD_CODE_FLAGS[@]}"
 run test_power_app          src/apps/power_app.c src/hal/power_button_hal.c src/hal/battery_gauge_logic.c src/services/event_queue.c "${DEAD_CODE_FLAGS[@]}"
 run test_powerup_app        src/apps/powerup_app.c src/audio/audio_levels.c "${DEAD_CODE_FLAGS[@]}"
 run test_contact_service_render src/apps/powerup_app.c src/ui/framebuffer.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c" "${DEAD_CODE_FLAGS[@]}"

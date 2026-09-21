@@ -26,9 +26,47 @@
 #include "apps/tones_app.h"
 #include "apps/operator_logo_app.h"
 #include "apps/business_card_app.h"
+#include "apps/menu_shortcuts.h"
 #include "services/input_keys.h"
 
+static bool dispatch_event(app_t *app, const input_event_t *event);
+
 bool app_router_handle_event(app_t *app, const input_event_t *event) {
+    if (menu_shortcuts_handle(app, event)) {
+        return true;
+    }
+    return dispatch_event(app, event);
+}
+
+void app_router_select_menu(app_t *app, uint32_t now) {
+    /* Keep this restricted to numbered menus: a stale timeout must never
+     * become Navi in an editor, a call, or a confirmation dialog. */
+    switch (app->route) {
+    case APP_ROUTE_MAIN_MENU: (void)handle_main_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_PHONEBOOK_MENU: (void)handle_phonebook_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_MESSAGES_MENU: (void)handle_messages_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_MESSAGES_LIST: (void)handle_messages_list_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_SETTINGS_MENU: (void)handle_settings_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_SETTINGS_VALUE: (void)handle_settings_value_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_CALL_REGISTER_MENU: (void)handle_call_register_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_CALL_REGISTER_METRIC: (void)handle_call_register_metric_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_CALL_DIVERT_MENU: (void)handle_call_divert_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_CLOCK_MENU: (void)handle_clock_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_TONES_MENU: (void)handle_tones_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_TONES_SETTING: (void)handle_tones_setting_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_PROFILES_MENU: (void)handle_profiles_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_GAMES_MENU: (void)handle_games_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_SNAKE_MENU: (void)handle_snake_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_ROTATION_MENU: (void)handle_rotation_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_MEMORY_MENU: (void)handle_memory_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_REACT_MENU: (void)handle_react_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_LOGIC_MENU: (void)handle_logic_menu_key(app, KEY_NAVI, now); break;
+    case APP_ROUTE_PACMAN_MENU: (void)handle_pacman_menu_key(app, KEY_NAVI, now); break;
+    default: break;
+    }
+}
+
+static bool dispatch_event(app_t *app, const input_event_t *event) {
     if (event->type != EVENT_KEY_DOWN && event->type != EVENT_KEY_HOLD) {
         return false;
     }
@@ -519,5 +557,6 @@ void app_router_render(const app_t *app, framebuffer_t *fb) {
         render_standby(app, fb);
         break;
     }
+    menu_shortcuts_render(app, fb);
     render_net_monitor_overlay(app, fb);
 }

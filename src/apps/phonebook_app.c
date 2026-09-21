@@ -1,5 +1,6 @@
 #include "services/phonebook_service.h"
 #include "apps/phonebook_app.h"
+#include "apps/menu_shortcuts.h"
 #include "ui/menu_visible.h"
 
 #include <stdio.h>
@@ -446,6 +447,21 @@ bool handle_phonebook_menu_key(app_t *app, uint16_t key, uint32_t now) {
         open_phonebook_menu(app, PHONEBOOK_MENU_OPTIONS, 0u);
         open_display_sid(app, 26u, 0x296u, "Saved", APP_ROUTE_PHONEBOOK_MENU, now);
         return true;
+    }
+    return true;
+}
+
+bool phonebook_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    phonebook_menu_kind_t kind = (phonebook_menu_kind_t)app->phonebook_menu_kind;
+    view->selected = &app->phonebook_menu_selected;
+    view->context = kind;
+    view->count = kind == PHONEBOOK_MENU_ROOT ? (uint8_t)ARRAY_COUNT(PHONEBOOK_ROOT_LABELS)
+                                            : phonebook_menu_visible_count(kind);
+    if (kind == PHONEBOOK_MENU_ROOT) {
+        for (uint8_t i = 0u; i < view->count; i++) {
+            if (!phonebook_root_item_visible(i)) view->hidden_mask |= UINT64_C(1) << i;
+        }
+        view->immediate_mask = (1u << 0) | (1u << 2) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 8);
     }
     return true;
 }

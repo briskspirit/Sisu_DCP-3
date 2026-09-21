@@ -1,4 +1,5 @@
 #include "apps/tones_app.h"
+#include "apps/menu_shortcuts.h"
 #include "tones_internal.h"
 #include "ui/menu_visible.h"
 
@@ -216,6 +217,29 @@ bool handle_tones_menu_key(app_t *app, uint16_t key, uint32_t now) {
         return true;
     }
     return false;
+}
+
+bool tones_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    view->context = app->tones_from_profiles | ((uint32_t)app->tones_profile_index << 8);
+    if (app->route == APP_ROUTE_TONES_SETTING) {
+        view->selected = &app->tones_setting_selected;
+        view->view_start = &app->tones_setting_view_start;
+        view->count = tones_setting_count((tones_setting_kind_t)app->tones_setting_kind);
+        view->context |= (uint32_t)app->tones_setting_kind << 16;
+        return true;
+    }
+    view->selected = &app->tones_menu_selected;
+    view->count = (uint8_t)ARRAY_COUNT(TONES_ROOT_LABELS);
+    for (uint8_t i = 0u; i < view->count; i++) {
+        if (!tones_root_item_visible(i)) view->hidden_mask |= UINT64_C(1) << i;
+    }
+    view->immediate_mask = 1u << 2;
+    return true;
+}
+
+void tones_shortcut_selected(app_t *app, uint32_t now) {
+    /* The stock generic selector emits 0x438c for these picker descriptors. */
+    schedule_current_selection_preview(app, now);
 }
 
 bool handle_tones_setting_key(app_t *app, uint16_t key, uint32_t now) {

@@ -1,4 +1,5 @@
 #include "apps/games_app.h"
+#include "apps/menu_shortcuts.h"
 
 #include "apps/dialogs_app.h"
 #include "apps/main_menu_app.h"
@@ -141,6 +142,16 @@ bool handle_games_menu_key(app_t *app, uint16_t key, uint32_t now) {
             open_pacman_menu(app);
         }
         return true;
+    }
+    return true;
+}
+
+bool games_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    view->selected = &app->games_menu_selected;
+    view->view_start = &app->game_option_view_start;
+    view->count = (uint8_t)ARRAY_COUNT(GAMES_LABELS);
+    for (uint8_t i = 0u; i < view->count; i++) {
+        if (!games_item_visible(i)) view->hidden_mask |= UINT64_C(1) << i;
     }
     return true;
 }

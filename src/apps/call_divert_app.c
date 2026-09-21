@@ -1,4 +1,5 @@
 #include "apps/call_divert_app.h"
+#include "apps/menu_shortcuts.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -194,6 +195,13 @@ bool handle_call_divert_menu_key(app_t *app, uint16_t key, uint32_t now) {
         apply_delay(app, now);
         return true;
     }
+    return true;
+}
+
+bool call_divert_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    view->selected = &app->call_divert_menu_selected;
+    view->count = menu_count((call_divert_menu_kind_t)app->call_divert_menu_kind, app);
+    view->context = app->call_divert_menu_kind | ((uint32_t)app->call_divert_condition_index << 8);
     return true;
 }
 

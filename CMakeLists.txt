@@ -118,6 +118,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/apps/games_app.c
     src/apps/logic_app.c
     src/apps/main_menu_app.c
+    src/apps/menu_shortcuts.c
     src/apps/memory_app.c
     src/apps/messages/app.c
     src/apps/messages/composer.c

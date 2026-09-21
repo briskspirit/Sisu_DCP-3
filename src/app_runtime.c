@@ -10,6 +10,7 @@
 #include "apps/games_app.h"
 #include "apps/logic_app.h"
 #include "apps/main_menu_app.h"
+#include "apps/menu_shortcuts.h"
 #include "apps/memory_app.h"
 #include "apps/messages_app.h"
 #include "apps/net_monitor_app.h"
@@ -58,6 +59,7 @@ void app_runtime_init(app_t *app) {
 bool app_runtime_tick(app_t *app, uint32_t now_ms) {
     bool changed = false;
     if (store_service_contact_service_required()) {
+        menu_shortcuts_cancel(app);
         reset_settings_restore(app);
         if (app->route != APP_ROUTE_POWER_OFF && app->route != APP_ROUTE_CONTACT_SERVICE) {
             enter_contact_service(app, now_ms);
@@ -71,6 +73,7 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
         return changed;
     }
 
+    changed |= menu_shortcuts_tick(app, now_ms);
     if (app->route == APP_ROUTE_POWERUP && tick_powerup(app, now_ms)) {
         changed = true;
     }

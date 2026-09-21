@@ -1,4 +1,5 @@
 #include "apps/clock_app.h"
+#include "apps/menu_shortcuts.h"
 #include "clock_internal.h"
 
 #include <stdio.h>
@@ -189,6 +190,14 @@ bool handle_clock_menu_key(app_t *app, uint16_t key, uint32_t now) {
 
     const clock_label_t *labels = clock_menu_labels(kind);
     return apply_clock_menu_label(app, labels[app->clock_menu_selected].label, now);
+}
+
+bool clock_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    view->selected = &app->clock_menu_selected;
+    view->context = app->clock_menu_kind;
+    view->count = clock_menu_count((clock_menu_kind_t)app->clock_menu_kind);
+    if (app->clock_menu_kind == CLOCK_MENU_ROOT) view->immediate_mask = 1u << 2;
+    return true;
 }
 
 void open_clock_root(app_t *app) {

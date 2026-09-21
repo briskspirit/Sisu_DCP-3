@@ -1,5 +1,6 @@
 #include "services/phonebook_service.h"
 #include "apps/call_register_app.h"
+#include "apps/menu_shortcuts.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -374,6 +375,25 @@ bool handle_call_register_menu_key(app_t *app, uint16_t key, uint32_t now) {
         }
     }
     open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_CALL_REGISTER_MENU, now);
+    return true;
+}
+
+bool call_register_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    if (app->route == APP_ROUTE_CALL_REGISTER_METRIC) {
+        view->selected = &app->call_register_metric_selected;
+        view->context = app->call_register_metric_kind;
+        view->count = app->call_register_metric_kind == CALL_REGISTER_METRIC_COSTS
+            ? (uint8_t)ARRAY_COUNT(CALL_REGISTER_COST_LABELS)
+            : (uint8_t)ARRAY_COUNT(CALL_REGISTER_DURATION_LABELS);
+        return true;
+    }
+    call_register_menu_kind_t kind = (call_register_menu_kind_t)app->call_register_menu_kind;
+    view->selected = &app->call_register_menu_selected;
+    view->context = kind;
+    view->count = call_register_menu_count(kind);
+    if (kind == CALL_REGISTER_MENU_ROOT) view->immediate_mask = 7u;
+    if (kind == CALL_REGISTER_MENU_COST_SETTINGS) view->immediate_mask = 3u;
+    if (kind == CALL_REGISTER_MENU_PREPAID) view->immediate_mask = 1u << 3;
     return true;
 }
 

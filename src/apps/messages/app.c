@@ -1,4 +1,5 @@
 #include "apps/messages_app.h"
+#include "apps/menu_shortcuts.h"
 #include "messages_internal.h"
 #include "ui/menu_visible.h"
 
@@ -460,6 +461,43 @@ bool handle_messages_menu_key(app_t *app, uint16_t key, uint32_t now) {
     }
     default:
         break;
+    }
+    return true;
+}
+
+bool messages_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    if (app->route == APP_ROUTE_MESSAGES_MENU) {
+        view->selected = &app->messages_menu_selected;
+        view->count = (uint8_t)ARRAY_COUNT(MESSAGES_ROOT_LABELS);
+        for (uint8_t i = 0u; i < view->count; i++) {
+            if (!messages_root_item_visible(i)) view->hidden_mask |= UINT64_C(1) << i;
+        }
+        view->immediate_mask = (1u << 2) | (1u << 3) | (1u << 6);
+        return true;
+    }
+    view->context = app->messages_mode | ((uint32_t)app->messages_settings_kind << 8) |
+                    ((uint32_t)app->messages_settings_value_key << 16);
+    switch (app->messages_mode) {
+    case MESSAGES_MODE_SETTINGS_TOP:
+        view->selected = &app->messages_settings_top_selected;
+        view->count = (uint8_t)ARRAY_COUNT(MESSAGE_SETTINGS_TOP_LABELS);
+        break;
+    case MESSAGES_MODE_SETTINGS_MENU:
+        view->selected = &app->messages_settings_selected;
+        view->count = app->messages_settings_kind == 0u
+            ? (uint8_t)ARRAY_COUNT(MESSAGE_SETTINGS_SET_LABELS)
+            : (uint8_t)ARRAY_COUNT(MESSAGE_SETTINGS_COMMON_LABELS);
+        if (app->messages_settings_kind == 0u) view->immediate_mask = 1u;
+        break;
+    case MESSAGES_MODE_SETTINGS_VALUE:
+        view->selected = &app->messages_settings_value_selected;
+        view->count = messages_settings_value_count(app->messages_settings_value_key);
+        break;
+    case MESSAGES_MODE_INFO:
+        view->selected = &app->messages_info_selected;
+        view->count = (uint8_t)ARRAY_COUNT(MESSAGE_INFO_SERVICE_LABELS);
+        break;
+    default: return false; /* Message contents and row actions are not a menu path. */
     }
     return true;
 }

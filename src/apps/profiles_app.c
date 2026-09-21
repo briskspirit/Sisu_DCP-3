@@ -1,4 +1,5 @@
 #include "apps/profiles_app.h"
+#include "apps/menu_shortcuts.h"
 
 #include <stdio.h>
 
@@ -210,6 +211,19 @@ bool handle_profiles_key(app_t *app, uint16_t key, uint32_t now) {
     if (key == KEY_NAVI) {
         open_profiles_options(app, app->profiles_selected_index);
         return true;
+    }
+    return true;
+}
+
+bool profiles_shortcut_view(app_t *app, menu_shortcut_view_t *view) {
+    view->context = app->profiles_menu_kind;
+    if (app->profiles_menu_kind == PROFILES_VIEW_OPTIONS) {
+        view->selected = &app->profiles_option_index;
+        view->count = 2u;
+        view->context |= (uint32_t)app->profiles_selected_index << 8;
+    } else {
+        view->selected = &app->profiles_selected_index;
+        view->count = PROFILE_COUNT;
     }
     return true;
 }
