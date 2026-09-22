@@ -130,6 +130,7 @@ void modem_network_reset_session(void);
 void modem_network_invalidate_owner(void);
 bool modem_network_supported(void);
 void modem_network_snapshot(modem_network_snapshot_t *out);
+bool modem_network_identity(char *out, size_t cap);
 bool modem_network_entry(uint32_t generation, uint8_t index, modem_network_entry_t *out);
 uint32_t modem_network_request(modem_network_action_t action, uint32_t generation,
                                uint8_t index);

@@ -1720,6 +1720,12 @@ static bool network_save_owner(const char *identity) {
         maintenance_flush_recovery_record();
 }
 
+bool modem_service_get_sim_identity(char *out, size_t cap) {
+    if (out == NULL || cap == 0u) return false;
+    out[0] = '\0';
+    return status_sim_ready_snapshot() && modem_network_identity(out, cap);
+}
+
 void modem_service_get_network_snapshot(modem_network_snapshot_t *out) {
     modem_network_snapshot(out);
 }

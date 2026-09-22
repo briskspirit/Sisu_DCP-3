@@ -63,7 +63,7 @@ static nvm_hal_t user_hal = {
 };
 static const uint16_t sizes[] = {
     75, 52, 98, 228, 64, 187, 678, 1492, 1492, 8, 3824, 1120, 178, 47, 96, 128,
-    24, 1386,
+    24, 1386, 113,
 };
 #define RECORD_COUNT (sizeof(sizes) / sizeof(sizes[0]))
 
@@ -236,6 +236,10 @@ static void test_full_and_isolation(void) {
     assert(router.write(&router, 0x3221u, data, sizes[17]) == STORAGE_RECORD_OK);
     open_ok();
     verify_record(&router, 0x3221u, data, sizes[17]);
+    fill(18u, sizes[18]);
+    assert(router.write(&router, 0x3222u, data, sizes[18]) == STORAGE_RECORD_OK);
+    open_ok();
+    verify_record(&router, 0x3222u, data, sizes[18]);
     assert(storage_lfs_init_volume(&raw, &system_hal, STORAGE_LFS_SYSTEM,
                                   STORAGE_SYSTEM_BYTES) == STORAGE_RECORD_OK);
     unsigned system_count = fill_volume(&raw);
@@ -279,7 +283,7 @@ static void test_split_update_cuts(void) {
     open_ok();
     storage_lfs_deinit();
     memcpy(saved, media, sizeof(media));
-    static const uint16_t ids[] = {0x3210u, 0x3216u, 0x3221u};
+    static const uint16_t ids[] = {0x3210u, 0x3216u, 0x3221u, 0x3222u};
     unsigned cases = 0u;
     for (unsigned volume = 0; volume < sizeof(ids) / sizeof(ids[0]); volume++) {
         uint16_t id = ids[volume];

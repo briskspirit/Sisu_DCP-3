@@ -1,5 +1,6 @@
 #include "services/phonebook_service.h"
 #include "apps/phonebook_app.h"
+#include "services/phone_security.h"
 #include "apps/menu_shortcuts.h"
 #include "ui/menu_visible.h"
 
@@ -733,9 +734,12 @@ bool handle_phonebook_security_key(app_t *app, uint16_t key, uint32_t now) {
         return true;
     }
     if (key == KEY_NAVI) {
-        char code[STORE_TEXT_MAX + 1u];
-        store_setting_get_text(STORE_SETTING_SECURITY_CODE, code, sizeof(code));
-        if (strcmp(app->editor_value, code) == 0) {
+        if (app->editor_value[0] == '\0') return true;
+        security_code_result_t result = security_code_verify(app->editor_value, now);
+        volatile char *wipe = app->editor_value;
+        for (size_t i = 0u; i < sizeof(app->editor_value); i++) wipe[i] = '\0';
+        security_code_forget_grant();
+        if (result == SECURITY_CODE_OK) {
             app->phonebook_erase_all_started_ms = now;
             app->phonebook_pending_kind = PHONEBOOK_PENDING_LIST;
             app->phonebook_pending_label = PHONEBOOK_LABEL_ERASE;
@@ -756,7 +760,10 @@ bool handle_phonebook_security_key(app_t *app, uint16_t key, uint32_t now) {
                                  APP_ROUTE_MAIN_MENU, now);
             }
         } else {
-            open_display_sid(app, 0u, 0x145u, "Code\nerror", APP_ROUTE_PHONEBOOK_SECURITY, now);
+            open_display_sid(app, result == SECURITY_CODE_WRONG ? 0u : 32u,
+                             result == SECURITY_CODE_WRONG ? 0x145u : 0x210u,
+                             result == SECURITY_CODE_WRONG ? "Code\nerror" : "Not done",
+                             APP_ROUTE_PHONEBOOK_SECURITY, now);
         }
         return true;
     }

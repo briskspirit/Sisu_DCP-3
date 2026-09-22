@@ -17,6 +17,7 @@
 #include "apps/net_monitor_app.h"
 #include "apps/pacman_app.h"
 #include "apps/phonebook_app.h"
+#include "apps/phone_security_app.h"
 #include "apps/power_app.h"
 #include "apps/powerup_app.h"
 #include "apps/profiles_app.h"
@@ -75,10 +76,19 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
         return changed;
     }
 
-    changed |= menu_shortcuts_tick(app, now_ms);
+    changed |= tick_phone_security(app, now_ms);
     if (app->route == APP_ROUTE_POWERUP && tick_powerup(app, now_ms)) {
         changed = true;
     }
+    changed |= tick_phone_security(app, now_ms);
+    if (phone_security_blocks_ui(app)) {
+        changed |= tick_power_off(app, now_ms);
+        if (app->route == APP_ROUTE_DISPLAY_MESSAGE) changed |= tick_display_message(app, now_ms);
+        changed |= tick_phone_security(app, now_ms);
+        changed |= poll_battery(app, now_ms);
+        return changed;
+    }
+    changed |= menu_shortcuts_tick(app, now_ms);
     if (tick_power_off(app, now_ms)) {
         changed = true;
     }

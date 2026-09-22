@@ -784,6 +784,10 @@ static void test_context_labels_and_local_units(void) {
     check(strcmp(frame.lines[0], "U17 OP LOGO") == 0 &&
               netmon_frame_count(storage, &modem) == STORE_UNIT_COUNT,
           "operator logo has a named storage-health frame");
+    netmon_format_frame(storage, STORE_UNIT_PHONE_SECURITY, caps, 1200u,
+                        &local, &modem, &control, &frame);
+    check(strcmp(frame.lines[0], "U18 SECURITY") == 0,
+          "phone security has a named storage-health frame");
 
     strcpy(modem.radio_policy.cops_operator, "Dark Star Mobile");
     netmon_format_frame(netmon_registry_find(7u), 0u, caps, 1200u,

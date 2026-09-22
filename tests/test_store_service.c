@@ -25,6 +25,8 @@
 #include "storage/store_service.h"
 #include "storage/store_operator_logo.h"
 #include "storage/store_health.h"
+#include "storage/store_phone_security.h"
+#include "services/phone_security.h"
 #define TEST_LOGICAL_SLOT_SIZE 4096u
 #include "storage/storage_lfs.h"
 #include "storage/store_service_internal.h"
@@ -350,6 +352,10 @@ static store_status_t dirty_exact_unit(store_unit_t unit) {
         case STORE_UNIT_STORAGE_HEALTH:
             store_health_note_corrupt(STORAGE_OBJECT_CONTACT, 42u);
             return STORE_STATUS_OK;
+        case STORE_UNIT_PHONE_SECURITY: {
+            phone_security_record_t record = {.enabled = true};
+            return store_phone_security_write(&record) ? STORE_STATUS_OK : STORE_STATUS_STORAGE_ERROR;
+        }
         case STORE_UNIT_OPERATOR_LOGO: {
             sms_codec_message_t logo = {.binary=true, .has_ports=true,
                 .dest_port=OPERATOR_LOGO_PORT, .dcs=0xf5u, .binary_len=7u,
@@ -397,6 +403,7 @@ static void test_unit_handler_registry(void) {
         &g_store_battery_charge_supervisor_unit_ops,
         &g_store_health_unit_ops,
         &g_store_operator_logo_unit_ops,
+        &g_store_phone_security_unit_ops,
     };
     static const uint8_t expected_instances[STORE_UNIT_COUNT] = {
         0u, 1u, 2u, 3u, 4u, 5u,
@@ -1545,6 +1552,7 @@ static const wire_expectation_t WIRE_EXPECTED[STORE_UNIT_COUNT] = {
         128u, UINT64_C(0x08158b2f629793cb)},
     [STORE_UNIT_STORAGE_HEALTH] = {28u, UINT64_C(0xfe5549f785f03f94)},
     [STORE_UNIT_OPERATOR_LOGO] = {1386u, UINT64_C(0x08f8339c0877e459)},
+    [STORE_UNIT_PHONE_SECURITY] = {113u, UINT64_C(0x87f669996b565599)},
 };
 
 static void test_battery_learning_payload_and_persistence(void) {
@@ -2104,6 +2112,8 @@ static void test_factory_restore_persistence(void) {
         before[unit] = fnv1a64(payload, len);
     }
 
+    phone_security_init(0u);
+    assert(security_code_verify("54321", 1u) == SECURITY_CODE_OK);
     assert_true(settings_restore_factory_defaults(), "factory restore admitted on healthy store");
     store_diag_snapshot_t diag;
     store_service_get_diag(&diag);

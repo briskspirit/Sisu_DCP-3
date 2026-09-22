@@ -18,6 +18,7 @@ static char s_saved_record[MODEM_NETWORK_RECORD_CAP];
 static modem_network_mode_t s_saved_mode;
 static modem_network_mode_t s_read_mode;
 static char s_read_plmn[7];
+static bool s_identity_verified;
 
 bool modem_network_supported(void) {
     return s_backend != NULL && s_backend->build != NULL &&
@@ -48,6 +49,7 @@ void modem_network_reset_session(void) {
     s_view.mode = MODEM_NETWORK_UNKNOWN;
     s_view.plmn[0] = '\0';
     s_identity[0] = '\0';
+    s_identity_verified = false;
     s_saved_record[0] = '\0';
     s_reconcile = true;
     clear_list();
@@ -71,12 +73,21 @@ void modem_network_invalidate_owner(void) {
     s_view.mode = MODEM_NETWORK_UNKNOWN;
     s_view.plmn[0] = '\0';
     s_identity[0] = '\0';
+    s_identity_verified = false;
     clear_list();
     s_reconcile = true;
 }
 
 void modem_network_snapshot(modem_network_snapshot_t *out) {
     if (out != NULL) *out = s_view;
+}
+
+bool modem_network_identity(char *out, size_t cap) {
+    if (out == NULL || cap == 0u) return false;
+    out[0] = '\0';
+    if (!s_identity_verified || strlen(s_identity) >= cap) return false;
+    memcpy(out, s_identity, strlen(s_identity) + 1u);
+    return true;
 }
 
 bool modem_network_entry(uint32_t generation, uint8_t index, modem_network_entry_t *out) {
@@ -107,6 +118,7 @@ uint32_t modem_network_request(modem_network_action_t action, uint32_t generatio
     if (s_reconciling) {
         /* A fresh identity read cannot retain another card's scan metadata. */
         clear_list();
+        s_identity_verified = false;
         s_view.ready = false;
         s_step = MODEM_NETWORK_STEP_IDENTITY;
     }
@@ -281,6 +293,7 @@ void modem_network_final(bool ok, const char *final, bool transport_clean) {
         return;
     }
     if (s_step == MODEM_NETWORK_STEP_IDENTITY) {
+        s_identity_verified = true;
         if (!read_saved_selection()) { finish(MODEM_NETWORK_NOT_DONE); return; }
         s_step = MODEM_NETWORK_STEP_READ;
     } else if (s_step == MODEM_NETWORK_STEP_SCAN) {

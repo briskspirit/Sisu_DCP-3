@@ -14,6 +14,7 @@
 #include "apps/net_monitor_app.h"
 #include "apps/pacman_app.h"
 #include "apps/phonebook_app.h"
+#include "apps/phone_security_app.h"
 #include "apps/power_app.h"
 #include "apps/powerup_app.h"
 #include "apps/profiles_app.h"
@@ -33,6 +34,8 @@
 static bool dispatch_event(app_t *app, const input_event_t *event);
 
 bool app_router_handle_event(app_t *app, const input_event_t *event) {
+    (void)tick_phone_security(app, event->when_ms);
+    if (phone_security_blocks_ui(app)) return dispatch_event(app, event);
     if (menu_shortcuts_handle(app, event)) {
         return true;
     }
@@ -40,6 +43,8 @@ bool app_router_handle_event(app_t *app, const input_event_t *event) {
 }
 
 void app_router_select_menu(app_t *app, uint32_t now) {
+    (void)tick_phone_security(app, now);
+    if (phone_security_blocks_ui(app)) return;
     /* Keep this restricted to numbered menus: a stale timeout must never
      * become Navi in an editor, a call, or a confirmation dialog. */
     switch (app->route) {
@@ -80,6 +85,8 @@ static bool dispatch_event(app_t *app, const input_event_t *event) {
     }
 
     switch (app->route) {
+    case APP_ROUTE_PHONE_SECURITY:
+        return handle_phone_security_key(app, key, event->type, now);
     case APP_ROUTE_SETTINGS_RESTORE:
         return handle_settings_restore_key(app, key, event->type, now);
     case APP_ROUTE_CONTACT_SERVICE:
@@ -556,6 +563,9 @@ void app_router_render(const app_t *app, framebuffer_t *fb) {
     case APP_ROUTE_NETWORK_LIST:
         render_network_selection(app, fb);
         break;
+    case APP_ROUTE_PHONE_SECURITY:
+        render_phone_security(app, fb);
+        break;
     case APP_ROUTE_SETTINGS_WELCOME_OPTIONS:
         render_settings_welcome_options(app, fb);
         break;
@@ -565,5 +575,5 @@ void app_router_render(const app_t *app, framebuffer_t *fb) {
         break;
     }
     menu_shortcuts_render(app, fb);
-    render_net_monitor_overlay(app, fb);
+    if (!phone_security_blocks_ui(app)) render_net_monitor_overlay(app, fb);
 }

@@ -832,7 +832,11 @@ run test_phonebook_service src/services/phonebook_service.c src/storage/storage_
 run test_message_service src/services/message_service.c src/services/business_card_codec.c src/services/business_card_service.c src/services/phonebook_service.c src/services/message_file_codec.c src/services/sms_picture_codec.c src/services/sms_deliver_codec.c src/services/sms_vvm_filter.c src/services/sms_control_filter.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_powercut    src/diag/storage_powercut_test.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I src/storage -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
 run test_storage_partitions  src/storage/storage_partitions.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR
-run test_store_service       src/apps/settings_app.c src/apps/profiles_app.c \
+run test_phone_security src/services/phone_security.c src/storage/store_phone_security.c -I src
+run test_phone_security_app src/apps/phone_security_app.c src/app_runtime.c src/services/key_utils.c \
+    src/ui/ui.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c src/ui/status_chrome.c src/services/strings.c \
+    "$GENERATED_SRC_DIR/assets_data.c" "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
+run test_store_service       src/apps/settings_app.c src/apps/profiles_app.c src/services/phone_security.c src/storage/store_phone_security.c \
     src/storage/store_calls.c src/storage/store_battery_learning.c src/storage/store_battery_charge_supervisor.c src/storage/store_health.c src/storage/store_service.c src/storage/store_divert.c src/storage/store_pictures.c src/storage/store_settings.c src/storage/store_t9.c src/storage/store_tones.c src/storage/store_operator_logo.c src/services/operator_logo_codec.c src/storage/store_warranty.c src/storage/storage_lfs.c third_party/littlefs/lfs.c third_party/littlefs/lfs_util.c src/services/battery_learning_logic.c src/services/battery_charge_supervisor_logic.c src/services/battery_charge_logic.c src/services/sms_picture_codec.c src/services/sms_deliver_codec.c src/services/message_file_codec.c src/audio/ringtone_codec.c -I src -I third_party/littlefs -DLFS_NO_MALLOC -DLFS_NO_DEBUG -DLFS_NO_WARN -DLFS_NO_ERROR "${DEAD_CODE_FLAGS[@]}"
 run test_t9_service          src/services/t9_service.c "$GENERATED_SRC_DIR/t9_ldb.c"
 run test_phone_match         src/services/phone_match.c
@@ -849,15 +853,15 @@ run test_call_options_logic  src/apps/call_options_logic.c
 run test_call_newcall_preserve src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # New-call snapshot/restore; whole app compiled, unreachable code stripped
 run test_call_waiting_handoff src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # generation-qualified remote-release handoff
 run test_call_redial_render src/apps/calls_app.c src/ui/ui.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c src/ui/status_chrome.c src/services/strings.c "$GENERATED_SRC_DIR/assets_data.c" "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
-run test_phonebook_speed_call src/apps/phonebook_app.c src/services/feature_gates.c src/ui/menu_visible.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c" src/ui/framebuffer.c "${DEAD_CODE_FLAGS[@]}"
+run test_phonebook_speed_call src/apps/phonebook_app.c tests/phone_security_ui_fixture.c src/services/feature_gates.c src/ui/menu_visible.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c" src/ui/framebuffer.c "${DEAD_CODE_FLAGS[@]}"
 run test_profiles_app       src/apps/profiles_app.c "${DEAD_CODE_FLAGS[@]}"
-run test_settings_restore   src/apps/settings_app.c "${DEAD_CODE_FLAGS[@]}"
-run test_factory_reset_ui src/apps/settings_app.c src/services/key_utils.c src/services/feature_gates.c \
+run test_settings_restore   src/apps/settings_app.c tests/phone_security_ui_fixture.c "${DEAD_CODE_FLAGS[@]}"
+run test_factory_reset_ui src/apps/settings_app.c tests/phone_security_ui_fixture.c src/services/key_utils.c src/services/feature_gates.c \
     src/ui/ui.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c src/services/strings.c \
     "$GENERATED_SRC_DIR/assets_data.c" "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
-run test_menu_results       src/apps/settings_app.c src/apps/call_register_app.c src/apps/menu_shortcuts.c src/services/key_utils.c src/services/feature_gates.c "${DEAD_CODE_FLAGS[@]}"
+run test_menu_results       src/apps/settings_app.c tests/phone_security_ui_fixture.c src/apps/call_register_app.c src/apps/menu_shortcuts.c src/services/key_utils.c src/services/feature_gates.c "${DEAD_CODE_FLAGS[@]}"
 run test_power_app          src/apps/power_app.c src/hal/power_button_hal.c src/hal/battery_gauge_logic.c src/services/event_queue.c "${DEAD_CODE_FLAGS[@]}"
-run test_powerup_app        src/apps/powerup_app.c src/audio/audio_levels.c "${DEAD_CODE_FLAGS[@]}"
+run test_powerup_app        src/apps/powerup_app.c tests/phone_security_ui_fixture.c src/audio/audio_levels.c "${DEAD_CODE_FLAGS[@]}"
 run test_contact_service_render src/apps/powerup_app.c src/ui/framebuffer.c src/ui/assets.c "$GENERATED_SRC_DIR/assets_data.c" "${DEAD_CODE_FLAGS[@]}"
 run test_snake_app          src/apps/snake_app.c "${DEAD_CODE_FLAGS[@]}"
 run test_display_wait        src/apps/dialogs_app.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c "$GENERATED_SRC_DIR/assets_data.c" "${DEAD_CODE_FLAGS[@]}"

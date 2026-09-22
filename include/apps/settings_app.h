@@ -15,6 +15,7 @@ typedef enum {
 } settings_menu_kind_t;
 
 void open_settings_menu(app_t *app, settings_menu_kind_t kind, uint8_t selected);
+void settings_open_phone_security_selector(app_t *app);
 
 bool handle_settings_menu_key(app_t *app, uint16_t key, uint32_t now);
 bool handle_settings_value_key(app_t *app, uint16_t key, uint32_t now);
@@ -35,7 +36,8 @@ void settings_submit_access_code_editor(app_t *app, uint32_t now);
 
 /* Restore the Settings tree, profile customizations and saved operator logo. Does not
  * erase user data, service provisioning, calibration, or lifetime counters.
- * Queues RAM changes only; the authorized UI waits for their durable commits. */
+ * Requires a successful security-code challenge. Completes the phone-security
+ * transaction first; the UI waits for the remaining default writes to commit. */
 bool settings_restore_factory_defaults(void);
 
 #endif

@@ -122,6 +122,7 @@ typedef enum {
     APP_ROUTE_CONTACT_SERVICE,
     APP_ROUTE_SETTINGS_RESTORE,
     APP_ROUTE_NETWORK_LIST,
+    APP_ROUTE_PHONE_SECURITY,
 } app_route_t;
 
 typedef enum {
@@ -574,6 +575,11 @@ typedef struct {
     bool settings_restore_pending;
     uint8_t settings_restore_stars;
     uint32_t settings_restore_started_ms;
+    char phone_security_code[11];
+    bool phone_security_startup;
+    bool phone_security_setting_authorized;
+    uint32_t phone_security_generation;
+    uint8_t phone_security_view_state;
     uint32_t call_waiting_request_id;
     uint32_t call_waiting_display_request_id;
     uint32_t network_request_id;

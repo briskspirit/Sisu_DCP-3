@@ -49,6 +49,8 @@ claim is the current best understanding, not a measured fact.
 
 ## UI And Protocol Records
 
+- [Phone security](phone_security.md): remembered SIMs, shared security-code
+  retries, startup gating, and durable call-list clearing.
 - [Network selection](network_selection.md): live Automatic/Manual selection,
   SIM ownership, native lists, and bounded command cancellation.
 - [Numeric menu shortcuts](menu_shortcuts.md): original timing and numbering,

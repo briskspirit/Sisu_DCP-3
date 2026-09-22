@@ -1,4 +1,6 @@
 #include "apps/powerup_app.h"
+#include "apps/phone_security_app.h"
+#include "services/phone_security.h"
 
 #include "app_internal.h"
 #include "apps/clock_app.h"
@@ -245,7 +247,8 @@ static void finish_powerup(app_t *app, uint32_t now_ms) {
     app->backlight_activity_ms = now_ms;
     /* RTC-lost flow: with no valid stored clock, boot runs the Time:/Date:
      * editors before reaching standby (handset-modeled, see CHANGELOG). */
-    (void)start_clock_boot_setup_if_needed(app, now_ms);
+    if (phone_security_state() != PHONE_SECURITY_OPEN) open_phone_security(app, true, now_ms);
+    else (void)start_clock_boot_setup_if_needed(app, now_ms);
 }
 
 static void render_powerup_welcome(const app_t *app, framebuffer_t *fb) {

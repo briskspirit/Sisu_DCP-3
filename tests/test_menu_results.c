@@ -157,7 +157,7 @@ static void test_unavailable_settings(void) {
     static const struct { settings_menu_kind_t menu; uint8_t row, choices; } cases[] = {
         {SETTINGS_MENU_CALL, 4u, 2u},
         {SETTINGS_MENU_SECURITY, 0u, 2u}, {SETTINGS_MENU_SECURITY, 1u, 3u},
-        {SETTINGS_MENU_SECURITY, 2u, 3u}, {SETTINGS_MENU_SECURITY, 3u, 2u},
+        {SETTINGS_MENU_SECURITY, 2u, 3u},
     };
     memset(s_values, 1, sizeof(s_values));
     for (unsigned i = 0u; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -250,9 +250,16 @@ static void test_local_preferences(void) {
     copy_text(app.editor_value, sizeof(app.editor_value), "54321");
     s_write_status = STORE_STATUS_INVALID_ARGUMENT;
     settings_submit_access_code_editor(&app, 90u);
-    expect_not_done(&app, APP_ROUTE_EDITOR, "failed security-code write is not acknowledged");
+    expect_not_done(&app, APP_ROUTE_SETTINGS_MENU, "failed security-code write is not acknowledged");
     check(strcmp(s_code, "12345") == 0, "old code survives a failed write");
     s_write_status = STORE_STATUS_OK;
+    open_settings_menu(&app, SETTINGS_MENU_ACCESS_CODES, 0u);
+    handle_settings_menu_key(&app, KEY_NAVI, 95u);
+    copy_text(app.editor_value, sizeof(app.editor_value), "12345");
+    settings_submit_access_code_editor(&app, 96u);
+    copy_text(app.editor_value, sizeof(app.editor_value), "54321");
+    settings_submit_access_code_editor(&app, 97u);
+    copy_text(app.editor_value, sizeof(app.editor_value), "54321");
     settings_submit_access_code_editor(&app, 100u);
     check(s_sid == 0x29bu && strcmp(s_code, "54321") == 0, "local security-code change still works");
 }

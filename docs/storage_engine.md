@@ -143,16 +143,17 @@ changing anything. The prompt uses the existing masked security-code layout
 and translated strings. A wrong code shows `Code error`; cancelled input makes
 no writes. An unreadable, empty or malformed stored code cannot authorize a
 reset. The default code is `12345`. Existing digit-only codes of up to ten
-digits remain accepted, matching the current change-code editor's limit;
-this is compatibility with Sisu settings, not Nokia's documented five-digit
-code limit.
+digits remain accepted for compatibility with older Sisu settings. New codes
+are limited to Nokia's documented five digits.
 
 The reset applies the existing Settings/profile defaults, removes the saved
 operator logo so standby returns to the carrier name, and preserves the
-security code, active profile selection, user records, call lists, divert
+security code, active profile selection, user records, divert
 history, calibration, modem provisioning and battery state. It does not issue
-SIM-security or modem-reset commands. Pending received logos and their delivery
-receipts remain intact. Nokia's
+SIM-security or modem-reset commands. Call lists are preserved unless restoring
+Phone security from On to Off; that setting change clears recent lists without
+resetting duration counters. See [Phone security](phone_security.md).
+Pending received logos and their delivery receipts remain intact. Nokia's
 [3210 user guide](https://ringtones.specialtyansweringservice.net/wp-content/uploads/2014/08/manuals/nokia-3210-userguide.pdf)
 describes the code requirement and retained user data under menu 4-4 (page 55).
 
@@ -356,7 +357,7 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
 - `store_settings.c` and `store_calls.c`: the keyed settings/default table and
   call-accounting records respectively. The call owner also contains the sole
   storage-side RTC dependency and the non-resettable Life timer policy.
-- `store_t9.c`, `store_pictures.c`, `store_operator_logo.c`, `store_tones.c`, `store_divert.c`,
+- `store_t9.c`, `store_pictures.c`, `store_operator_logo.c`, `store_phone_security.c`, `store_tones.c`, `store_divert.c`,
   `store_warranty.c`, `store_battery_learning.c`, and
   `store_battery_charge_supervisor.c`: one state owner and wire codec per
   semantic persistence unit.
@@ -367,6 +368,8 @@ history, and per-pack battery health/SOC evidence are stored through this layer.
 
 Each unit is one independently replaced record:
 
+- phone security: enabled state, five SIM identities, retry count and pending
+  call-list clear in system record `0x3222` (113-byte payload)
 - settings: phonebook
 - settings: SMS
 - settings: calls

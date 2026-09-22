@@ -136,7 +136,7 @@ int main(void) {
     strings_set_language(0x81u);
     submit(&app, 100u);
     erased(&app);
-    assert(writes == 17u && profile_resets == 1u && logo_clears == 1u && app.settings_restore_pending);
+    assert(writes == 16u && profile_resets == 1u && logo_clears == 1u && app.settings_restore_pending);
     unsigned before_notes = notes, before_writes = writes;
     submit(&app, 110u);
     handle_settings_restore_key(&app, KEY_NAVI, EVENT_KEY_HOLD, 120u);

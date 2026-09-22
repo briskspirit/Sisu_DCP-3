@@ -1,4 +1,7 @@
 #include "app.h"
+#include "services/phone_security.h"
+#include "apps/phone_security_app.h"
+#include "storage/store_phone_security.h"
 #include "app_internal.h"
 #include "app_status_runtime.h"
 #include "audio/audio_levels.h"
@@ -180,6 +183,7 @@ int main(void) {
     storage_powercut_bench_run(&s_lcd, &s_fb);
 #endif
     store_service_init();
+    phone_security_init(time_ms());
     phonebook_service_init();
     message_service_init();
     /* Persist startup corruption observations before normal app activity. */
@@ -291,6 +295,9 @@ int main(void) {
 
         input_event_t event;
         while (event_queue_pop(&s_queue, &event)) {
+            static char event_identity[PHONE_SECURITY_SIM_CAP];
+            bool event_identity_ready = modem_service_get_sim_identity(event_identity, sizeof(event_identity));
+            phone_security_tick(event_identity_ready ? event_identity : NULL, now);
             if ((event.type == EVENT_KEY_DOWN || event.type == EVENT_KEY_HOLD) &&
                 should_wake_backlight_for_event(&s_app, &event)) {
                 backlight_service_notify_activity(event.when_ms);
@@ -340,7 +347,9 @@ int main(void) {
             modem_service_accessory_changed(effective);
             s_app.dirty = true;
         }
-        if (accessory_hal_take_hook_press() && calls_app_handle_hook(&s_app, now)) {
+        if (accessory_hal_take_hook_press() && phone_security_state() == PHONE_SECURITY_OPEN &&
+            !phone_security_blocks_ui(&s_app) &&
+            calls_app_handle_hook(&s_app, now)) {
             s_app.dirty = true; /* HDC-5 hook = answer-on-ring / hang-up-in-call */
         }
 
@@ -356,6 +365,9 @@ int main(void) {
             battery_high_load, battery_app_awake));
         modem_service_set_signal_sampling(backlight_on, now);
         modem_service_tick(now);
+        static char sim_identity[PHONE_SECURITY_SIM_CAP];
+        bool identity_ready = modem_service_get_sim_identity(sim_identity, sizeof(sim_identity));
+        phone_security_tick(identity_ready ? sim_identity : NULL, now);
         if (app_tick(&s_app, now)) {
             s_app.dirty = true;
         }

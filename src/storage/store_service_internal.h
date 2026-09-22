@@ -69,6 +69,7 @@ extern const store_unit_ops_t g_store_battery_learning_unit_ops;
 extern const store_unit_ops_t g_store_battery_charge_supervisor_unit_ops;
 extern const store_unit_ops_t g_store_health_unit_ops;
 extern const store_unit_ops_t g_store_operator_logo_unit_ops;
+extern const store_unit_ops_t g_store_phone_security_unit_ops;
 
 const store_unit_binding_t *store_engine_unit_binding(store_unit_t unit);
 store_commit_result_t store_engine_commit_binding(

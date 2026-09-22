@@ -31,7 +31,7 @@ void netmon_render_local(uint8_t id, uint8_t frame_index,
         "SET PHONE", "SET SMS", "SET CALL", "SET PROF", "SET CLOCK",
         "SET SYS", "MISSED", "RECEIVED", "DIALLED", "T9 WORDS",
         "PICT SMS", "OWN TONES", "DIVERT", "WARRANTY", "BAT LRN",
-        "CHG SUP", "FS HEALTH", "OP LOGO",
+        "CHG SUP", "FS HEALTH", "OP LOGO", "SECURITY",
     };
     switch (id) {
     case 40u:

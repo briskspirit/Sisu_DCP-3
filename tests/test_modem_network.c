@@ -47,8 +47,14 @@ static void reset(void) {
     owner[0] = '\0';
 }
 static void identify(void) {
+    char id[MODEM_NETWORK_ID_CAP];
     command("AT#CCID");
-    response("#CCID: 89014103211118510720");
+    assert(!modem_network_identity(id, sizeof(id)) && id[0] == '\0');
+    assert(modem_network_line("#CCID: 89014103211118510720"));
+    assert(!modem_network_identity(id, sizeof(id)));
+    modem_network_final(true, "OK", true);
+    assert(modem_network_identity(id, sizeof(id)) && strcmp(id, CARD) == 0);
+    assert(!modem_network_identity(id, 5u) && id[0] == '\0');
     command("AT+COPS=3,2;+COPS?");
 }
 static void ready(void) {

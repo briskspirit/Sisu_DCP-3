@@ -36,6 +36,7 @@ static const store_unit_binding_t STORE_UNIT_BINDINGS[STORE_UNIT_COUNT] = {
         &g_store_battery_charge_supervisor_unit_ops, 0u},
     [STORE_UNIT_STORAGE_HEALTH] = {&g_store_health_unit_ops, 0u},
     [STORE_UNIT_OPERATOR_LOGO] = {&g_store_operator_logo_unit_ops, 0u},
+    [STORE_UNIT_PHONE_SECURITY] = {&g_store_phone_security_unit_ops, 0u},
 };
 
 _Static_assert(sizeof(STORE_UNIT_BINDINGS) / sizeof(STORE_UNIT_BINDINGS[0]) ==

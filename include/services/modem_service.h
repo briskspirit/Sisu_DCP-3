@@ -179,6 +179,9 @@ bool modem_service_voice_transport_available(void);
  * clocks. This is stricter than READY: no AT, call, diagnostic, queue, recovery,
  * UART byte, or unresolved maintenance work may remain. */
 bool modem_service_transport_sleep_confirmed(void);
+/* Final-qualified card identity, invalidated with the modem/SIM session. */
+bool modem_service_get_sim_identity(char *out, size_t cap);
+
 /* True during modem rail/startup/shutdown transitions and non-idle call work.
  * This is a vendor-neutral battery-sampling hint, not a sleep veto or timer. */
 bool modem_service_battery_high_load_active(void);

@@ -1,5 +1,7 @@
 #include "apps/settings_app.h"
 #include "apps/menu_shortcuts.h"
+#include "apps/phone_security_app.h"
+#include "services/phone_security.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -211,10 +213,10 @@ bool settings_restore_factory_defaults(void) {
         {STORE_SETTING_SETTINGS_PIN_CODE_REQUEST, 0u},
         {STORE_SETTING_SETTINGS_FIXED_DIALLING, 0u},
         {STORE_SETTING_SETTINGS_CLOSED_USER_GROUP, 0u},
-        {STORE_SETTING_SETTINGS_PHONE_SECURITY, 17u},
         {STORE_SETTING_SETTINGS_PHONE_LINE_CHANGE_ALLOWED, 1u},
         {STORE_SETTING_SYSTEM_LANGUAGE, 0u},
     };
+    if (!phone_security_restore_defaults()) return false;
     for (size_t i = 0u; i < ARRAY_COUNT(defaults); i++) {
         if (store_setting_set_u8(defaults[i].key, defaults[i].value) != STORE_STATUS_OK) return false;
     }
@@ -291,22 +293,14 @@ bool handle_settings_restore_key(app_t *app, uint16_t key, event_type_t type, ui
         return true;
     }
     if (key != KEY_NAVI || len == 0u) return true;
-    char stored[STORE_TEXT_MAX + 1u] = {0};
     store_diag_snapshot_t diag;
     store_service_get_diag(&diag);
-    bool readable = restore_storage_available(&diag) &&
-        store_setting_get_text(STORE_SETTING_SECURITY_CODE, stored, sizeof(stored)) == STORE_STATUS_OK;
-    /* Accept existing digit-only codes up to the current change-code limit;
-     * malformed/unavailable storage must never authorize a reset. */
-    size_t stored_len = strlen(stored);
-    readable = readable && stored_len > 0u && stored_len < sizeof(app->settings_restore_code) &&
-               strspn(stored, "0123456789") == stored_len;
-    bool matches = readable && strcmp(input, stored) == 0;
-    erase_restore_code(stored, sizeof(stored));
+    security_code_result_t result = restore_storage_available(&diag)
+        ? security_code_verify(input, now) : SECURITY_CODE_UNAVAILABLE;
     erase_restore_code(input, sizeof(app->settings_restore_code));
-    if (!readable) {
+    if (result == SECURITY_CODE_UNAVAILABLE) {
         finish_settings_restore(app, false, now);
-    } else if (!matches) {
+    } else if (result == SECURITY_CODE_WRONG) {
         open_display_sid(app, 0u, 0x145u, "Code\nerror", APP_ROUTE_SETTINGS_RESTORE, now);
     } else if (!settings_restore_factory_defaults()) {
         finish_settings_restore(app, false, now);
@@ -416,6 +410,10 @@ bool handle_settings_menu_key(app_t *app, uint16_t key, uint32_t now) {
         return true;
     }
     if (kind == SETTINGS_MENU_SECURITY) {
+        if (selected == 3u) {
+            open_phone_security(app, false, now);
+            return true;
+        }
         if (selected == 4u) {
             open_settings_menu(app, SETTINGS_MENU_ACCESS_CODES, 0u);
             return true;
@@ -492,6 +490,10 @@ bool handle_settings_value_key(app_t *app, uint16_t key, uint32_t now) {
         return true;
     }
     if (key == KEY_C) {
+        if (app->settings_value_kind == SETTINGS_VALUE_PHONE_SECURITY) {
+            app->phone_security_setting_authorized = false;
+            security_code_forget_grant();
+        }
         return_to_settings_parent(app);
         return true;
     }
@@ -602,6 +604,8 @@ void settings_submit_welcome_editor(app_t *app, uint32_t now) {
 
 void settings_cancel_editor(app_t *app, uint32_t now) {
     (void)now;
+    security_code_forget_grant();
+    erase_restore_code(app->settings_access_new_code, sizeof(app->settings_access_new_code));
     close_editor(app);
     open_settings_menu(app, (settings_menu_kind_t)app->settings_value_parent_kind, app->settings_value_parent_selected);
 }
@@ -627,20 +631,20 @@ void settings_submit_access_code_editor(app_t *app, uint32_t now) {
         return;
     }
     if (app->settings_access_step == 0u) {
-        if (app->settings_access_kind == 0u) {
-            /* Validate the current security code against the persisted code. */
-            char code[STORE_TEXT_MAX + 1u];
-            store_setting_get_text(STORE_SETTING_SECURITY_CODE, code, sizeof(code));
-            if (strcmp(app->editor_value, code) != 0) {
-                open_display_sid(app, 0u, 0x145u, "Code\nerror", APP_ROUTE_EDITOR, now);
-                return;
-            }
+        security_code_result_t result = security_code_verify(app->editor_value, now);
+        erase_restore_code(app->editor_value, sizeof(app->editor_value));
+        if (result != SECURITY_CODE_OK) {
+            open_display_sid(app, result == SECURITY_CODE_WRONG ? 0u : 32u,
+                             result == SECURITY_CODE_WRONG ? 0x145u : 0x210u,
+                             result == SECURITY_CODE_WRONG ? "Code\nerror" : "Not done",
+                             APP_ROUTE_EDITOR, now);
+            return;
         }
         app->settings_access_step = 1u;
         open_editor(app,
                     settings_access_prompt(app->settings_access_kind, 1u),
                     "",
-                    settings_access_max_len(app->settings_access_kind),
+                    5u,
                     EDITOR_KIND_NUMBER,
                     EDITOR_CONTEXT_SETTINGS_ACCESS_CODE,
                     false,
@@ -648,12 +652,16 @@ void settings_submit_access_code_editor(app_t *app, uint32_t now) {
         return;
     }
     if (app->settings_access_step == 1u) {
+        if (len != 5u || strspn(app->editor_value, "0123456789") != 5u) {
+            open_display_sid(app, 0u, 0x145u, "Code\nerror", APP_ROUTE_EDITOR, now);
+            return;
+        }
         copy_text(app->settings_access_new_code, sizeof(app->settings_access_new_code), app->editor_value);
         app->settings_access_step = 2u;
         open_editor(app,
                     settings_access_prompt(app->settings_access_kind, 2u),
                     "",
-                    settings_access_max_len(app->settings_access_kind),
+                    5u,
                     EDITOR_KIND_NUMBER,
                     EDITOR_CONTEXT_SETTINGS_ACCESS_CODE,
                     false,
@@ -664,9 +672,13 @@ void settings_submit_access_code_editor(app_t *app, uint32_t now) {
         open_display_sid(app, 0u, 0xddu, "Codes\ndo not\nmatch", APP_ROUTE_EDITOR, now);
         return;
     }
-    if (store_setting_set_text(STORE_SETTING_SECURITY_CODE,
-                               app->settings_access_new_code) != STORE_STATUS_OK) {
-        open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_EDITOR, now);
+    bool saved = security_code_change(app->settings_access_new_code);
+    erase_restore_code(app->settings_access_new_code, sizeof(app->settings_access_new_code));
+    erase_restore_code(app->editor_value, sizeof(app->editor_value));
+    if (!saved) {
+        close_editor(app);
+        open_settings_menu(app, SETTINGS_MENU_ACCESS_CODES, 0u);
+        open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_SETTINGS_MENU, now);
         return;
     }
     close_editor(app);
@@ -807,7 +819,7 @@ static const char *settings_menu_preview(settings_menu_kind_t kind, uint8_t sele
     /* Keep the original two-line menu layout without inventing SIM/network
      * state for operations that are not implemented. */
     if ((kind == SETTINGS_MENU_CALL && selected == 4u) ||
-        (kind == SETTINGS_MENU_SECURITY && selected < 4u)) {
+        (kind == SETTINGS_MENU_SECURITY && selected < 3u)) {
         return "--";
     }
     if (kind == SETTINGS_MENU_PHONE && selected == 3u) {
@@ -1007,6 +1019,7 @@ static store_setting_key_t settings_value_store_key(settings_value_kind_t kind) 
 
 static uint8_t settings_current_value(settings_value_kind_t kind) {
     uint8_t value = 0u;
+    if (kind == SETTINGS_VALUE_PHONE_SECURITY) return phone_security_enabled() ? 57u : 17u;
     if (kind == SETTINGS_VALUE_CALL_WAITING) {
         return 4u;
     }
@@ -1045,6 +1058,19 @@ static const char *settings_value_label(settings_value_kind_t kind, uint8_t valu
 static bool apply_settings_value(app_t *app, uint32_t now) {
     uint8_t count = 0u;
     settings_value_kind_t kind = (settings_value_kind_t)app->settings_value_kind;
+    if (kind == SETTINGS_VALUE_PHONE_SECURITY) {
+        bool ok = app->phone_security_setting_authorized &&
+            app->phone_security_generation == phone_security_generation() &&
+            phone_security_set_enabled(app->settings_value_selected == 1u, now);
+        app->phone_security_setting_authorized = false;
+        security_code_forget_grant();
+        if (ok) settings_show_saved(app, now);
+        else {
+            return_to_settings_parent(app);
+            open_display_sid(app, 32u, 0x210u, "Not done", APP_ROUTE_SETTINGS_MENU, now);
+        }
+        return true;
+    }
     if (kind == SETTINGS_VALUE_NETWORK) {
         open_network_selection(app, app->settings_value_selected == 1u, now);
         return true;
@@ -1106,7 +1132,12 @@ static void open_welcome_note_editor(app_t *app, uint32_t now) {
                 now);
 }
 
+void settings_open_phone_security_selector(app_t *app) {
+    open_settings_value(app, SETTINGS_VALUE_PHONE_SECURITY, 3u);
+}
+
 static void open_settings_access_editor(app_t *app, uint8_t kind, uint32_t now) {
+    security_code_forget_grant();
     app->settings_access_kind = kind;
     app->settings_access_step = 0u;
     app->settings_value_parent_kind = (uint8_t)SETTINGS_MENU_ACCESS_CODES;
