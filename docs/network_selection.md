@@ -10,12 +10,19 @@ The modem service owns scheduling, cancellation, and SIM/session isolation.
 `modem_network` owns the request state and scan list; the Telit adapter owns AT
 commands and response parsing. Apps see only typed requests and snapshots.
 
-Telit's manual selection survives a SIM change. To match the Nokia policy, the
-system settings store the ICCID that owns the selection. Startup reads that
-identity and the live mode without scanning. A different or unbound SIM returns
-to Automatic, verified by readback, before its identity is saved. The same SIM
-keeps its live selection. Factory settings clear this binding and trigger the
-same reconciliation. Storage failures block selection changes.
+The system settings store the confirmed choice as one atomic record: ICCID for
+Automatic, or ICCID:PLMN for Manual. Startup reads the identity and live mode
+without scanning, restores the same SIM's saved choice when necessary, and
+verifies the result. A different or unbound SIM defaults to Automatic. Factory
+settings clear this binding and trigger the same reconciliation. Storage failures
+block selection changes; a new choice is saved only after matching readback.
+
+Telit's guide says manual selection survives reboot and SIM changes. On the
+bench, however, the WWX AT&T firmware returned Automatic after ordinary modem
+shutdown/startup, before our first selection readback. The host therefore keeps
+the confirmed choice instead of relying on modem persistence. A rejected startup
+restore preserves that choice without retrying in a loop or silently selecting
+Automatic; the menu still allows a different selection.
 
 The UI never reports a successful selection from an `OK` alone: the following
 numeric mode/PLMN readback must match. PLMNs retain all five or six digits.
@@ -44,19 +51,22 @@ The scan deadline is 185 seconds, including a margin over the Telit Software
 User Guide r17's 180-second test-command limit. Selection uses the same bounded
 deadline. Short identity/readback commands have five-second deadlines.
 
-Quit, incoming calls, shutdown, and SIM changes cancel a request. A transmitted
+Quit, incoming calls, shutdown, and SIM changes cancel a request's result. A transmitted
 command retains ownership of the AT channel until its final is drained. An
 unreleased channel enters the existing failed-modem recovery path rather than
 dispatching another command into the unfinished response. No cancellation
 cuts modem power. UI preemption detaches the request so late results cannot
 replace a call, shutdown, or unrelated dialog.
 
-[BP] The adapter sends CR to abort a scan/selection. ESC did not release the
-live module's scan. Cancellation retains the original command deadline, with
-at least five seconds to drain a final: an ignored abort must not declare a
-healthy, unfinished scan a failed modem. The CR behavior still needs live
-qualification. Asynchronous host processing does not guarantee radio service
-during a modem network scan.
+ESC and bare CR both failed to interrupt a live WWX scan on the AT&T profile
+(`M0F.103008`). There is no qualified abort sequence, so the adapter sends none.
+Quit immediately leaves the progress
+screen, but the scan can still occupy the AT channel until its original
+deadline. A command timeout allows a final five-second drain before failure.
+Calls get priority after that command ends; prompt call answering or shutdown
+during a scan is not guaranteed. Direct SMS parsing remains active, but modem
+radio availability during scanning is outside the host's control. Scans run
+only on an explicit Manual selection, never as background polling.
 
 ## Regression Coverage
 

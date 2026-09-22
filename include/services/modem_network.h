@@ -8,6 +8,7 @@
 #define MODEM_NETWORK_MAX 24u
 #define MODEM_NETWORK_NAME_CAP 49u
 #define MODEM_NETWORK_ID_CAP 21u
+#define MODEM_NETWORK_RECORD_CAP 28u
 
 typedef enum {
     MODEM_NETWORK_AUTOMATIC = 0,
@@ -74,14 +75,14 @@ typedef struct {
                                 char plmn[7]);
     modem_network_line_t (*scan)(const char *line, modem_network_collect_fn collect);
     bool (*denied)(const char *final);
-    const char *abort_bytes;
-    uint32_t abort_timeout_ms;
+    uint32_t drain_timeout_ms;
 } modem_network_backend_t;
 
 typedef struct {
+    /* Empty means unbound; ICCID means Automatic; ICCID:PLMN means Manual. */
     bool (*read_owner)(char *out, size_t cap);
-    /* Must return true only after this identity is durable. */
-    bool (*save_owner)(const char *identity);
+    /* Must return true only after the complete selection record is durable. */
+    bool (*save_owner)(const char *record);
 } modem_network_hooks_t;
 
 /* Core-0 state owner. No HAL, storage, app, or modem-service dependency. The
@@ -100,7 +101,7 @@ void modem_network_timeout(void);
 bool modem_network_cancelled(void);
 bool modem_network_work_pending(void);
 bool modem_network_prepare(char *command, size_t cap, uint32_t *timeout_ms);
-bool modem_network_command_abortable(void);
+bool modem_network_command_changes_registration(void);
 bool modem_network_line(const char *line);
 void modem_network_final(bool ok, const char *final, bool transport_clean);
 static inline bool modem_network_plmn_valid(const char *plmn) {

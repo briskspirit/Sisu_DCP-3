@@ -13,14 +13,15 @@ static bool s_verifying, s_mutation_ok, s_reconciling;
 static modem_network_result_t s_mutation_result;
 static modem_network_result_t s_cancel_result;
 static char s_identity[MODEM_NETWORK_ID_CAP], s_target[7];
+static char s_saved_record[MODEM_NETWORK_RECORD_CAP];
+static modem_network_mode_t s_saved_mode;
 static modem_network_mode_t s_read_mode;
 static char s_read_plmn[7];
 
 bool modem_network_supported(void) {
     return s_backend != NULL && s_backend->build != NULL &&
         s_backend->identity != NULL && s_backend->read != NULL &&
-        s_backend->scan != NULL && s_backend->abort_bytes != NULL &&
-        s_backend->abort_timeout_ms != 0u;
+        s_backend->scan != NULL && s_backend->drain_timeout_ms != 0u;
 }
 
 static void clear_list(void) {
@@ -45,6 +46,7 @@ void modem_network_reset_session(void) {
     s_view.mode = MODEM_NETWORK_UNKNOWN;
     s_view.plmn[0] = '\0';
     s_identity[0] = '\0';
+    s_saved_record[0] = '\0';
     s_reconcile = true;
     clear_list();
 }
@@ -107,10 +109,10 @@ uint32_t modem_network_request(modem_network_action_t action, uint32_t generatio
         clear_list();
         s_step = MODEM_NETWORK_STEP_SCAN;
     } else {
-        /* A reset/failed persistence cannot leave a manually locked modem
-         * attributed to another card after the next boot. */
-        if (s_identity[0] == '\0' || s_hooks.save_owner == NULL ||
-            !s_hooks.save_owner(s_identity)) {
+        /* Prove the previous confirmed choice is durable before changing it.
+         * The new choice is committed only after matching modem readback. */
+        if (s_identity[0] == '\0' || s_saved_record[0] == '\0' ||
+            s_hooks.save_owner == NULL || !s_hooks.save_owner(s_saved_record)) {
             finish(MODEM_NETWORK_NOT_DONE);
             return s_view.request_id;
         }
@@ -161,9 +163,8 @@ bool modem_network_prepare(char *command, size_t cap, uint32_t *timeout_ms) {
     return true;
 }
 
-bool modem_network_command_abortable(void) {
-    return s_step == MODEM_NETWORK_STEP_SCAN || s_step == MODEM_NETWORK_STEP_AUTO ||
-           s_step == MODEM_NETWORK_STEP_MANUAL;
+bool modem_network_command_changes_registration(void) {
+    return s_step == MODEM_NETWORK_STEP_AUTO || s_step == MODEM_NETWORK_STEP_MANUAL;
 }
 
 static bool collect(const modem_network_entry_t *entry) {
@@ -200,8 +201,36 @@ bool modem_network_line(const char *line) {
     return true;
 }
 
-static bool remember_owner(void) {
-    return s_hooks.save_owner != NULL && s_hooks.save_owner(s_identity);
+static bool read_saved_selection(void) {
+    char record[MODEM_NETWORK_RECORD_CAP] = {0};
+    if (s_hooks.read_owner == NULL || !s_hooks.read_owner(record, sizeof(record))) return false;
+    size_t n = 0u;
+    while (n < MODEM_NETWORK_ID_CAP - 1u && record[n] >= '0' && record[n] <= '9') n++;
+    if (record[0] != '\0' && ((n != 19u && n != 20u) ||
+        (record[n] != '\0' && (record[n] != ':' || !modem_network_plmn_valid(record + n + 1u)))))
+        return false;
+    s_saved_mode = MODEM_NETWORK_AUTOMATIC;
+    s_target[0] = '\0';
+    if (n == strlen(s_identity) && memcmp(record, s_identity, n) == 0 && record[n] == ':') {
+        s_saved_mode = MODEM_NETWORK_MANUAL;
+        memcpy(s_target, record + n + 1u, strlen(record + n + 1u) + 1u);
+    }
+    return true;
+}
+
+static bool remember_selection(modem_network_mode_t mode, const char *plmn) {
+    char record[MODEM_NETWORK_RECORD_CAP];
+    size_t n = strlen(s_identity);
+    if (n == 0u || n >= MODEM_NETWORK_ID_CAP) return false;
+    memcpy(record, s_identity, n + 1u);
+    if (mode == MODEM_NETWORK_MANUAL) {
+        if (!modem_network_plmn_valid(plmn)) return false;
+        record[n++] = ':';
+        memcpy(record + n, plmn, strlen(plmn) + 1u);
+    } else if (mode != MODEM_NETWORK_AUTOMATIC) return false;
+    if (s_hooks.save_owner == NULL || !s_hooks.save_owner(record)) return false;
+    memcpy(s_saved_record, record, strlen(record) + 1u);
+    return true;
 }
 
 void modem_network_final(bool ok, const char *final, bool transport_clean) {
@@ -236,6 +265,7 @@ void modem_network_final(bool ok, const char *final, bool transport_clean) {
         return;
     }
     if (s_step == MODEM_NETWORK_STEP_IDENTITY) {
+        if (!read_saved_selection()) { finish(MODEM_NETWORK_NOT_DONE); return; }
         s_step = MODEM_NETWORK_STEP_READ;
     } else if (s_step == MODEM_NETWORK_STEP_SCAN) {
         /* The original puts the current network ahead of the other rows. */
@@ -258,24 +288,27 @@ void modem_network_final(bool ok, const char *final, bool transport_clean) {
         s_view.mode = s_read_mode;
         memcpy(s_view.plmn, s_read_plmn, sizeof(s_view.plmn));
         if (s_reconciling) {
-            char owner[MODEM_NETWORK_ID_CAP];
-            if (s_hooks.read_owner == NULL || !s_hooks.read_owner(owner, sizeof(owner))) {
-                finish(MODEM_NETWORK_NOT_DONE);
+            bool matches = s_read_mode == s_saved_mode &&
+                (s_saved_mode != MODEM_NETWORK_MANUAL || strcmp(s_target, s_read_plmn) == 0);
+            if (!matches && !s_verifying) {
+                s_step = s_saved_mode == MODEM_NETWORK_MANUAL
+                    ? MODEM_NETWORK_STEP_MANUAL : MODEM_NETWORK_STEP_AUTO;
                 return;
             }
-            if (strcmp(owner, s_identity) != 0 && s_read_mode != MODEM_NETWORK_AUTOMATIC) {
-                if (s_verifying) { finish(MODEM_NETWORK_NOT_DONE); return; }
-                s_step = MODEM_NETWORK_STEP_AUTO;
-                return;
-            }
-            s_view.ready = remember_owner();
-            finish(s_view.ready ? MODEM_NETWORK_DONE : MODEM_NETWORK_NOT_DONE);
+            /* A rejected restore must not trap the user: retain the saved
+             * choice and allow Automatic or a new manual selection. No loop. */
+            s_view.ready = remember_selection(s_saved_mode, s_target);
+            finish(s_view.ready && matches && (!s_verifying || s_mutation_ok)
+                ? MODEM_NETWORK_DONE : MODEM_NETWORK_NOT_DONE);
         } else {
             s_view.ready = s_read_mode != MODEM_NETWORK_UNKNOWN;
             bool matches = s_view.action == MODEM_NETWORK_SELECT_AUTO
                 ? s_read_mode == MODEM_NETWORK_AUTOMATIC
                 : s_read_mode == MODEM_NETWORK_MANUAL && strcmp(s_target, s_read_plmn) == 0;
-            finish(s_mutation_ok && matches ? MODEM_NETWORK_DONE : s_mutation_result);
+            if (s_mutation_ok && matches) {
+                s_view.ready = remember_selection(s_read_mode, s_read_plmn);
+                finish(s_view.ready ? MODEM_NETWORK_DONE : MODEM_NETWORK_NOT_DONE);
+            } else finish(s_mutation_result);
         }
     }
 }

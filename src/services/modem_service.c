@@ -1705,9 +1705,13 @@ static void signal_finish_query(bool command_ok, uint32_t now_ms) {
 /* ------------------------------------------------------------------------ */
 
 static bool network_read_owner(char *out, size_t cap) {
-    return cap <= UINT8_MAX && store_service_unit_ready(STORE_UNIT_SETTINGS_SYSTEM) &&
+    char record[STORE_TEXT_MAX + 1u];
+    if (out == NULL || !store_service_unit_ready(STORE_UNIT_SETTINGS_SYSTEM) ||
         store_setting_get_text(STORE_SETTING_SYSTEM_NETWORK_SIM_OWNER,
-                               out, (uint8_t)cap) == STORE_STATUS_OK;
+                               record, sizeof(record)) != STORE_STATUS_OK ||
+        strlen(record) >= cap) return false;
+    memcpy(out, record, strlen(record) + 1u);
+    return true;
 }
 
 static bool network_save_owner(const char *identity) {
@@ -1796,17 +1800,10 @@ static void network_drain(uint32_t now_ms, bool timed_out) {
         s_operation = MODEM_OP_NONE;
         set_operation_busy(false);
     } else if (s_active && s_active_kind == MODEM_AT_NETWORK) {
-        if (modem_network_command_abortable()) {
-            const char *abort = g_modem_vendor.network->abort_bytes;
-            modem_uart_hal_write((const uint8_t *)abort, strlen(abort));
-            uint32_t drain_deadline = now_ms + g_modem_vendor.network->abort_timeout_ms;
-            /* An ignored abort must not turn a still-within-deadline scan
-             * into a broken modem. Keep owning its response until it ends. */
-            if (timed_out || time_diff_ms(drain_deadline, s_command_deadline_ms) > 0)
-                s_command_deadline_ms = drain_deadline;
-        } else if (timed_out) {
-            s_command_deadline_ms = now_ms + g_modem_vendor.network->abort_timeout_ms;
-        }
+        /* No qualified COPS abort sequence on the WWX. Quit detaches the UI,
+         * not the response owner; retain the original command deadline. */
+        if (timed_out)
+            s_command_deadline_ms = now_ms + g_modem_vendor.network->drain_timeout_ms;
         s_active_kind = MODEM_AT_NETWORK_DRAIN;
     }
 }
@@ -4793,9 +4790,7 @@ static void finish_command_result(bool ok, const char *line) {
     }
 
     if (kind == MODEM_AT_NETWORK || kind == MODEM_AT_NETWORK_DRAIN) {
-        modem_network_snapshot_t view;
-        modem_network_snapshot(&view);
-        bool changed_radio = modem_network_command_abortable() && view.action != MODEM_NETWORK_SCAN;
+        bool changed_radio = modem_network_command_changes_registration();
         bool clean = kind == MODEM_AT_NETWORK &&
             s_network_transport_counter == model_transport_counter() &&
             s_network_sim_generation == s_sim_session_generation;

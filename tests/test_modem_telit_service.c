@@ -7483,6 +7483,14 @@ static void test_network_selection(void) {
     mh_advance(100u); mh_advance(100u);
     check(id && network_view().result == MODEM_NETWORK_DONE && network_view().mode == MODEM_NETWORK_MANUAL &&
           mh_tx_count_exact("AT+COPS=1,2,\"310410\"") == 1u, "manual selection verifies numeric readback");
+    check(strstr(s_mh_network_owner, ":310410") != NULL,
+          "verified manual selection persists its PLMN with SIM ownership");
+    s_network_mode = 0u;
+    modem_network_reset_session();
+    mh_advance(100u); mh_advance(100u); mh_advance(100u); mh_advance(100u);
+    check(network_view().ready && network_view().mode == MODEM_NETWORK_MANUAL &&
+          mh_tx_count_exact("AT+COPS=1,2,\"310410\"") == 2u,
+          "same SIM restores manual choice when the modem returns to Automatic at startup");
     id = modem_service_network_request(MODEM_NETWORK_SELECT_AUTO, 0, 0);
     mh_advance(100u); mh_advance(100u);
     check(id && network_view().result == MODEM_NETWORK_DONE && network_view().mode == MODEM_NETWORK_AUTOMATIC,
@@ -7491,16 +7499,16 @@ static void test_network_selection(void) {
     id = hold_network_scan();
     modem_service_network_cancel(id + 1u); mh_settle();
     check(!modem_network_cancelled(), "wrong request cannot cancel scan");
+    size_t tx_before_cancel = s_mh_tx_event_count;
     modem_service_network_cancel(id); mh_settle();
-    uint8_t abort_byte = '\r';
-    check(mh_tx_event_find(MH_TX_EVENT_RAW, &abort_byte, 1u, 0) != SIZE_MAX,
-          "scan cancel emits the adapter abort byte");
+    check(s_mh_tx_event_count == tx_before_cancel,
+          "scan cancellation does not send an unqualified abort into the modem parser");
     check(modem_service_request_debug_at("AT+CGMI"), "queue work behind cancelled scan"); mh_settle();
     check(mh_tx_count_exact("AT+CGMI") == 0u && network_view().busy,
           "cancelled command retains the channel until its terminal response");
     mh_advance(6000u);
     check(mh_status().at_ready && network_view().busy && mh_tx_count_exact("AT+CGMI") == 0u,
-          "an ignored abort keeps draining inside the original scan deadline");
+          "cancelled scan keeps draining inside the original command deadline");
     mh_feed(s_network_scan_response); s_hold_final_command = NULL; mh_feed("OK"); mh_settle();
     check(network_view().result == MODEM_NETWORK_CANCELLED && network_view().count == 0u &&
           mh_tx_count_exact("AT+CGMI") == 1u, "late scan data cannot publish or complete another command");
@@ -7515,14 +7523,14 @@ static void test_network_selection(void) {
     (void)hold_network_scan();
     mh_feed("RING"); mh_settle();
     check(modem_network_cancelled() && mh_tx_count_exact("AT+CLCC") == 0u,
-          "incoming call aborts scan without crossing command ownership");
+          "incoming call cancels scan without crossing command ownership");
     s_hold_final_command = NULL; mh_feed("+CME ERROR: 681"); mh_settle();
     check(mh_tx_count_exact("AT+CLCC") != 0u, "call reconciliation resumes after scan drains");
 
     (void)hold_network_scan();
     modem_service_power_off(); mh_settle();
     check(mh_tx_count_exact(g_modem_vendor.power.off_cmd) == 0u,
-          "power off waits for scan abort final before sending shutdown");
+          "power off waits for scan final before sending shutdown");
     s_hold_final_command = NULL; mh_feed("ERROR"); mh_settle();
     check(!network_view().busy, "power off retires network request");
 

@@ -130,6 +130,6 @@ static bool denied(const char *line) {
 
 const modem_network_backend_t TELIT_NETWORK_BACKEND = {
     .build = build, .identity = identity, .read = read_mode, .scan = scan,
-    /* [BP] Qualify CR on the live firmware; ESC did not release a COPS scan. */
-    .denied = denied, .abort_bytes = "\r", .abort_timeout_ms = 5000u,
+    /* ESC and CR did not abort the WWX scan. Drain the original transaction. */
+    .denied = denied, .drain_timeout_ms = 5000u,
 };

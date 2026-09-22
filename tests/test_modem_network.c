@@ -4,7 +4,7 @@
 #include "services/modem_network.h"
 
 extern const modem_network_backend_t TELIT_NETWORK_BACKEND;
-static char owner[MODEM_NETWORK_ID_CAP];
+static char owner[MODEM_NETWORK_RECORD_CAP];
 static bool readable = true, writable = true;
 static unsigned writes;
 static const char *const CARD = "89014103211118510720";
@@ -63,16 +63,59 @@ static void test_owner(void) {
     command("AT+COPS=3,2;+COPS?"); response("+COPS: 0");
     assert(view().ready && view().mode == MODEM_NETWORK_AUTOMATIC);
     assert(strcmp(owner, CARD) == 0);
+    snprintf(owner, sizeof(owner), "%s:310410", CARD);
     modem_network_reset_session(); identify(); response("+COPS: 1,2,\"310410\",7");
     assert(view().ready && view().mode == MODEM_NETWORK_MANUAL);
     assert(!modem_network_work_pending());
 
-    reset(); identify(); readable = false; response("+COPS: 1,2,\"310410\",7");
+    reset(); readable = false; command("AT#CCID"); response("#CCID: 89014103211118510720");
     assert(!view().ready && view().result == MODEM_NETWORK_NOT_DONE && writes == 0u);
     reset(); identify(); writable = false; response("+COPS: 0");
     assert(!view().ready && view().result == MODEM_NETWORK_NOT_DONE);
     reset(); identify(); response("+COPS: 5");
     assert(!view().ready && view().result == MODEM_NETWORK_NOT_DONE);
+}
+
+static void test_restore(void) {
+    ready(); scan("+COPS: (2,\"AT&T\",\"\",\"310410\",7)");
+    assert(modem_network_request(MODEM_NETWORK_SELECT_MANUAL, view().list_generation, 0));
+    command("AT+COPS=1,2,\"310410\""); modem_network_final(true, "OK", true);
+    assert(strcmp(owner, CARD) == 0); /* Not committed on OK alone. */
+    command("AT+COPS=3,2;+COPS?"); response("+COPS: 1,2,\"310410\",7");
+    assert(strcmp(owner, "89014103211118510720:310410") == 0);
+
+    for (unsigned failure = 0u; failure < 2u; failure++) {
+        modem_network_reset_session(); identify(); response("+COPS: 0,2,\"310410\",7");
+        command("AT+COPS=1,2,\"310410\""); modem_network_final(!failure, failure ? "ERROR" : "OK", true);
+        command("AT+COPS=3,2;+COPS?"); response(failure ? "+COPS: 1" : "+COPS: 1,2,\"310410\",7");
+        assert(view().ready && !view().busy && !modem_network_work_pending());
+        assert(view().result == (failure ? MODEM_NETWORK_NOT_DONE : MODEM_NETWORK_DONE));
+        assert(strcmp(owner, "89014103211118510720:310410") == 0);
+    }
+    assert(modem_network_request(MODEM_NETWORK_SELECT_AUTO, 0, 0));
+    command("AT+COPS=0"); modem_network_final(true, "OK", true);
+    command("AT+COPS=3,2;+COPS?"); response("+COPS: 0");
+    assert(strcmp(owner, CARD) == 0);
+
+    snprintf(owner, sizeof(owner), "89014103211118510721:001001");
+    modem_network_reset_session(); identify(); response("+COPS: 1,2,\"001001\",7");
+    command("AT+COPS=0"); modem_network_final(true, "OK", true);
+    command("AT+COPS=3,2;+COPS?"); response("+COPS: 0");
+    assert(view().ready && strcmp(owner, CARD) == 0);
+
+    static const char *const bad[] = {"garbage", "89014103211118510720:",
+        "89014103211118510720:0010", "89014103211118510720:00100x"};
+    for (size_t i = 0u; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        reset(); snprintf(owner, sizeof(owner), "%s", bad[i]);
+        command("AT#CCID"); response("#CCID: 89014103211118510720");
+        assert(!view().ready && view().result == MODEM_NETWORK_NOT_DONE && !modem_network_work_pending());
+    }
+    ready(); scan("+COPS: (2,\"AT&T\",\"\",\"310410\",7)");
+    assert(modem_network_request(MODEM_NETWORK_SELECT_MANUAL, view().list_generation, 0));
+    command("AT+COPS=1,2,\"310410\""); modem_network_final(true, "OK", true);
+    writable = false;
+    command("AT+COPS=3,2;+COPS?"); response("+COPS: 1,2,\"310410\",7");
+    assert(!view().ready && view().result == MODEM_NETWORK_NOT_DONE && strcmp(owner, CARD) == 0);
 }
 static void test_scan(void) {
     ready();
@@ -147,6 +190,6 @@ static void test_cancellation(void) {
     modem_network_invalidate_owner(); assert(!view().ready && view().mode == MODEM_NETWORK_UNKNOWN);
 }
 int main(void) {
-    test_owner(); test_scan(); test_mutations(); test_cancellation();
+    test_owner(); test_restore(); test_scan(); test_mutations(); test_cancellation();
     puts("network state/adapter tests passed"); return 0;
 }
