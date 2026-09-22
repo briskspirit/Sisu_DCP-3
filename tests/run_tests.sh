@@ -32,6 +32,7 @@ MODEM_SERVICE_SOURCES=(
     src/services/modem_sms_state.c
     src/services/modem_supplementary_state.c
     src/services/modem_network.c
+    src/services/modem_network_sim.c
     src/services/sms_deliver_codec.c
     src/services/sms_identity.c
     src/services/sms_picture_codec.c
@@ -842,7 +843,7 @@ run test_clock_editor_app    src/apps/clock/app.c src/apps/clock/editor.c src/ap
 run test_call_forward_mmi    src/services/call_forward_mmi.c
 run test_call_divert_app     src/apps/call_divert_app.c src/services/call_forward_mmi.c "${DEAD_CODE_FLAGS[@]}"
 run test_call_waiting_app    src/apps/call_waiting_app.c
-run_telit test_modem_network src/services/modem_network.c src/services/modem_vendor_telit_network.c src/services/modem_vendor_telit_parse.c
+run_telit test_modem_network src/services/modem_network.c src/services/modem_network_sim.c src/services/modem_vendor_telit_network.c src/services/modem_vendor_telit_parse.c
 run test_network_selection_app src/apps/network_selection_app.c src/ui/ui.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c src/services/strings.c "$GENERATED_SRC_DIR/assets_data.c" "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
 run test_call_options_logic  src/apps/call_options_logic.c
 run test_call_newcall_preserve src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # New-call snapshot/restore; whole app compiled, unreachable code stripped

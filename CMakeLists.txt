@@ -209,6 +209,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/modem_sms_state.c
     src/services/modem_supplementary_state.c
     src/services/modem_network.c
+    src/services/modem_network_sim.c
     src/services/modem_service.c
     src/services/operator_name_db.c
     src/services/modem_call_model.c

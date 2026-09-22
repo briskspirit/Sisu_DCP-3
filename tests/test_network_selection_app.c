@@ -65,6 +65,15 @@ int main(void) {
     complete(MODEM_NETWORK_DONE); assert(tick_network_selection(&app, 25));
     assert(app.display_record_id == 3u && strstr(last_text, "AT&T"));
 
+    open_network_selection(&app, true, 26); complete(MODEM_NETWORK_DONE);
+    assert(tick_network_selection(&app, 27));
+    handle_network_selection_key(&app, KEY_NAVI, 28);
+    status.home = true;
+    complete(MODEM_NETWORK_DONE); assert(tick_network_selection(&app, 29));
+    assert(app.display_record_id == 0x1au && last_sid == 0x18au);
+    assert(app.display_return_route == APP_ROUTE_SETTINGS_VALUE);
+    status.home = false;
+
     open_network_selection(&app, false, 30); complete(MODEM_NETWORK_DONE);
     assert(tick_network_selection(&app, 31) && app.route == APP_ROUTE_SETTINGS_MENU);
     open_network_selection(&app, true, 40); status.count = 0; complete(MODEM_NETWORK_DONE);

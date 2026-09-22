@@ -77,6 +77,8 @@ extern const modem_provision_step_t TELIT_PROVISION_STEPS[];
 bool telit_starts_with(const char *text, const char *prefix);
 bool telit_csv_view_split(const char *body, telit_csv_view_t *fields,
                           size_t max_fields, size_t *count_out);
+bool telit_csv_view_split_limit(const char *body, telit_csv_view_t *fields,
+                                size_t max_fields, size_t *count_out, uint8_t field_limit);
 bool telit_view_split_prefixed(const char *line, const char *prefix,
                                telit_csv_view_t *fields, size_t max_fields,
                                size_t *count_out);

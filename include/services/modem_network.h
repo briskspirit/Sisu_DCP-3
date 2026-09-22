@@ -36,6 +36,7 @@ typedef struct {
     char plmn[7];
     char name[MODEM_NETWORK_NAME_CAP];
     uint8_t availability; /* 0 unknown, 1 available, 2 current, 3 forbidden */
+    bool home;
 } modem_network_entry_t;
 
 typedef struct {
@@ -47,6 +48,7 @@ typedef struct {
     uint8_t count;
     bool busy;
     bool ready;
+    bool home;
     char plmn[7];
 } modem_network_snapshot_t;
 
@@ -57,6 +59,7 @@ typedef enum {
     MODEM_NETWORK_STEP_SCAN,
     MODEM_NETWORK_STEP_AUTO,
     MODEM_NETWORK_STEP_MANUAL,
+    MODEM_NETWORK_STEP_SIM,
 } modem_network_step_t;
 
 typedef enum {
@@ -67,6 +70,37 @@ typedef enum {
 
 typedef bool (*modem_network_collect_fn)(const modem_network_entry_t *entry);
 
+/* Optional, read-only SIM metadata. Modem adapters own the wire protocol. */
+typedef enum {
+    MODEM_NETWORK_SIM_AD = 0,
+    MODEM_NETWORK_SIM_HOME,
+    MODEM_NETWORK_SIM_USER,
+    MODEM_NETWORK_SIM_OPERATOR,
+    MODEM_NETWORK_SIM_LEGACY,
+} modem_network_sim_file_t;
+
+typedef enum {
+    MODEM_NETWORK_SIM_IMSI = 0,
+    MODEM_NETWORK_SIM_INFO,
+    MODEM_NETWORK_SIM_DATA,
+} modem_network_sim_kind_t;
+
+#define MODEM_NETWORK_SIM_CHUNK 120u /* Whole three- and five-byte PLMN records. */
+typedef struct {
+    modem_network_sim_kind_t kind;
+    modem_network_sim_file_t file;
+    uint16_t offset;
+    uint8_t length;
+} modem_network_sim_query_t;
+
+typedef struct {
+    bool missing;
+    uint16_t file_size;
+    char imsi[16];
+    uint8_t length;
+    uint8_t data[MODEM_NETWORK_SIM_CHUNK];
+} modem_network_sim_reply_t;
+
 typedef struct {
     bool (*build)(modem_network_step_t step, const char *plmn,
                   char *out, size_t cap, uint32_t *timeout_ms);
@@ -76,6 +110,9 @@ typedef struct {
     modem_network_line_t (*scan)(const char *line, modem_network_collect_fn collect);
     bool (*denied)(const char *final);
     uint32_t drain_timeout_ms;
+    bool (*sim_build)(const modem_network_sim_query_t *query, char *out, size_t cap);
+    modem_network_line_t (*sim_read)(const modem_network_sim_query_t *query,
+                                    const char *line, modem_network_sim_reply_t *out);
 } modem_network_backend_t;
 
 typedef struct {

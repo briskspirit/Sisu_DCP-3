@@ -128,8 +128,116 @@ static bool denied(const char *line) {
         strcmp(line, "+CME ERROR: network not allowed - emergency calls only") == 0);
 }
 
+static uint16_t sim_file_id(modem_network_sim_file_t file) {
+    switch (file) {
+    case MODEM_NETWORK_SIM_AD: return 0x6fadu;
+    case MODEM_NETWORK_SIM_HOME: return 0x6fd9u;
+    case MODEM_NETWORK_SIM_USER: return 0x6f60u;
+    case MODEM_NETWORK_SIM_OPERATOR: return 0x6f61u;
+    case MODEM_NETWORK_SIM_LEGACY: return 0x6f30u;
+    default: return 0u;
+    }
+}
+
+static bool sim_build(const modem_network_sim_query_t *query, char *out, size_t cap) {
+    int n;
+    if (query == NULL || out == NULL || cap == 0u) return false;
+    if (query->kind == MODEM_NETWORK_SIM_IMSI) n = snprintf(out, cap, "AT#CIMI");
+    else {
+        uint16_t file = sim_file_id(query->file);
+        if (file == 0u) return false;
+        if (query->kind == MODEM_NETWORK_SIM_INFO) n = snprintf(out, cap, "AT+CRSM=192,%u", file);
+        else if (query->kind == MODEM_NETWORK_SIM_DATA && query->offset < 0x8000u &&
+                 query->length > 0u && query->length <= MODEM_NETWORK_SIM_CHUNK)
+            n = snprintf(out, cap, "AT+CRSM=176,%u,%u,%u,%u", file,
+                query->offset >> 8u, query->offset & 255u, query->length);
+        else return false;
+    }
+    return n >= 0 && (size_t)n < cap;
+}
+
+static bool sim_info(const uint8_t *bytes, size_t size, uint16_t file, uint16_t *file_size) {
+    if (size == 0u) return false;
+    if (bytes[0] != 0x62u) {
+        /* GSM 11.11 GET RESPONSE: transparent EF, matching file identifier. */
+        if (size < 15u || bytes[6] != 4u || bytes[13] != 0u ||
+            ((uint16_t)bytes[4] << 8u | bytes[5]) != file) return false;
+        *file_size = (uint16_t)((uint16_t)bytes[2] << 8u | bytes[3]);
+        return true;
+    }
+    /* ETSI TS 102 221 FCP. Decode definite lengths, not byte-pattern searches:
+     * nested proprietary data can itself contain 80/82/83 tags. */
+    if (size < 2u || bytes[1] != size - 2u) return false;
+    bool descriptor = false, identity = false, length = false;
+    for (size_t pos = 2u; pos < size;) {
+        if (size - pos < 2u) return false;
+        uint8_t tag = bytes[pos++];
+        size_t n = bytes[pos++];
+        if (n == 0x81u) {
+            if (pos == size) return false;
+            n = bytes[pos++];
+        } else if (n >= 0x80u) return false;
+        if (n > size - pos) return false;
+        if (tag == 0x82u) {
+            if (descriptor || n != 2u || (bytes[pos] & 0xbfu) != 1u) return false;
+            descriptor = true;
+        } else if (tag == 0x83u) {
+            if (identity || n != 2u || ((uint16_t)bytes[pos] << 8u | bytes[pos + 1u]) != file)
+                return false;
+            identity = true;
+        } else if (tag == 0x80u) {
+            if (length || (n != 1u && n != 2u)) return false;
+            *file_size = n == 1u ? bytes[pos] :
+                (uint16_t)((uint16_t)bytes[pos] << 8u | bytes[pos + 1u]);
+            length = true;
+        }
+        pos += n;
+    }
+    return descriptor && identity && length;
+}
+
+static modem_network_line_t sim_read(const modem_network_sim_query_t *query,
+                                     const char *line, modem_network_sim_reply_t *out) {
+    const char *prefix = query->kind == MODEM_NETWORK_SIM_IMSI ? "#CIMI:" : "+CRSM:";
+    if (!telit_starts_with(line, prefix)) return MODEM_NETWORK_LINE_IGNORE;
+    memset(out, 0, sizeof(*out));
+    telit_csv_view_t fields[3]; size_t count;
+    if (!telit_csv_view_split_limit(line + strlen(prefix), fields, 3u, &count,
+                                    2u * MODEM_NETWORK_SIM_CHUNK))
+        return MODEM_NETWORK_LINE_INVALID;
+    if (query->kind == MODEM_NETWORK_SIM_IMSI) {
+        return count == 1u && telit_view_digits_only(fields[0], 6u, 15u) &&
+            telit_view_copy_exact(out->imsi, sizeof(out->imsi), fields[0])
+            ? MODEM_NETWORK_LINE_VALID : MODEM_NETWORK_LINE_INVALID;
+    }
+    uint32_t sw1, sw2;
+    if (count < 2u || !telit_view_parse_u32(fields[0], 255u, &sw1) ||
+        !telit_view_parse_u32(fields[1], 255u, &sw2)) return MODEM_NETWORK_LINE_INVALID;
+    if ((sw1 == 106u && sw2 == 130u) || (sw1 == 148u && sw2 == 4u)) {
+        out->missing = true;
+        return count == 2u ? MODEM_NETWORK_LINE_VALID : MODEM_NETWORK_LINE_INVALID;
+    }
+    /* 91xx is normal completion with a pending toolkit command, owned by MT. */
+    if (!((sw1 == 144u && sw2 == 0u) || sw1 == 145u || sw1 == 159u) || count != 3u ||
+        fields[2].length == 0u || fields[2].length % 2u != 0u ||
+        fields[2].length / 2u > sizeof(out->data)) return MODEM_NETWORK_LINE_INVALID;
+    out->length = (uint8_t)(fields[2].length / 2u);
+    for (uint8_t i = 0u; i < out->length; i++) {
+        uint64_t value;
+        telit_csv_view_t byte = {.text = fields[2].text + 2u * i, .length = 2u};
+        if (!telit_view_parse_hex_u64(byte, 255u, &value)) return MODEM_NETWORK_LINE_INVALID;
+        out->data[i] = (uint8_t)value;
+    }
+    if (query->kind == MODEM_NETWORK_SIM_INFO) {
+        if (!sim_info(out->data, out->length, sim_file_id(query->file), &out->file_size))
+            return MODEM_NETWORK_LINE_INVALID;
+    } else if (out->length != query->length) return MODEM_NETWORK_LINE_INVALID;
+    return MODEM_NETWORK_LINE_VALID;
+}
+
 const modem_network_backend_t TELIT_NETWORK_BACKEND = {
     .build = build, .identity = identity, .read = read_mode, .scan = scan,
     /* ESC and CR did not abort the WWX scan. Drain the original transaction. */
     .denied = denied, .drain_timeout_ms = 5000u,
+    .sim_build = sim_build, .sim_read = sim_read,
 };

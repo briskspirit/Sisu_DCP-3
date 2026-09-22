@@ -114,6 +114,9 @@ bool tick_network_selection(app_t *app, uint32_t now) {
         app->settings_menu_kind = app->settings_value_parent_kind;
         app->settings_menu_selected = app->settings_value_parent_selected;
         app->route = APP_ROUTE_SETTINGS_MENU;
+    } else if (view.home) {
+        /* ROM 0x28a01c: home-network success has its own dialog record. */
+        open_display_sid(app, 0x1au, 0x18au, "Home\nnetwork\nselected", APP_ROUTE_SETTINGS_VALUE, now);
     } else {
         modem_network_entry_t entry;
         char text[128];

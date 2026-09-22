@@ -1,4 +1,5 @@
 #include "services/modem_network.h"
+#include "services/modem_network_sim.h"
 
 #include <string.h>
 
@@ -26,6 +27,7 @@ bool modem_network_supported(void) {
 
 static void clear_list(void) {
     s_view.count = 0u;
+    s_view.home = false;
     if (++s_view.list_generation == 0u) ++s_view.list_generation;
 }
 
@@ -98,10 +100,13 @@ uint32_t modem_network_request(modem_network_action_t action, uint32_t generatio
     s_view.action = action;
     s_view.result = MODEM_NETWORK_PENDING;
     s_view.busy = true;
+    s_view.home = false;
     s_cancel = s_verifying = s_waiting = false;
     s_reconciling = action == MODEM_NETWORK_REFRESH;
     s_reconcile = false;
     if (s_reconciling) {
+        /* A fresh identity read cannot retain another card's scan metadata. */
+        clear_list();
         s_view.ready = false;
         s_step = MODEM_NETWORK_STEP_IDENTITY;
     }
@@ -145,14 +150,20 @@ bool modem_network_work_pending(void) {
 }
 
 bool modem_network_prepare(char *command, size_t cap, uint32_t *timeout_ms) {
-    if (!modem_network_supported() || s_waiting) return false;
+    if (!modem_network_supported() || s_waiting || command == NULL || cap == 0u ||
+        timeout_ms == NULL) return false;
     if (!s_view.busy && s_reconcile) {
         if (modem_network_request(MODEM_NETWORK_REFRESH, 0u, 0u) == 0u) return false;
         /* Background reconciliation must not impersonate a UI request. */
         s_view.request_id = 0u;
     }
     if (!s_view.busy || s_step == MODEM_NETWORK_STEP_NONE) return false;
-    if (!s_backend->build(s_step, s_target, command, cap, timeout_ms)) {
+    bool built;
+    if (s_step == MODEM_NETWORK_STEP_SIM) {
+        *timeout_ms = 5000u;
+        built = modem_network_sim_prepare(s_backend, command, cap);
+    } else built = s_backend->build(s_step, s_target, command, cap, timeout_ms);
+    if (!built) {
         finish(MODEM_NETWORK_NOT_DONE);
         return false;
     }
@@ -184,6 +195,7 @@ static bool collect(const modem_network_entry_t *entry) {
 
 bool modem_network_line(const char *line) {
     if (!s_waiting || s_cancel) return false;
+    if (s_step == MODEM_NETWORK_STEP_SIM) return modem_network_sim_line(s_backend, line);
     modem_network_line_t result = MODEM_NETWORK_LINE_IGNORE;
     switch (s_step) {
     case MODEM_NETWORK_STEP_IDENTITY:
@@ -245,6 +257,10 @@ void modem_network_final(bool ok, const char *final, bool transport_clean) {
         finish(s_cancel_result);
         return;
     }
+    if (s_step == MODEM_NETWORK_STEP_SIM) {
+        if (!modem_network_sim_final(ok, transport_clean)) finish(MODEM_NETWORK_DONE);
+        return;
+    }
     bool valid = ok && transport_clean && s_seen && !s_invalid;
     if (s_step == MODEM_NETWORK_STEP_AUTO || s_step == MODEM_NETWORK_STEP_MANUAL) {
         s_mutation_ok = ok && transport_clean;
@@ -268,7 +284,12 @@ void modem_network_final(bool ok, const char *final, bool transport_clean) {
         if (!read_saved_selection()) { finish(MODEM_NETWORK_NOT_DONE); return; }
         s_step = MODEM_NETWORK_STEP_READ;
     } else if (s_step == MODEM_NETWORK_STEP_SCAN) {
-        /* The original puts the current network ahead of the other rows. */
+        if (s_view.count != 0u && s_backend->sim_build != NULL && s_backend->sim_read != NULL) {
+            modem_network_sim_begin(s_entries, s_view.count);
+            s_step = MODEM_NETWORK_STEP_SIM;
+            return;
+        }
+        /* Backend without SIM metadata: retain the current-first fallback. */
         for (uint8_t i = 1u; i < s_view.count; i++) {
             if (s_entries[i].availability == 2u) {
                 modem_network_entry_t current = s_entries[i];
@@ -307,6 +328,11 @@ void modem_network_final(bool ok, const char *final, bool transport_clean) {
                 : s_read_mode == MODEM_NETWORK_MANUAL && strcmp(s_target, s_read_plmn) == 0;
             if (s_mutation_ok && matches) {
                 s_view.ready = remember_selection(s_read_mode, s_read_plmn);
+                if (s_view.ready && s_view.action == MODEM_NETWORK_SELECT_MANUAL) {
+                    for (uint8_t i = 0u; i < s_view.count; i++) {
+                        if (strcmp(s_entries[i].plmn, s_read_plmn) == 0) s_view.home = s_entries[i].home;
+                    }
+                }
                 finish(s_view.ready ? MODEM_NETWORK_DONE : MODEM_NETWORK_NOT_DONE);
             } else finish(s_mutation_result);
         }

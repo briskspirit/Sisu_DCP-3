@@ -15,6 +15,11 @@ bool telit_starts_with(const char *text, const char *prefix) {
 
 bool telit_csv_view_split(const char *body, telit_csv_view_t *fields,
                           size_t max_fields, size_t *count_out) {
+    return telit_csv_view_split_limit(body, fields, max_fields, count_out, TELIT_FIELD_CAP - 1u);
+}
+
+bool telit_csv_view_split_limit(const char *body, telit_csv_view_t *fields,
+                                size_t max_fields, size_t *count_out, uint8_t field_limit) {
     if (body == NULL || fields == NULL || max_fields == 0u ||
         count_out == NULL) {
         return false;
@@ -38,7 +43,7 @@ bool telit_csv_view_split(const char *body, telit_csv_view_t *fields,
             start = ++p;
             while (*p != '\0' && *p != '"') {
                 if (*p == '\r' || *p == '\n' ||
-                    length >= TELIT_FIELD_CAP - 1u) {
+                    length >= field_limit) {
                     return false;
                 }
                 length++;
@@ -57,7 +62,7 @@ bool telit_csv_view_split(const char *body, telit_csv_view_t *fields,
         } else {
             while (*p != '\0' && *p != ',') {
                 if (*p == '"' || *p == '\r' || *p == '\n' ||
-                    length >= TELIT_FIELD_CAP - 1u) {
+                    length >= field_limit) {
                     return false;
                 }
                 length++;

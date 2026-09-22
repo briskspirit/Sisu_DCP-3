@@ -684,6 +684,16 @@ static void telit_response(const char *command) {
         mh_rx_push("+CEREG: 2,1,\"00AF\",\"ABCDEF01\",7");
     } else if (strcmp(command, "AT#CCID") == 0) {
         mh_rx_push("#CCID: 89014103211118510720");
+    } else if (strcmp(command, "AT#CIMI") == 0) {
+        mh_rx_push("#CIMI: 310280123456789");
+    } else if (strcmp(command, "AT+CRSM=176,28589,0,0,4") == 0) {
+        mh_rx_push("+CRSM: 144,0,00000003");
+    } else if (strcmp(command, "AT+CRSM=192,28633") == 0) {
+        mh_rx_push("+CRSM: 144,0,620C8202412183026FD980020003");
+    } else if (strcmp(command, "AT+CRSM=176,28633,0,0,3") == 0) {
+        mh_rx_push("+CRSM: 144,0,130014");
+    } else if (strncmp(command, "AT+CRSM=192,", 12u) == 0) {
+        mh_rx_push("+CRSM: 106,130");
     } else if (strcmp(command, "AT+COPS=3,2;+COPS?") == 0) {
         char line[64];
         snprintf(line, sizeof(line), "+COPS: %u,2,\"%s\",7", s_network_mode, s_network_plmn);
@@ -7461,6 +7471,7 @@ static uint32_t hold_network_scan(void) {
     check(network_view().ready && network_view().mode == MODEM_NETWORK_AUTOMATIC,
           "startup reads numeric mode and durably binds it to this SIM");
     check(mh_tx_count_exact("AT+COPS=?") == 0u, "startup never scans for networks");
+    check(mh_tx_count_exact("AT#CIMI") == 0u, "startup does not read optional SIM network lists");
     s_hold_final_command = "AT+COPS=?";
     uint32_t id = modem_service_network_request(MODEM_NETWORK_SCAN, 0, 0);
     check(id != 0u, "manual scan is admitted");
@@ -7473,16 +7484,19 @@ static uint32_t hold_network_scan(void) {
 static void test_network_selection(void) {
     uint32_t id = hold_network_scan();
     mh_feed(s_network_scan_response); s_hold_final_command = NULL; mh_feed("OK");
+    mh_advance(100u); mh_advance(100u);
     modem_network_snapshot_t view = network_view();
     check(view.request_id == id && view.result == MODEM_NETWORK_DONE && view.count == 2u,
           "scan publishes complete generation-qualified list");
     modem_network_entry_t entry;
     check(modem_service_get_network_entry(view.list_generation, 0, &entry) &&
-          strcmp(entry.name, "AT&T") == 0, "list resolves network PLMN through our database");
+          strcmp(entry.name, "AT&T") == 0 && entry.home,
+          "list resolves name through our database and home identity through SIM EHPLMN");
     id = modem_service_network_request(MODEM_NETWORK_SELECT_MANUAL, view.list_generation, 0);
     mh_advance(100u); mh_advance(100u);
     check(id && network_view().result == MODEM_NETWORK_DONE && network_view().mode == MODEM_NETWORK_MANUAL &&
-          mh_tx_count_exact("AT+COPS=1,2,\"310410\"") == 1u, "manual selection verifies numeric readback");
+          network_view().home && mh_tx_count_exact("AT+COPS=1,2,\"310410\"") == 1u,
+          "manual selection verifies numeric readback before publishing home success");
     check(strstr(s_mh_network_owner, ":310410") != NULL,
           "verified manual selection persists its PLMN with SIM ownership");
     s_network_mode = 0u;
@@ -7552,8 +7566,27 @@ static void test_network_selection(void) {
     check(mh_status().sms_received_count == received + 1u && network_view().busy,
           "direct SMS reception remains active while the scan owns the AT channel");
     s_hold_final_command = NULL; mh_feed(s_network_scan_response); mh_feed("OK");
+    mh_advance(100u); mh_advance(100u);
     check(network_view().result == MODEM_NETWORK_DONE,
           "interleaved direct SMS does not corrupt scan response parsing");
+
+    for (unsigned scenario = 0u; scenario < 3u; scenario++) {
+        id = hold_network_scan();
+        s_hold_final_command = "AT+CRSM=176,28633,0,0,3";
+        mh_feed(s_network_scan_response); mh_feed("OK"); mh_advance(100u); mh_advance(100u);
+        check(network_view().busy && mh_tx_count_exact(s_hold_final_command) == 1u,
+              "optional SIM read owns its final-result channel");
+        if (scenario == 0u) modem_service_network_cancel(id);
+        else if (scenario == 1u) mh_feed("#QSS: 0");
+        else mh_feed("RING");
+        mh_settle();
+        check(network_view().busy && modem_network_cancelled(),
+              "Quit, SIM loss, and calls cancel metadata without releasing its pending final");
+        s_hold_final_command = NULL;
+        mh_feed("+CRSM: 144,0,130014"); mh_feed("OK"); mh_settle();
+        check(!network_view().home && network_view().count == 0u,
+              "cancelled SIM metadata cannot leak a home classification or old list");
+    }
 
     begin_telit(true); check(boot_until_ready(30000u), "deferred network fixture boots");
     settle_dtr_sleep(); s_mh_dtr_wake_works = false;
