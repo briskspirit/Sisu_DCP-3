@@ -144,6 +144,66 @@ For a 1200-1250 mAh pack, the 0.84 mA floor corresponds to an idealized
 59-62 days before accounting for NiMH self-discharge, temperature, aging, and
 capacity variation.
 
+## Retaining The Modem While Off
+
+This is an estimate, not an implemented alternative to P1.7. It was examined
+because [Phone security](phone_security.md#startup-delay) waits for the modem
+to provide a verified SIM identity at startup.
+
+Telit's LE910Cx Hardware Design Guide, 1VV0301298 Rev.46, Table 20 (pages
+49-50), specifies typical module currents of 19 uA in PSM or supplied-but-off,
+1.8-2.1 mA for ThreadX LTE DRX in `CFUN=5`, and 14 mA in radio-off `CFUN=4`.
+These are module-rail figures, not battery currents or measured Sisu values.
+The older PSM application note quotes 7.7 uA; the estimate below uses the
+newer hardware guide's 19 uA instead. Vendor documents are listed in the
+[Telit ThreadX download zone](https://www.telit.com/le910cx-tx-download-zone/).
+
+For an illustrative 2.65 V battery, 3.8 V modem rail, and assumed 85 percent
+conversion efficiency:
+
+```text
+additional battery mA = modem mA * 3.8 / (2.65 * 0.85)
+total battery mA = 0.84 + additional battery mA + additional rail overhead
+ideal days = 1250 / (total battery mA * 24)
+```
+
+The table omits additional rail overhead, wake/re-registration energy and
+battery self-discharge. It assumes the rest of the board can retain its
+existing 0.84 mA floor; current firmware cannot do this with a live modem.
+
+| Mode | Additional battery current | Total before rail overhead | Drain per day | Ideal 1250 mAh duration |
+|---|---:|---:|---:|---:|
+| Current rail-off design | 0 mA | 0.840 mA | 20.2 mAh | 62.0 days |
+| PSM or supplied-but-off, static floor only | 0.032 mA | 0.872 mA | 20.9 mAh | 59.7 days |
+| Registered `CFUN=5` DRX | 3.04-3.54 mA | 3.88-4.38 mA | 93-105 mAh | 11.9-13.4 days |
+| Radio-off `CFUN=4` | 23.62 mA | 24.46 mA | 587 mAh | 2.1 days |
+
+The TPS63020 itself has a typical 25 uA operating quiescent current
+([TI datasheet/product page](https://www.ti.com/product/TPS63020)); its enabled
+rail, feedback divider and level translators also need a measured budget.
+Efficiency at microamp loads cannot be assumed to match the illustrative
+85 percent above. A lower battery voltage increases the converted current.
+
+PSM is not retained instant resume. Telit's PSM Application Note,
+80502NT11758A Rev.3, pages 9-15, describes network-controlled entry/timers,
+SIM power-down, and boot/camp/TAU on exit. Host-requested wake requires at
+least a five-second ON_OFF_N assertion. Its periodic wake energy is absent
+from the static-floor row. Supplied-but-off likewise still needs startup.
+
+`CFUN=5` retains service, so calls/SMS and network activity can occur while
+the handset appears off. `CFUN=0` is not a documented radio-off microamp
+alternative: it remains responsive to network events, uses RTS rather than
+DTR for host wake, and the hardware guide warns it can consume 300 uA more
+than `CFUN=5`. `CFUN=4` disables RF and deactivates the SIM, so even retaining
+the baseband would not eliminate SIM activation or a carrier-profile change.
+
+Retaining any mode would require new rail ownership, dormant pad/wake policy,
+and recovery after the RP loses RAM in P1.7. Current off entry explicitly
+requires the modem rail off and parks DTR low. The preferred next investigation
+is earlier verified SIM identification and better startup feedback, before
+accepting a permanent off-state power cost. The current rail-off policy is
+unchanged.
+
 ## Known Limits
 
 - A charger attached to an already-full powered-off pack may not create a STAT

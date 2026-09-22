@@ -93,6 +93,29 @@ is not added by this feature and remains a separate qualification task.
 
 Host tests cover five-card eviction, identity invalidation, shared retries,
 timer wrap, reboot lockout, interrupted admission, corrupt records, masked
-rendering and runtime interruption guards. Physical unfamiliar-SIM behavior
-and startup rendering still require comparison on the handset; host coverage
-does not substitute for that bench check.
+rendering and runtime interruption guards. Live keypad checks covered wrong
+and correct codes, On/Off changes, and a same-SIM restart with security On.
+The unfamiliar-SIM startup challenge also passed with a Verizon SIM.
+These checks do not replace a side-by-side original-handset rendering check
+or a physical five-card eviction and interrupted-write test.
+
+## Startup Delay
+
+With security On, the screen after the boot animation remains almost empty
+until a fresh SIM identity is available. The Verizon SIM-change bench check
+showed a wait approaching one minute. This is an observed limitation, not
+a fixed security timeout or a guarantee for every boot.
+
+The identity query currently belongs to network reconciliation in the modem's
+READY scheduler, after initialization and provisioning. A carrier change can
+also require the modem's automatic profile switch/restart and settings repair.
+Security itself does not request a profile switch or wait for network
+registration, but its current identity source makes those startup stages
+visible as a UI delay. Same-carrier boots need not repeat a profile switch.
+
+Possible follow-up work is to obtain a clean, current-session ICCID earlier
+when the SIM is available, and provide original-style feedback during the
+remaining wait. SIM refresh or modem restart must still invalidate that
+identity; trusting yesterday's SIM to bypass the wait is not acceptable.
+Neither improvement is implemented yet. Keeping the modem powered while the
+handset is off has a separate [power cost](power_off_design.md#retaining-the-modem-while-off).
