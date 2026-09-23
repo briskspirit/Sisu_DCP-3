@@ -109,6 +109,7 @@ static modem_service_test_snapshot_t service_probe(void);
 /* Exact command whose final is withheld (MH_FINAL_NONE) so a test can observe
  * the service with that command still on the wire. */
 static const char *s_hold_final_command;
+static bool s_sdn_available;
 static bool s_sms_inject_crossed_urcs;
 static uint8_t s_sms_delete_command_count;
 static modem_message_waiting_status_t s_message_waiting;
@@ -692,6 +693,8 @@ static void telit_response(const char *command) {
         mh_rx_push("+CRSM: 144,0,620C8202412183026FD980020003");
     } else if (strcmp(command, "AT+CRSM=176,28633,0,0,3") == 0) {
         mh_rx_push("+CRSM: 144,0,130014");
+    } else if (s_sdn_available && strcmp(command, "AT+CRSM=192,28489") == 0) {
+        mh_rx_push("+CRSM: 144,0,62128205422100160183026F49800200168A0105");
     } else if (strncmp(command, "AT+CRSM=192,", 12u) == 0) {
         mh_rx_push("+CRSM: 106,130");
     } else if (strcmp(command, "AT+COPS=3,2;+COPS?") == 0) {
@@ -1297,6 +1300,7 @@ static void begin_telit(bool rxdiv_configured) {
     s_sms_prompt = SMS_PROMPT_NONE;
     s_sms_esc_returns_final = false;
     s_hold_final_command = NULL;
+    s_sdn_available = false;
     s_sms_fail_cmgf_text_when_ready = false;
     s_sms_cmgf_text_error_budget = 0u;
     s_sms_inject_crossed_urcs = false;
@@ -7598,7 +7602,96 @@ static void test_network_selection(void) {
           "SIM loss cancels a wake-deferred selection before it reaches UART");
 }
 
+static sim_numbers_snapshot_t numbers_view(void) {
+    sim_numbers_snapshot_t out; modem_service_sim_numbers_snapshot(&out); return out;
+}
+
+static uint32_t hold_sim_numbers(void) {
+    begin_telit(true);
+    check(boot_until_ready(30000u), "SIM list fixture boots");
+    for (unsigned i = 0u; i < 16u; i++) mh_advance(250u);
+    check(mh_tx_count_exact("AT+CRSM=178,28489,1,4,22") == 0u, "startup probes capabilities without reading number records");
+    unsigned before = mh_tx_count_exact("AT+CRSM=192,28489");
+    s_hold_final_command = "AT+CRSM=192,28489";
+    uint32_t id = modem_service_sim_numbers_request(SIM_NUMBERS_SERVICE);
+    mh_advance(100u); mh_advance(100u);
+    check(id && numbers_view().busy && mh_tx_count_exact(s_hold_final_command) == before + 1u,
+          "explicit service-number request owns a single read-only SIM command");
+    return id;
+}
+
+static void test_sim_number_transport(void) {
+    begin_telit(true); s_sdn_available = true;
+    check(boot_until_ready(30000u), "SIM capability fixture boots");
+    for (unsigned i = 0u; i < 24u; i++) mh_advance(250u);
+    check(modem_service_sim_numbers_available(SIM_NUMBERS_SERVICE) &&
+          !modem_service_sim_numbers_available(SIM_NUMBERS_INFO),
+          "read-only startup probe publishes SDN independently from absent CPHS data");
+    check(mh_tx_count_exact("AT+CRSM=178,28489,1,4,22") == 0u,
+          "capability probe never scans number records");
+    mh_feed("#QSS: 0");
+    check(!modem_service_sim_numbers_available(SIM_NUMBERS_SERVICE), "SIM loss clears menu capabilities");
+    uint32_t id = hold_sim_numbers();
+    s_hold_final_command = "AT+CRSM=178,28489,1,4,22";
+    mh_feed("+CRSM: 144,0,62128205422100160183026F49800200168A0105"); mh_feed("OK");
+    mh_advance(100u); mh_advance(100u);
+    check(numbers_view().busy && mh_tx_count_exact(s_hold_final_command) == 1u,
+          "SDN metadata starts a bounded absolute-record read");
+    uint32_t received = mh_status().sms_received_count;
+    mh_rx_push("+CMT: \"+15551234567\",\"\",\"26/09/21,12:00:00+00\",145,0,0,0,\"\",129,4");
+    mh_rx_push("test"); mh_settle();
+    check(mh_status().sms_received_count == received + 1u && numbers_view().busy,
+          "direct SMS reception remains live during a SIM record read");
+    s_hold_final_command = NULL;
+    mh_feed("+CRSM: 144,0,43617265FFFFFFFF038116F1FFFFFFFFFFFFFFFFFFFF"); mh_feed("OK");
+    mh_settle();
+    sim_number_t entry;
+    check(numbers_view().result == SIM_NUMBERS_DONE && modem_service_sim_number(id, 0, &entry) &&
+          strcmp(entry.number, "611") == 0, "only complete verified SIM list is published");
+    mh_feed("#QSS: 0");
+    check(!modem_service_sim_number(id, 0, &entry), "SIM removal invalidates published service numbers");
+
+    for (unsigned scenario = 0; scenario < 6; scenario++) {
+        id = hold_sim_numbers();
+        if (scenario == 0) modem_service_sim_numbers_cancel(id);
+        else if (scenario == 1) mh_feed("RING");
+        else if (scenario == 2) mh_feed("#QSS: 0");
+        else if (scenario == 3) modem_service_power_off();
+        else if (scenario == 4) mh_advance(3001u);
+        else check(modem_service_request_dial("15551234567"), "outgoing call queues during SIM read");
+        mh_settle();
+        check(numbers_view().busy, "cancel/call/SIM loss/shutdown/timeout retains pending CRSM final");
+        check(mh_tx_count_exact("AT+CLCC") == 0u && mh_tx_count_exact("AT+CLIR=0;D15551234567;") == 0u &&
+              mh_tx_count_exact(g_modem_vendor.power.off_cmd) == 0u,
+              "no call/shutdown command crosses a pending SIM response");
+        s_hold_final_command = NULL; mh_feed("+CRSM: 106,130"); mh_feed("OK"); mh_settle();
+        check(!numbers_view().busy && !numbers_view().count,
+              "cancelled SIM read discards late data and releases channel");
+        if (scenario == 4) check(numbers_view().result == SIM_NUMBERS_ERROR,
+                                 "SIM command timeout is a failure, not user cancellation");
+        if (scenario == 1) check(mh_tx_count_exact("AT+CLCC") != 0u,
+                                 "incoming-call reconciliation resumes after the SIM final");
+        if (scenario == 5) check(mh_tx_count_exact("AT+CLIR=0;D15551234567;") == 1u,
+                                 "outgoing call dispatches only after the SIM final");
+    }
+    (void)hold_sim_numbers(); mh_advance(3001u); mh_advance(5001u);
+    check(!mh_status().at_ready, "unreleased SIM channel fails closed");
+    (void)hold_sim_numbers(); s_mh_rx_line_errors++;
+    s_hold_final_command = NULL; mh_feed("+CRSM: 106,130"); mh_feed("OK"); mh_settle();
+    check(numbers_view().result == SIM_NUMBERS_ERROR, "SIM read rejects transport discontinuity");
+
+    begin_telit(true); check(boot_until_ready(30000u), "deferred SIM list fixture boots");
+    settle_dtr_sleep(); s_mh_dtr_wake_works = false;
+    unsigned before = mh_tx_count_exact("AT+CRSM=192,28489");
+    id = modem_service_sim_numbers_request(SIM_NUMBERS_SERVICE); mh_settle();
+    check(id && service_probe().deferred_command_valid, "SIM read waits for CTS before dispatch");
+    mh_feed("#QSS: 0"); s_mh_cts_asserted = true; mh_settle();
+    check(!numbers_view().busy && mh_tx_count_exact("AT+CRSM=192,28489") == before,
+          "SIM loss cancels a wake-deferred list read before UART");
+}
+
 int main(void) {
+    test_sim_number_transport();
     test_network_selection();
     test_call_waiting_network_requests();
     test_delivery_report_routing();

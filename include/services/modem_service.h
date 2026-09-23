@@ -11,6 +11,7 @@
 #include "services/modem_diag.h"
 #include "services/modem_maintenance.h"
 #include "services/modem_network.h"
+#include "services/sim_numbers.h"
 #include "services/modem_signal.h"
 #include "services/sms_types.h"
 
@@ -315,6 +316,12 @@ uint32_t modem_service_network_request(modem_network_action_t action,
                                        uint32_t generation, uint8_t index);
 void modem_service_network_cancel(uint32_t request_id);
 void modem_service_network_settings_reset(void);
+uint32_t modem_service_sim_numbers_request(sim_numbers_kind_t kind);
+void modem_service_sim_numbers_cancel(uint32_t id);
+void modem_service_sim_numbers_snapshot(sim_numbers_snapshot_t *out);
+bool modem_service_sim_number(uint32_t id, uint8_t index, sim_number_t *out);
+bool modem_service_sim_numbers_home(void);
+bool modem_service_sim_numbers_available(sim_numbers_kind_t kind);
 /* RevB2/Telit Net Monitor v2 diagnostics. Selecting a group replaces the
  * previous subscription generation; duplicate requests coalesce while queued
  * or active. The service yields after every AT command and never polls while a

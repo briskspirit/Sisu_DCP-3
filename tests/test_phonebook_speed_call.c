@@ -41,6 +41,7 @@ static modem_status_t s_modem_status;
 static unsigned s_phonebook_list_requests;
 static modem_sms_send_result_t s_send_result;
 static bool s_send_ready;
+bool modem_service_sim_numbers_available(sim_numbers_kind_t kind) { (void)kind; return false; }
 
 bool modem_service_pop_sms_send_result(uint32_t id, modem_sms_send_result_t *out) {
     if (!s_send_ready || id != s_send_result.request_id) return false;

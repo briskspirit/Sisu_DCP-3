@@ -89,7 +89,7 @@ void ui_format_named(char *dst, size_t cap, const char *tmpl, const char *value)
         value = "";
     }
     for (const char *p = tmpl; *p != '\0' && di + 1u < cap;) {
-        if (p[0] == '%' && p[1] == 'U') {
+        if (p[0] == '%' && (p[1] == 'U' || p[1] == 'S')) {
             for (const char *q = value; *q != '\0' && di + 1u < cap; q++) {
                 dst[di++] = *q;
             }

@@ -40,6 +40,7 @@ bool poll_battery(app_t *app, uint32_t now) { (void)app; (void)now; battery_poll
 bool tick_display_message(app_t *app, uint32_t now) { (void)app; (void)now; return false; }
 #define ORDINARY(name) bool name(app_t *app, uint32_t now) { (void)app; (void)now; ordinary_polls++; return false; }
 ORDINARY(tick_network_selection)
+ORDINARY(tick_sim_numbers)
 ORDINARY(tick_contact_service)
 ORDINARY(menu_shortcuts_tick)
 ORDINARY(tick_powerup)

@@ -72,6 +72,8 @@ typedef enum {
 
 extern const modem_init_step_t TELIT_INIT_STEPS[];
 extern const modem_network_backend_t TELIT_NETWORK_BACKEND;
+extern const sim_numbers_backend_t TELIT_SIM_NUMBERS_BACKEND;
+bool telit_sim_alpha(const uint8_t *data, size_t length, char *out, size_t cap);
 extern const modem_provision_step_t TELIT_PROVISION_STEPS[];
 
 bool telit_starts_with(const char *text, const char *prefix);

@@ -53,6 +53,8 @@ claim is the current best understanding, not a measured fact.
   retries, startup gating, and durable call-list clearing.
 - [Network selection](network_selection.md): live Automatic/Manual selection,
   SIM ownership, native lists, and bounded command cancellation.
+- [SIM number lists](sim_number_lists.md): Service Nos., CPHS Info numbers,
+  original visibility gates, read-only loading, and qualification limits.
 - [Numeric menu shortcuts](menu_shortcuts.md): original timing and numbering,
   app-owned actions, editor handoffs, and regression coverage.
 - [Business cards](business_cards.md): native Send entry, received-card menus,

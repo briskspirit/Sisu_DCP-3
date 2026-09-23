@@ -33,6 +33,7 @@ MODEM_SERVICE_SOURCES=(
     src/services/modem_supplementary_state.c
     src/services/modem_network.c
     src/services/modem_network_sim.c
+    src/services/sim_numbers.c
     src/services/sms_deliver_codec.c
     src/services/sms_identity.c
     src/services/sms_picture_codec.c
@@ -44,6 +45,7 @@ MODEM_TELIT_VENDOR_SOURCES=(
     src/services/modem_vendor_telit.c
     src/services/modem_vendor_telit_call.c
     src/services/modem_vendor_telit_network.c
+    src/services/modem_vendor_telit_sim_numbers.c
     src/services/modem_vendor_telit_diag.c
     src/services/modem_vendor_telit_maintenance.c
     src/services/modem_vendor_telit_parse.c
@@ -382,7 +384,7 @@ check_modem_service_source_membership() {
     expected="$(printf '%s\n' "${MODEM_SERVICE_SOURCES[@]}" |
         LC_ALL=C sort)"
     actual="$(find src/services -maxdepth 1 \
-        \( -name 'modem_*.c' -o -name 'sms_*.c' -o -name 'operator_name_db.c' \) \
+        \( -name 'modem_*.c' -o -name 'sms_*.c' -o -name 'operator_name_db.c' -o -name 'sim_numbers.c' \) \
         ! -name 'modem_vendor_*.c' -print | LC_ALL=C sort)"
     if [ "$actual" != "$expected" ]; then
         echo "FAIL: $name (shared modem-service source membership drifted)"
@@ -848,7 +850,9 @@ run test_call_forward_mmi    src/services/call_forward_mmi.c
 run test_call_divert_app     src/apps/call_divert_app.c src/services/call_forward_mmi.c "${DEAD_CODE_FLAGS[@]}"
 run test_call_waiting_app    src/apps/call_waiting_app.c
 run_telit test_modem_network src/services/modem_network.c src/services/modem_network_sim.c src/services/modem_vendor_telit_network.c src/services/modem_vendor_telit_parse.c
+run_telit test_sim_numbers src/services/sim_numbers.c src/services/modem_vendor_telit_sim_numbers.c src/services/modem_vendor_telit_operator.c src/services/modem_vendor_telit_parse.c
 run test_network_selection_app src/apps/network_selection_app.c src/ui/ui.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c src/services/strings.c "$GENERATED_SRC_DIR/assets_data.c" "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
+run test_sim_numbers_app src/apps/sim_numbers_app.c src/ui/ui.c src/ui/text_layout.c src/ui/assets.c src/ui/framebuffer.c src/services/strings.c "$GENERATED_SRC_DIR/assets_data.c" "$GENERATED_SRC_DIR/strings_data.c" "${DEAD_CODE_FLAGS[@]}"
 run test_call_options_logic  src/apps/call_options_logic.c
 run test_call_newcall_preserve src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # New-call snapshot/restore; whole app compiled, unreachable code stripped
 run test_call_waiting_handoff src/apps/calls_app.c "${DEAD_CODE_FLAGS[@]}"  # generation-qualified remote-release handoff

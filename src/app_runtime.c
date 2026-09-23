@@ -5,6 +5,7 @@
 #include "apps/call_divert_app.h"
 #include "apps/call_waiting_app.h"
 #include "apps/network_selection_app.h"
+#include "apps/sim_numbers_app.h"
 #include "apps/calls_app.h"
 #include "apps/clock_app.h"
 #include "apps/dialogs_app.h"
@@ -70,6 +71,7 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
         /* No alarm, incoming-call, SMS or clock editor can escape this state.
          * Battery protection and the ordinary power-off path remain live. */
         changed |= tick_network_selection(app, now_ms);
+        changed |= tick_sim_numbers(app, now_ms);
         changed |= tick_power_off(app, now_ms);
         changed |= tick_contact_service(app, now_ms);
         changed |= poll_battery(app, now_ms);
@@ -144,6 +146,7 @@ bool app_runtime_tick(app_t *app, uint32_t now_ms) {
     }
     changed |= tick_call_waiting(app, now_ms);
     changed |= tick_network_selection(app, now_ms);
+    changed |= tick_sim_numbers(app, now_ms);
     if (tick_service_codes(app, now_ms)) {
         changed = true;
     }

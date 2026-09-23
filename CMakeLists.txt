@@ -107,6 +107,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/apps/call_divert_app.c
     src/apps/call_waiting_app.c
     src/apps/network_selection_app.c
+    src/apps/sim_numbers_app.c
     src/apps/call_register_app.c
     src/apps/call_options_logic.c
     src/apps/calls_app.c
@@ -211,6 +212,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/modem_supplementary_state.c
     src/services/modem_network.c
     src/services/modem_network_sim.c
+    src/services/sim_numbers.c
     src/services/modem_service.c
     src/services/operator_name_db.c
     src/services/modem_call_model.c
@@ -219,6 +221,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/services/modem_vendor_telit.c
     src/services/modem_vendor_telit_call.c
     src/services/modem_vendor_telit_network.c
+    src/services/modem_vendor_telit_sim_numbers.c
     src/services/modem_vendor_telit_diag.c
     src/services/modem_vendor_telit_maintenance.c
     src/services/modem_vendor_telit_parse.c

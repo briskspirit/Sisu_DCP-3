@@ -8,6 +8,7 @@
 #include "apps/call_divert_app.h"
 #include "apps/call_waiting_app.h"
 #include "apps/network_selection_app.h"
+#include "apps/sim_numbers_app.h"
 #include "apps/calls_app.h"
 #include "apps/messages_app.h"
 #include "apps/phonebook_app.h"
@@ -160,7 +161,8 @@ bool handle_display_message_key(app_t *app, uint16_t key, uint32_t now) {
         }
         return true;
     }
-    if (handle_network_selection_display_key(app, key, now) ||
+    if (handle_sim_numbers_display_key(app, key, now) ||
+        handle_network_selection_display_key(app, key, now) ||
         handle_call_waiting_display_key(app, key, now) ||
         handle_call_divert_display_key(app, key, now)) {
         return true;

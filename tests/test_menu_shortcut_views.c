@@ -11,10 +11,13 @@
 #include "apps/profiles_app.h"
 #include "apps/tones_app.h"
 #include "services/feature_gates.h"
+#include "services/sim_numbers.h"
 
 static int failures;
 static bool headset, own_tone[2];
 static uint8_t time_set = 1u;
+static bool sim_numbers[2];
+bool modem_service_sim_numbers_available(sim_numbers_kind_t kind) { return sim_numbers[kind]; }
 store_status_t store_setting_get_u8(store_setting_key_t key, uint8_t *value) {
     if (key != STORE_SETTING_CLOCK_TIME_SET) return STORE_STATUS_INVALID_ARGUMENT;
     *value = time_set;
@@ -56,6 +59,19 @@ int main(void) {
     check(view.count == 10u && (view.hidden_mask & 0x202u) == 0x202u &&
           view.selected == &app.phonebook_menu_selected && (view.deferred_mask & 1u),
           "phonebook gates and deferred Search match the original table");
+    feature_gate_set_visible(FEATURE_GATE_PHONEBOOK_SERVICE_NOS, true);
+    feature_gate_set_visible(FEATURE_GATE_PHONEBOOK_INFO_NUMBERS, true);
+    view = get(phonebook_shortcut_view, &app);
+    check((view.hidden_mask & 0x202u) == 0x202u, "SIM-absent rows stay hidden despite product gates");
+    sim_numbers[SIM_NUMBERS_SERVICE] = true;
+    view = get(phonebook_shortcut_view, &app);
+    check((view.hidden_mask & 0x202u) == 0x200u, "service availability does not expose Info numbers");
+    sim_numbers[SIM_NUMBERS_INFO] = true;
+    view = get(phonebook_shortcut_view, &app);
+    check((view.hidden_mask & 0x202u) == 0u && view.count == 10u, "available SIM rows keep raw ordinals");
+    sim_numbers[SIM_NUMBERS_SERVICE] = sim_numbers[SIM_NUMBERS_INFO] = false;
+    view = get(phonebook_shortcut_view, &app);
+    check((view.hidden_mask & 0x202u) == 0x202u, "SIM removal immediately hides both shortcut targets");
     app.phonebook_menu_kind = PHONEBOOK_MENU_ERASE;
     view = get(phonebook_shortcut_view, &app);
     check(view.count == 2u && view.deferred_mask == 3u, "both erase handoffs are deferred");

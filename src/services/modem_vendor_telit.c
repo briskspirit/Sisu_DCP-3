@@ -193,6 +193,7 @@ const modem_vendor_t g_modem_vendor = {
         .parse_message_waiting_row = telit_parse_message_waiting_row,
     },
     .network = &TELIT_NETWORK_BACKEND,
+    .sim_numbers = &TELIT_SIM_NUMBERS_BACKEND,
     .signal_query = {
         .query_cmd = "AT#RFSTS",
         .response_prefix = "#RFSTS:",

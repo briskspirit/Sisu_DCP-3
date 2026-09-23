@@ -1,5 +1,6 @@
 #include "services/phonebook_service.h"
 #include "apps/phonebook_app.h"
+#include "apps/sim_numbers_app.h"
 #include "services/phone_security.h"
 #include "apps/menu_shortcuts.h"
 #include "ui/menu_visible.h"
@@ -390,10 +391,7 @@ bool handle_phonebook_menu_key(app_t *app, uint16_t key, uint32_t now) {
             open_editor(app, ts_or(0x283u, "Name:"), "", 16u, EDITOR_KIND_TEXT, EDITOR_CONTEXT_PHONEBOOK_SEARCH, false, now);
             return true;
         case 1:
-            /* SET.5: Service Nos. never uses the plural "No phone numbers";
-             * with no SIM list backend the failure branch shows "Not
-             * allowed" (SID 0x020d). */
-            open_display_sid(app, 0u, 0x20du, "Not\nallowed", APP_ROUTE_PHONEBOOK_MENU, now);
+            open_sim_numbers(app, SIM_NUMBERS_SERVICE, now);
             return true;
         case 2:
             app->editor_draft_name[0] = '\0';
@@ -419,8 +417,7 @@ bool handle_phonebook_menu_key(app_t *app, uint16_t key, uint32_t now) {
             open_phonebook_speed_dials(app);
             return true;
         default:
-            /* SET.5: Info numbers — same "Not allowed" failure branch. */
-            open_display_sid(app, 0u, 0x20du, "Not\nallowed", APP_ROUTE_PHONEBOOK_MENU, now);
+            open_sim_numbers(app, SIM_NUMBERS_INFO, now);
             return true;
         }
     }
@@ -1479,10 +1476,12 @@ static bool phonebook_root_item_visible(uint8_t raw) {
         return false;
     }
     if (raw == 1u) {
-        return feature_gate_visible(FEATURE_GATE_PHONEBOOK_SERVICE_NOS);
+        return feature_gate_visible(FEATURE_GATE_PHONEBOOK_SERVICE_NOS) &&
+            modem_service_sim_numbers_available(SIM_NUMBERS_SERVICE);
     }
     if (raw == 9u) {
-        return feature_gate_visible(FEATURE_GATE_PHONEBOOK_INFO_NUMBERS);
+        return feature_gate_visible(FEATURE_GATE_PHONEBOOK_INFO_NUMBERS) &&
+            modem_service_sim_numbers_available(SIM_NUMBERS_INFO);
     }
     return true;
 }

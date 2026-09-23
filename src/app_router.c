@@ -22,6 +22,7 @@
 #include "apps/rotation_app.h"
 #include "apps/settings_app.h"
 #include "apps/network_selection_app.h"
+#include "apps/sim_numbers_app.h"
 #include "apps/service_codes_app.h"
 #include "apps/snake_app.h"
 #include "apps/standby_app.h"
@@ -107,6 +108,8 @@ static bool dispatch_event(app_t *app, const input_event_t *event) {
         return handle_phonebook_menu_key(app, key, now);
     case APP_ROUTE_PHONEBOOK_LIST:
         return handle_phonebook_list_key(app, key, now);
+    case APP_ROUTE_SIM_NUMBERS:
+        return handle_sim_numbers_key(app, key, now);
     case APP_ROUTE_PHONEBOOK_MEMORY:
         if (key == KEY_C || key == KEY_NAVI) {
             open_phonebook_menu(app, PHONEBOOK_MENU_OPTIONS, 1u);
@@ -331,6 +334,9 @@ void app_router_render(const app_t *app, framebuffer_t *fb) {
         break;
     case APP_ROUTE_PHONEBOOK_LIST:
         render_phonebook_list(app, fb);
+        break;
+    case APP_ROUTE_SIM_NUMBERS:
+        render_sim_numbers(app, fb);
         break;
     case APP_ROUTE_PHONEBOOK_MEMORY:
         render_phonebook_memory(app, fb);

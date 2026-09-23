@@ -14,6 +14,9 @@
 bool handle_network_selection_display_key(app_t *app, uint16_t key, uint32_t now) {
     (void)app; (void)key; (void)now; return false;
 }
+bool handle_sim_numbers_display_key(app_t *app, uint16_t key, uint32_t now) {
+    (void)app; (void)key; (void)now; return false;
+}
 bool handle_call_waiting_display_key(app_t *app, uint16_t key, uint32_t now) {
     (void)app; (void)key; (void)now; return false;
 }

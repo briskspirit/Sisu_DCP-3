@@ -551,6 +551,8 @@ static void test_format_named(void) {
     /* Every token is substituted, position-agnostic. */
     ui_format_named(buf, sizeof(buf), "a %U b %U c", "X");
     assert_true(strcmp(buf, "a X b X c") == 0, "double token substitution");
+    ui_format_named(buf, sizeof(buf), "Premium %S", "123");
+    assert_true(strcmp(buf, "Premium 123") == 0, "CPHS premium number uses the ROM string token");
     ui_format_named(buf, sizeof(buf), "no token", "X");
     assert_true(strcmp(buf, "no token") == 0, "token-free template copies verbatim");
     /* Truncation stays bounded and NUL-terminated, mid-value included. */

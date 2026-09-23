@@ -155,6 +155,8 @@ typedef enum {
     MODEM_AT_SMS_RECOVERY_DRAIN,
     MODEM_AT_NETWORK,
     MODEM_AT_NETWORK_DRAIN,
+    MODEM_AT_SIM_NUMBERS,
+    MODEM_AT_SIM_NUMBERS_DRAIN,
 } modem_at_kind_t;
 
 static modem_sms_recovery_t s_sms_recovery;
@@ -188,6 +190,7 @@ typedef enum {
     MODEM_OP_SEND_BINARY_SMS,
     MODEM_OP_DEBUG_AT,
     MODEM_OP_NETWORK,
+    MODEM_OP_SIM_NUMBERS,
 } modem_operation_t;
 
 typedef enum {
@@ -414,6 +417,10 @@ static bool network_read_owner(char *out, size_t cap);
 static bool network_save_owner(const char *identity);
 static bool network_start_next(uint32_t now_ms);
 static void network_cancel_tick(uint32_t now_ms);
+static bool sim_numbers_start_next(uint32_t now_ms);
+static void sim_numbers_guard_tick(uint32_t now_ms);
+static void sim_numbers_drain(uint32_t now_ms, bool timed_out);
+static bool sim_numbers_dispatch_allowed(void);
 static void network_drain(uint32_t now_ms, bool timed_out);
 static bool network_dispatch_allowed(void);
 static bool call_forward_request_valid(const call_forward_request_t *request,
@@ -498,6 +505,7 @@ static modem_state_t s_state;
 static modem_at_kind_t s_active_kind;
 static modem_operation_t s_operation;
 static uint32_t s_network_sim_generation, s_network_transport_counter;
+static uint32_t s_numbers_sim_generation, s_numbers_transport_counter, s_numbers_deadline_ms;
 static bool s_active;
 static uint32_t s_now_ms;
 static uint32_t s_command_deadline_ms;
@@ -1156,6 +1164,7 @@ void modem_service_init(void) {
         .read_owner = network_read_owner, .save_owner = network_save_owner,
     };
     modem_network_init(g_modem_vendor.network, &network_hooks);
+    sim_numbers_init(g_modem_vendor.sim_numbers);
     s_network_sim_generation = s_network_transport_counter = 0u;
     s_maintenance_sim_guard_deadline_ms = 0u;
     s_maintenance_sim_deferred = MODEM_SIM_OBSERVATION_NONE;
@@ -1253,6 +1262,7 @@ void modem_service_tick(uint32_t now_ms) {
     drain_rx();
     sim_maintenance_guard_tick(now_ms);
     network_cancel_tick(now_ms);
+    sim_numbers_guard_tick(now_ms);
     process_timeout(now_ms);
     direct_body_deadline_tick(now_ms);
     call_model_tick(&s_call_model);
@@ -1285,7 +1295,7 @@ bool modem_service_transport_sleep_confirmed(void) {
         return false;
     }
     if (modem_maintenance_blocks_sleep() ||
-        (status_sim_ready_snapshot() && modem_network_work_pending())) {
+        (status_sim_ready_snapshot() && (modem_network_work_pending() || sim_numbers_pending()))) {
         return false;
     }
     if (sms_wake_required() && status_sim_ready_snapshot() &&
@@ -1824,6 +1834,93 @@ static void network_cancel_tick(uint32_t now_ms) {
         call_model_background_work_blocked(&s_call_model) ||
         call_model_session_active(&s_call_model) || model_call_request_waiting(NULL))
         network_drain(now_ms, false);
+}
+
+static uint32_t sim_numbers_begin(sim_numbers_kind_t kind, bool probe) {
+    if (!g_modem_vendor.available || s_state != MODEM_STATE_READY ||
+        !status_sim_ready_snapshot() || s_power_off_pending ||
+        s_operation != MODEM_OP_NONE || !call_session_idle_snapshot() ||
+        call_model_background_work_blocked(&s_call_model) ||
+        model_call_request_waiting(NULL) || modem_network_work_pending() ||
+        modem_maintenance_has_sequence() || modem_maintenance_blocks_other_work()) return 0u;
+    uint32_t id = probe ? sim_numbers_probe(kind) : sim_numbers_request(kind);
+    if (id != 0u) {
+        s_numbers_sim_generation = s_sim_session_generation;
+        s_numbers_deadline_ms = s_now_ms + 120000u;
+    }
+    return id;
+}
+uint32_t modem_service_sim_numbers_request(sim_numbers_kind_t kind) {
+    return sim_numbers_begin(kind, false);
+}
+bool modem_service_sim_numbers_available(sim_numbers_kind_t kind) {
+    return status_sim_ready_snapshot() && s_numbers_sim_generation == s_sim_session_generation &&
+        sim_numbers_available(kind);
+}
+void modem_service_sim_numbers_cancel(uint32_t id) { sim_numbers_cancel(id); }
+void modem_service_sim_numbers_snapshot(sim_numbers_snapshot_t *out) { sim_numbers_snapshot(out); }
+bool modem_service_sim_number(uint32_t id, uint8_t index, sim_number_t *out) {
+    return status_sim_ready_snapshot() && s_numbers_sim_generation == s_sim_session_generation &&
+        sim_numbers_entry(id, index, out);
+}
+bool modem_service_sim_numbers_home(void) {
+    critical_section_enter_blocking(&s_status_lock);
+    bool home = s_status.sim_ready && s_status.network_registered && s_status.cereg == 1u;
+    critical_section_exit(&s_status_lock);
+    return home;
+}
+static bool sim_numbers_dispatch_allowed(void) {
+    return s_state == MODEM_STATE_READY && status_sim_ready_snapshot() &&
+        s_numbers_sim_generation == s_sim_session_generation && !s_power_off_pending &&
+        !sim_numbers_cancelled() && !call_model_background_work_blocked(&s_call_model) &&
+        !call_model_session_active(&s_call_model) && !model_call_request_waiting(NULL) &&
+        !modem_network_work_pending() && !modem_maintenance_has_sequence() &&
+        !modem_maintenance_blocks_other_work();
+}
+static bool sim_numbers_start_next(uint32_t now_ms) {
+    if (!sim_numbers_pending() || !sim_numbers_dispatch_allowed() || s_operation != MODEM_OP_NONE ||
+        s_active || s_deferred_valid) return false;
+    char command[64];
+    if (!sim_numbers_prepare(command, sizeof(command))) return false;
+    s_numbers_transport_counter = model_transport_counter();
+    s_operation = MODEM_OP_SIM_NUMBERS;
+    set_operation_busy(true);
+    send_command(MODEM_AT_SIM_NUMBERS, command, 3000u, now_ms);
+    return true;
+}
+static bool sim_numbers_start_probe(uint32_t now_ms) {
+    for (sim_numbers_kind_t kind = SIM_NUMBERS_SERVICE; kind <= SIM_NUMBERS_INFO; kind++) {
+        if (sim_numbers_probe_needed(kind)) {
+            if (sim_numbers_begin(kind, true) == 0u) return false;
+            return sim_numbers_start_next(now_ms);
+        }
+    }
+    return false;
+}
+static void sim_numbers_drain(uint32_t now_ms, bool timed_out) {
+    sim_numbers_snapshot_t view;
+    sim_numbers_snapshot(&view);
+    if (timed_out) sim_numbers_timeout();
+    else sim_numbers_cancel(view.request_id);
+    if (s_deferred_valid && s_deferred_kind == MODEM_AT_SIM_NUMBERS) {
+        s_deferred_valid = false;
+        sim_numbers_final(false, false);
+        s_operation = MODEM_OP_NONE;
+        set_operation_busy(false);
+    } else if (s_active && s_active_kind == MODEM_AT_SIM_NUMBERS) {
+        /* CRSM cannot be aborted. Keep the final-result owner after C/call/SIM
+         * cancellation, and never send the next operation into its response. */
+        if (timed_out) s_command_deadline_ms = now_ms + 5000u;
+        s_active_kind = MODEM_AT_SIM_NUMBERS_DRAIN;
+    }
+}
+static void sim_numbers_guard_tick(uint32_t now_ms) {
+    sim_numbers_snapshot_t view;
+    sim_numbers_snapshot(&view);
+    if (!view.busy) return;
+    if (time_diff_ms(now_ms, s_numbers_deadline_ms) >= 0) sim_numbers_timeout();
+    if (!sim_numbers_dispatch_allowed())
+        sim_numbers_drain(now_ms, false);
 }
 
 /* Guarded Net Monitor maintenance. */
@@ -3477,6 +3574,15 @@ static void process_timeout(uint32_t now_ms) {
     modem_at_kind_t kind = s_active_kind;
     uint32_t call_token = s_active_call_token;
     bool sms_wake_arm_command = s_active_sms_wake_arm;
+    if (kind == MODEM_AT_SIM_NUMBERS) {
+        sim_numbers_drain(now_ms, true);
+        return;
+    }
+    if (kind == MODEM_AT_SIM_NUMBERS_DRAIN) {
+        sim_numbers_final(false, false);
+        modem_fail_power_state("SIM read did not release AT channel", true);
+        return;
+    }
     if (kind == MODEM_AT_NETWORK) {
         network_drain(now_ms, true);
         return;
@@ -4058,6 +4164,8 @@ static void advance_state(uint32_t now_ms) {
             s_next_action_ms = now_ms + 50u;
         } else if (network_start_next(now_ms)) {
             /* Only explicit user scans; startup just reconciles SIM ownership. */
+        } else if (sim_numbers_start_next(now_ms)) {
+            /* On-demand SIM lists yield between records to calls and SMS. */
         } else if (sms_recovery_start(now_ms)) {
             /* One bounded record operation, yielding to every call/request. */
         } else if (sim_provider_start_query(now_ms)) {
@@ -4082,8 +4190,11 @@ static void advance_state(uint32_t now_ms) {
         } else if (sms_mode_restore_start(now_ms)) {
             /* Repair outgoing parameters after a cancelled SMS operation. */
         } else if (supplementary_start_background(now_ms)) {
-            /* Lowest-priority background work: voicemail number, message
+            /* Background work: voicemail number, message
              * waiting, then local call-forwarding flags. */
+        } else if (sim_numbers_start_probe(now_ms)) {
+            /* Optional SIM menu capabilities, after ordinary startup work.
+             * No number-record scan; foreground requests still take priority. */
         }
     }
 }
@@ -4440,6 +4551,11 @@ static void modem_fail_before_dispatch(uint32_t now_ms) {
             "CTS wake timeout before provisioning reboot dispatch", true);
         return;
     }
+    if (kind == MODEM_AT_SIM_NUMBERS) {
+        sim_numbers_final(false, false);
+        modem_fail_power_state("CTS wake timeout before SIM read", true);
+        return;
+    }
     if (kind == MODEM_AT_CALL_WAITING) {
         call_waiting_finish(false, false);
         modem_fail_power_state("CTS wake timeout before call waiting dispatch", true);
@@ -4588,7 +4704,7 @@ static void modem_transport_idle(uint32_t now_ms) {
         s_dtr_sleep_permitted || s_dtr_wake_pending ||
         s_ri_release_pending || s_deferred_valid ||
         s_active || s_operation != MODEM_OP_NONE || s_binary_restore_pending ||
-        (status_sim_ready_snapshot() && modem_network_work_pending()) ||
+        (status_sim_ready_snapshot() && (modem_network_work_pending() || sim_numbers_pending())) ||
         (sms_wake_required() && status_sim_ready_snapshot() &&
          !s_sms_wake_armed) ||
         time_diff_ms(now_ms,
@@ -4685,6 +4801,13 @@ static void send_raw_command(modem_at_kind_t kind, const char *cmd, uint32_t tim
 
 static bool send_raw_command_with_token(modem_at_kind_t kind, const char *cmd,
                                         uint32_t timeout_ms, uint32_t token, uint32_t now_ms) {
+    if (kind == MODEM_AT_SIM_NUMBERS && !sim_numbers_dispatch_allowed()) {
+        sim_numbers_invalidate();
+        sim_numbers_final(false, false);
+        s_operation = MODEM_OP_NONE;
+        set_operation_busy(false);
+        return false;
+    }
     if (kind == MODEM_AT_NETWORK && !network_dispatch_allowed()) {
         modem_network_cancel();
         modem_network_final(false, NULL, false);
@@ -4795,6 +4918,18 @@ static void finish_command_result(bool ok, const char *line) {
         s_sms_wake_armed = ok;
     }
 
+    if (kind == MODEM_AT_SIM_NUMBERS || kind == MODEM_AT_SIM_NUMBERS_DRAIN) {
+        sim_numbers_final(ok, kind == MODEM_AT_SIM_NUMBERS &&
+            s_numbers_transport_counter == model_transport_counter() &&
+            s_numbers_sim_generation == s_sim_session_generation);
+        s_operation = MODEM_OP_NONE;
+        set_operation_busy(false);
+        if (s_power_off_pending) {
+            s_power_off_pending = false;
+            modem_begin_power_off(s_now_ms);
+        }
+        return;
+    }
     if (kind == MODEM_AT_NETWORK || kind == MODEM_AT_NETWORK_DRAIN) {
         bool changed_radio = modem_network_command_changes_registration();
         bool clean = kind == MODEM_AT_NETWORK &&
@@ -5725,7 +5860,8 @@ static bool at_kind_is_operation(modem_at_kind_t kind) {
            kind == MODEM_AT_SMS_CENTRE_READ ||
            kind == MODEM_AT_POWER_OFF || kind == MODEM_AT_DEBUG ||
            kind == MODEM_AT_MAINTENANCE || kind == MODEM_AT_NETWORK ||
-           kind == MODEM_AT_NETWORK_DRAIN;
+           kind == MODEM_AT_NETWORK_DRAIN || kind == MODEM_AT_SIM_NUMBERS ||
+           kind == MODEM_AT_SIM_NUMBERS_DRAIN;
 }
 
 static bool parse_expected_line(const char *line) {
@@ -5738,6 +5874,9 @@ static bool parse_expected_line(const char *line) {
                 &request, &s_sms_protocol_hooks);
     }
     switch (s_active_kind) {
+    case MODEM_AT_SIM_NUMBERS:
+    case MODEM_AT_SIM_NUMBERS_DRAIN:
+        return sim_numbers_line(line);
     case MODEM_AT_NETWORK:
     case MODEM_AT_NETWORK_DRAIN:
         return modem_network_line(line);
@@ -7276,6 +7415,7 @@ static void apply_sim_observation(modem_sim_observation_t observation) {
     critical_section_exit(&s_status_lock);
 
     if (observation != MODEM_SIM_OBSERVATION_READY) {
+        sim_numbers_invalidate();
         modem_network_invalidate_owner();
         sms_recovery_reset();
         /* SIM removal/PIN lock invalidates runtime settings owned by the SIM
@@ -7402,6 +7542,7 @@ static void modem_enter_off(void) {
     model_reset_call_session(s_now_ms);
     modem_supplementary_reset_transient();
     modem_network_reset_session();
+    sim_numbers_init(g_modem_vendor.sim_numbers);
 
     direct_ring_reset();
 
@@ -7620,6 +7761,7 @@ static void modem_fail_power_state(const char *reason,
     critical_section_exit(&s_status_lock);
     modem_supplementary_reset_transient();
     modem_network_reset_session();
+    sim_numbers_init(g_modem_vendor.sim_numbers);
     s_active = false;
     s_active_kind = MODEM_AT_NONE;
     s_operation = MODEM_OP_NONE;
@@ -7783,6 +7925,17 @@ static void modem_begin_power_off(uint32_t now_ms) {
     if (s_state == MODEM_STATE_OFF) {
         modem_enter_off();
         return;
+    }
+    sim_numbers_invalidate();
+    if ((s_active && (s_active_kind == MODEM_AT_SIM_NUMBERS ||
+                       s_active_kind == MODEM_AT_SIM_NUMBERS_DRAIN)) ||
+        (s_deferred_valid && s_deferred_kind == MODEM_AT_SIM_NUMBERS)) {
+        sim_numbers_drain(now_ms, false);
+        if (s_active) {
+            s_power_off_pending = true;
+            cancel_request_session();
+            return;
+        }
     }
     modem_network_cancel();
     if ((s_active && (s_active_kind == MODEM_AT_NETWORK ||

@@ -101,9 +101,9 @@ static bool decode_gsm(const uint8_t *data, size_t length, bool compressed,
     return true;
 }
 
-static bool decode_alpha(const uint8_t *alpha, char *out, size_t cap,
+static bool decode_alpha(const uint8_t *alpha, size_t length, char *out, size_t cap,
                           size_t *used) {
-    const size_t length = TELIT_SIM_PROVIDER_NAME_ALPHA_BYTES;
+    if (length == 0u) return true;
     if (alpha[0] == 0x80u) {
         size_t i = 1u;
         for (; i + 1u < length; i += 2u) {
@@ -119,6 +119,7 @@ static bool decode_alpha(const uint8_t *alpha, char *out, size_t cap,
     }
     if (alpha[0] == 0x81u || alpha[0] == 0x82u) {
         size_t header = alpha[0] == 0x81u ? 3u : 4u;
+        if (length < header) return false;
         size_t count = alpha[1];
         uint16_t base = header == 3u ? (uint16_t)((uint16_t)alpha[2] << 7u)
                                     : (uint16_t)(((uint16_t)alpha[2] << 8u) | alpha[3]);
@@ -129,6 +130,16 @@ static bool decode_alpha(const uint8_t *alpha, char *out, size_t cap,
         return decode_gsm(alpha + header, count, true, base, out, cap, used);
     }
     return decode_gsm(alpha, length, false, 0u, out, cap, used);
+}
+
+bool telit_sim_alpha(const uint8_t *data, size_t length, char *out, size_t cap) {
+    if (data == NULL || out == NULL || cap == 0u) return false;
+    size_t used = 0u;
+    out[0] = '\0';
+    if (!decode_alpha(data, length, out, cap, &used)) { out[0] = '\0'; return false; }
+    while (used > 0u && out[used - 1u] == ' ') used--;
+    out[used] = '\0';
+    return true;
 }
 
 static void skip_spaces(const char **cursor, const char *end) {
@@ -218,7 +229,7 @@ bool telit_parse_sim_provider_name(const char *line, char *out, size_t cap) {
 
     char decoded[TELIT_SIM_PROVIDER_NAME_UTF8_CAP];
     size_t used = 0u;
-    if (!decode_alpha(data + 1u, decoded, sizeof(decoded), &used)) {
+    if (!decode_alpha(data + 1u, TELIT_SIM_PROVIDER_NAME_ALPHA_BYTES, decoded, sizeof(decoded), &used)) {
         goto invalid;
     }
     size_t first = 0u;

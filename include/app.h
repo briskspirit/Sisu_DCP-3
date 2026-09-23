@@ -38,6 +38,7 @@ typedef enum {
     APP_ROUTE_EDITOR,
     APP_ROUTE_PHONEBOOK_MENU,
     APP_ROUTE_PHONEBOOK_LIST,
+    APP_ROUTE_SIM_NUMBERS,
     APP_ROUTE_PHONEBOOK_MEMORY,
     APP_ROUTE_PHONEBOOK_TONE_PICKER,
     APP_ROUTE_PHONEBOOK_SPEED_DIALS,
@@ -583,6 +584,8 @@ typedef struct {
     uint32_t call_waiting_request_id;
     uint32_t call_waiting_display_request_id;
     uint32_t network_request_id;
+    uint32_t sim_numbers_request, sim_numbers_display, sim_numbers_list;
+    uint8_t sim_numbers_parent, sim_numbers_selected, sim_numbers_visibility;
     uint32_t network_display_generation;
     uint32_t network_list_generation;
     uint8_t network_selected, network_view_start;
