@@ -50,11 +50,6 @@ bool battery_raw_collapse_evidence_update(
            BATTERY_RAW_COLLAPSE_CONFIRM_SAMPLES;
 }
 
-uint16_t battery_empty_shutdown_threshold_mv(bool call_active) {
-    return call_active ? BATTERY_RAW_COLLAPSE_MV
-                       : BATTERY_OPERATIONAL_EMPTY_MV;
-}
-
 void battery_endpoint_state_init(battery_endpoint_state_t *state) {
     if (state != NULL) {
         *state = (battery_endpoint_state_t){0};
@@ -159,6 +154,21 @@ battery_endpoint_decision_t battery_endpoint_step(
 
     decision.force_low = evidence->gauge_low;
     return decision;
+}
+
+bool battery_capacity_low_notice(
+    bool active,
+    bool estimate_trusted,
+    uint64_t remaining_nah,
+    uint16_t capacity_mah) {
+    if (!estimate_trusted || capacity_mah == 0u) {
+        return false;
+    }
+    /* 1 mAh = 1,000,000 nAh. Multiply the bounded capacity, not an arbitrary
+     * remaining counter, so the exact 5%/7% comparisons cannot overflow. */
+    uint64_t threshold_nah = (uint64_t)capacity_mah *
+        (active ? UINT64_C(70000) : UINT64_C(50000));
+    return remaining_nah <= threshold_nah;
 }
 
 battery_warning_action_t battery_warning_action(

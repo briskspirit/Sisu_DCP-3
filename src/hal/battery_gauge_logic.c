@@ -16,10 +16,30 @@ static const battery_gauge_profile_t NIMH_PROFILE = {
     .charge_compensation_percent =
         BATTERY_GAUGE_CHARGE_COMPENSATION_PERCENT,
     .rise_rearm_nah = BATTERY_GAUGE_RISE_REARM_NAH,
+    .bar_floor_mv = {0u, VBAT_BAR1_MV, VBAT_BAR2_MV, VBAT_BAR3_MV, VBAT_BAR4_MV},
+    .low_mv = VBAT_LOW_MV,
+    .low_terminal_mv = VBAT_LOW_TERMINAL_QUALIFY_MV,
+    .empty_mv = VBAT_EMPTY_MV,
+    .power_on_mv = VBAT_POWERON_MIN_MV,
+    .operating_empty_mv = 2100u,
+    .emergency_empty_mv = 1800u,
+    .startup_bias_mv = BATTERY_GAUGE_STARTUP_BIAS_MV,
 };
 
-static const uint16_t BAR_FLOOR_MV[5] = {
-    0u, VBAT_BAR1_MV, VBAT_BAR2_MV, VBAT_BAR3_MV, VBAT_BAR4_MV,
+/* Initial BL-5C operating policy, not a calibrated discharge/OCV curve. Do not
+ * reuse NiMH impedance or charging compensation before Li-ion bench data. */
+static const battery_gauge_profile_t LI_ION_PROFILE = {
+    .reference_current_ma = BATTERY_GAUGE_REFERENCE_CURRENT_MA,
+    .rise_rearm_nah = INT64_C(125000000),
+    .bar_floor_mv = {0u, 3200u, 3700u, 3850u, 4000u},
+    .low_mv = 3500u,
+    .low_terminal_mv = 3400u,
+    .low_notice_mv = 3600u,
+    .low_notice_clear_mv = 3650u,
+    .empty_mv = 3200u,
+    .power_on_mv = 3400u,
+    .operating_empty_mv = 3300u,
+    .emergency_empty_mv = 3000u,
 };
 
 static int32_t clamp_i32(int32_t value, int32_t low, int32_t high) {
@@ -230,18 +250,19 @@ static void update_window_current(battery_gauge_state_t *state,
     state->current_history_count++;
 }
 
-static uint16_t bar_rise_threshold(uint8_t target_bar) {
+static uint16_t bar_rise_threshold(const battery_gauge_profile_t *profile,
+                                   uint8_t target_bar) {
     if (target_bar <= 1u) {
-        return VBAT_BAR1_MV;
+        return profile->bar_floor_mv[1];
     }
     if (target_bar >= 4u) {
         /* ROM 0x27db5c has no threshold above the 100-percent slot, so it
          * extrapolates the top boundary by half the 100-to-75-percent spacing. */
-        return (uint16_t)(VBAT_BAR4_MV +
-            (VBAT_BAR4_MV - VBAT_BAR3_MV) / 2u);
+        return (uint16_t)(profile->bar_floor_mv[4] +
+            (profile->bar_floor_mv[4] - profile->bar_floor_mv[3]) / 2u);
     }
-    uint16_t lower = battery_gauge_bar_floor_mv(target_bar);
-    uint16_t upper = battery_gauge_bar_floor_mv((uint8_t)(target_bar + 1u));
+    uint16_t lower = profile->bar_floor_mv[target_bar];
+    uint16_t upper = profile->bar_floor_mv[target_bar + 1u];
     return (uint16_t)(lower + (upper - lower) / 2u);
 }
 
@@ -266,13 +287,15 @@ const battery_gauge_profile_t *battery_gauge_nimh_profile(void) {
     return &NIMH_PROFILE;
 }
 
-uint16_t battery_gauge_bar_floor_mv(uint8_t bar) {
-    return bar <= 4u ? BAR_FLOOR_MV[bar] : BAR_FLOOR_MV[4];
+const battery_gauge_profile_t *battery_gauge_li_ion_profile(void) {
+    return &LI_ION_PROFILE;
 }
 
-uint8_t battery_gauge_bars_from_mv(uint16_t mv) {
+uint8_t battery_gauge_bars_for_profile(const battery_gauge_profile_t *profile,
+                                      uint16_t mv) {
+    if (profile == NULL) profile = &NIMH_PROFILE;
     for (uint8_t bar = 4u; bar > 0u; bar--) {
-        if (mv >= BAR_FLOOR_MV[bar]) {
+        if (mv >= profile->bar_floor_mv[bar]) {
             return bar;
         }
     }
@@ -338,13 +361,13 @@ uint8_t battery_gauge_bar_step(
     bool continuity_valid,
     int64_t session_delta_nah) {
     if (state == NULL) {
-        return battery_gauge_bars_from_mv(reference_mv);
+        return battery_gauge_bars_for_profile(profile, reference_mv);
     }
     if (profile == NULL) {
         profile = &NIMH_PROFILE;
     }
 
-    uint8_t target = battery_gauge_bars_from_mv(reference_mv);
+    uint8_t target = battery_gauge_bars_for_profile(profile, reference_mv);
     if (!state->seeded) {
         bar_note_commit(state, target, continuity_valid, session_delta_nah);
         return target;
@@ -367,7 +390,7 @@ uint8_t battery_gauge_bar_step(
      * committed level stable inside its hysteresis band instead of alternating
      * up on the midpoint pass and down on the next direct scan. */
     if (target == (uint8_t)(state->committed + 1u) &&
-        reference_mv < bar_rise_threshold(target)) {
+        reference_mv < bar_rise_threshold(profile, target)) {
         return state->committed;
     }
 
@@ -391,21 +414,23 @@ void battery_gauge_warning_state_init(battery_warning_state_t *state) {
 
 battery_gauge_warning_t battery_gauge_warning_step(
     battery_warning_state_t *state,
+    const battery_gauge_profile_t *profile,
     uint32_t now_ms,
     uint16_t terminal_mv,
     uint16_t fast_terminal_mv,
     uint16_t symmetric_terminal_mv,
     uint16_t reference_mv) {
+    if (profile == NULL) profile = &NIMH_PROFILE;
     bool terminal_qualified =
-        terminal_mv >= VBAT_LOW_TERMINAL_QUALIFY_MV ||
-        symmetric_terminal_mv >= VBAT_LOW_TERMINAL_QUALIFY_MV;
+        terminal_mv >= profile->low_terminal_mv ||
+        symmetric_terminal_mv >= profile->low_terminal_mv;
     bool low_qualified =
-        reference_mv >= VBAT_LOW_MV || fast_terminal_mv >= VBAT_LOW_MV;
+        reference_mv >= profile->low_mv || fast_terminal_mv >= profile->low_mv;
 
     battery_gauge_warning_t instant;
     if (terminal_qualified && low_qualified) {
         instant = BATTERY_GAUGE_WARNING_HEALTHY;
-    } else if (fast_terminal_mv >= VBAT_EMPTY_MV) {
+    } else if (fast_terminal_mv >= profile->empty_mv) {
         instant = BATTERY_GAUGE_WARNING_LOW;
     } else {
         instant = BATTERY_GAUGE_WARNING_EMPTY;
@@ -450,6 +475,54 @@ void battery_gauge_init(battery_gauge_state_t *state) {
     battery_gauge_warning_state_init(&state->warning);
 }
 
+static void low_notice_update(battery_low_notice_state_t *state,
+                              const battery_gauge_profile_t *profile,
+                              const battery_gauge_observation_t *obs) {
+    if (profile->low_notice_mv == 0u) {
+        *state = (battery_low_notice_state_t){0};
+        return;
+    }
+    if (!obs->sample_valid) {
+        state->pending = false;
+        state->samples = 0u;
+        return;
+    }
+    if (obs->charge_active && obs->current_valid && obs->continuity_valid &&
+        obs->current_ua > 0) {
+        *state = (battery_low_notice_state_t){0};
+        return;
+    }
+
+    /* Time qualification replaces the bar filters here. A short sag or rebound
+     * must not repeatedly arm/disarm the original app's notification cadence. */
+    bool candidate = state->active
+        ? obs->terminal_mv >= profile->low_notice_clear_mv
+        : obs->terminal_mv < profile->low_notice_mv;
+    if (!candidate) {
+        state->pending = false;
+        state->samples = 0u;
+        return;
+    }
+    if (!state->pending ||
+        (uint32_t)(obs->now_ms - state->last_sample_ms) >
+            BATTERY_GAUGE_LOW_NOTICE_MAX_GAP_MS) {
+        state->pending = true;
+        state->pending_since_ms = obs->now_ms;
+        state->samples = 0u;
+    }
+    state->last_sample_ms = obs->now_ms;
+    if (state->samples < BATTERY_GAUGE_LOW_NOTICE_MIN_SAMPLES) {
+        state->samples++;
+    }
+    if (state->samples >= BATTERY_GAUGE_LOW_NOTICE_MIN_SAMPLES &&
+        (uint32_t)(obs->now_ms - state->pending_since_ms) >=
+            BATTERY_GAUGE_LOW_NOTICE_HOLD_MS) {
+        state->active = !state->active;
+        state->pending = false;
+        state->samples = 0u;
+    }
+}
+
 bool battery_gauge_update(
     battery_gauge_state_t *state,
     const battery_gauge_profile_t *profile,
@@ -472,6 +545,9 @@ bool battery_gauge_update(
     state->sample_seen = true;
     state->last_sample_sequence = obs->sample_sequence;
     state->snapshot.terminal_mv = obs->terminal_mv;
+    bool old_low_notice = state->snapshot.low_notice;
+    low_notice_update(&state->low_notice, profile, obs);
+    state->snapshot.low_notice = state->low_notice.active;
     if (!obs->sample_valid) {
         state->snapshot.valid = false;
         return false;
@@ -481,7 +557,7 @@ bool battery_gauge_update(
         (uint32_t)(obs->now_ms - state->last_model_ms) <
             BATTERY_GAUGE_MODEL_PERIOD_MS) {
         state->snapshot.valid = true;
-        return false;
+        return old_low_notice != state->snapshot.low_notice;
     }
 
     update_window_current(state, obs);
@@ -519,7 +595,7 @@ bool battery_gauge_update(
     if (!state->model_seeded) {
         uint16_t seed_mv = clamp_mv_i32(
             (int32_t)corrected_mv +
-            (int32_t)BATTERY_GAUGE_STARTUP_BIAS_MV);
+            (int32_t)profile->startup_bias_mv);
         median_seed(state, seed_mv, obs->now_ms);
         state->slow_reference_x10 = (int32_t)seed_mv * 10;
     } else {
@@ -534,7 +610,7 @@ bool battery_gauge_update(
         &state->bar, profile, reference_mv, obs->charge_active,
         obs->continuity_valid, obs->session_delta_nah);
     battery_gauge_warning_t warning = battery_gauge_warning_step(
-        &state->warning, obs->now_ms, obs->terminal_mv, fast_mv,
+        &state->warning, profile, obs->now_ms, obs->terminal_mv, fast_mv,
         symmetric_mv, reference_mv);
     if (warning == BATTERY_GAUGE_WARNING_LOW) {
         bars = 1u;

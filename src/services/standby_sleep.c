@@ -13,6 +13,7 @@
 #include "hal/rtc_alarm_hal.h"
 #include "hal/standby_sleep_hal.h"
 #include "services/core1_services.h"
+#include "services/battery_charge_supervisor_service.h"
 #include "services/modem_service.h"
 #include "services/standby_sleep_logic.h"
 #include "services/timebase.h"
@@ -103,7 +104,8 @@ static standby_sleep_readiness_t collect_readiness(
         .wake_latches_clear = board_irq_hal_wake_latches_clear(),
         .quiet_clock = board_is_xosc_lowpower(),
         .accessory_idle = accessory_hal_standby_ready(),
-        .battery_idle = battery_hal_standby_ready(),
+        .battery_idle = battery_hal_standby_ready() &&
+            battery_charge_supervisor_service_standby_ready(),
     };
 }
 

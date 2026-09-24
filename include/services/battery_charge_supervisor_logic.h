@@ -16,6 +16,14 @@
 #define BATTERY_CHARGE_MAINTENANCE_RESTART_SOC_PERCENT 80u
 #define BATTERY_CHARGE_MAINTENANCE_RESTART_MV 2600u
 #define BATTERY_CHARGE_MAINTENANCE_CE_RESET_MS 1000u
+#define BATTERY_CHARGE_LI_ION_TAPER_MIN_MV 4170u
+#define BATTERY_CHARGE_LI_ION_TAPER_MAX_MV 4250u
+#define BATTERY_CHARGE_LI_ION_TAPER_CURRENT_UA 27000u
+#define BATTERY_CHARGE_LI_ION_TAPER_WINDOW_MS 60000u
+#define BATTERY_CHARGE_LI_ION_TAPER_WINDOWS 3u
+#define BATTERY_CHARGE_LI_ION_RECHARGE_MV 4000u
+#define BATTERY_CHARGE_LI_ION_RECHARGE_CONFIRM_MS 60000u
+#define BATTERY_CHARGE_LI_ION_SAMPLE_GAP_MS 10000u
 
 #define BATTERY_CHARGE_SUPERVISOR_RESULT_NONE 0u
 #define BATTERY_CHARGE_SUPERVISOR_RESULT_ATTACHED (1u << 0)
@@ -55,6 +63,7 @@ typedef enum {
     BATTERY_CHARGE_POLICY_OBSERVE = 0,
     BATTERY_CHARGE_POLICY_ENFORCE_ANCHORED,
     BATTERY_CHARGE_POLICY_ENFORCE_BOOTSTRAP,
+    BATTERY_CHARGE_POLICY_ENFORCE_LI_ION,
 } battery_charge_supervisor_policy_t;
 
 typedef enum {
@@ -96,12 +105,14 @@ typedef enum {
     /* Durable /CE-off phase used to reset a completed BQ session before an
      * attached maintenance charge. This is control state, never a FULL claim. */
     BATTERY_CHARGE_TERMINAL_MAINTENANCE_REARM,
+    BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL,
 } battery_charge_supervisor_terminal_t;
 
 typedef enum {
     BATTERY_CHARGE_CANDIDATE_NONE = 0,
     BATTERY_CHARGE_CANDIDATE_BQ_COMPLETE,
     BATTERY_CHARGE_CANDIDATE_SOFTWARE_COULOMB_FULL,
+    BATTERY_CHARGE_CANDIDATE_SOFTWARE_TAPER_FULL,
 } battery_charge_supervisor_candidate_t;
 
 typedef struct {
@@ -285,6 +296,9 @@ typedef struct {
     int16_t curve_slope_mv_per_min;
     uint32_t minute_count;
     battery_charge_supervisor_minute_t latest_minute;
+    uint8_t taper_windows;
+    int32_t taper_average_ua;
+    uint32_t taper_positive_average_ua;
 } battery_charge_supervisor_snapshot_t;
 
 typedef struct {
@@ -313,10 +327,17 @@ typedef struct {
     int64_t minute_current_sum_ua;
     int64_t minute_temperature_sum_mdegc;
     uint16_t previous_minute_compensated_mv;
+    bool taper_window_valid;
+    uint32_t taper_started_ms;
+    uint32_t taper_last_ms;
+    int64_t taper_start_nah;
+    uint64_t taper_positive_nah;
+    int32_t taper_last_current_ua;
 } battery_charge_supervisor_state_t;
 
 const battery_charge_supervisor_profile_t *
 battery_charge_supervisor_revb2_profile(void);
+const battery_charge_supervisor_profile_t *battery_charge_supervisor_li_ion_profile(void);
 
 void battery_charge_supervisor_init(
     battery_charge_supervisor_state_t *state,

@@ -8,6 +8,7 @@
 
 typedef struct {
     battery_learning_snapshot_t model;
+    uint8_t profile_id;
     bool initialized;
     bool persistence_pending;
     uint32_t update_count;

@@ -43,46 +43,34 @@ static void test_sequence_wrap_is_still_distinct(void) {
         &evidence, true, 0u, 1700u, 1800u));
 }
 
-static void test_shutdown_floor_tracks_call_policy_without_mixing_samples(void) {
-    assert(battery_empty_shutdown_threshold_mv(false) ==
-           BATTERY_OPERATIONAL_EMPTY_MV);
-    assert(battery_empty_shutdown_threshold_mv(true) ==
-           BATTERY_RAW_COLLAPSE_MV);
-
+static void test_shutdown_threshold_change_does_not_mix_samples(
+    uint16_t idle_floor, uint16_t call_floor) {
     battery_raw_collapse_evidence_t evidence;
     battery_raw_collapse_evidence_init(&evidence);
 
     /* One idle-floor sample cannot be reused as evidence for the lower call
      * floor after the call state changes. */
     assert(!battery_raw_collapse_evidence_update(
-        &evidence, true, 20u, 2050u,
-        battery_empty_shutdown_threshold_mv(false)));
+        &evidence, true, 20u, idle_floor - 50u, idle_floor));
     assert(!battery_raw_collapse_evidence_update(
-        &evidence, true, 20u, 1799u,
-        battery_empty_shutdown_threshold_mv(true)));
+        &evidence, true, 20u, call_floor - 1u, call_floor));
     assert(!battery_raw_collapse_evidence_update(
-        &evidence, true, 20u, 1700u,
-        battery_empty_shutdown_threshold_mv(true)));
+        &evidence, true, 20u, call_floor - 100u, call_floor));
     assert(battery_raw_collapse_evidence_update(
-        &evidence, true, 21u, 1799u,
-        battery_empty_shutdown_threshold_mv(true)));
+        &evidence, true, 21u, call_floor - 1u, call_floor));
 
     /* Returning to idle likewise starts a fresh two-sample confirmation, even
-     * though the first newly-applicable sample is already below 2.10 V. */
+     * though the first newly-applicable sample is already below the idle floor. */
     assert(!battery_raw_collapse_evidence_update(
-        &evidence, true, 21u, 2050u,
-        battery_empty_shutdown_threshold_mv(false)));
+        &evidence, true, 21u, idle_floor - 50u, idle_floor));
     assert(!battery_raw_collapse_evidence_update(
-        &evidence, true, 21u, 2000u,
-        battery_empty_shutdown_threshold_mv(false)));
+        &evidence, true, 21u, idle_floor - 100u, idle_floor));
     assert(battery_raw_collapse_evidence_update(
-        &evidence, true, 22u, 2050u,
-        battery_empty_shutdown_threshold_mv(false)));
+        &evidence, true, 22u, idle_floor - 50u, idle_floor));
 
     /* The floor itself is admitted; only a sample below it is low evidence. */
     assert(!battery_raw_collapse_evidence_update(
-        &evidence, true, 23u, BATTERY_OPERATIONAL_EMPTY_MV,
-        BATTERY_OPERATIONAL_EMPTY_MV));
+        &evidence, true, 23u, idle_floor, idle_floor));
 }
 
 static battery_endpoint_evidence_t endpoint_evidence(void) {
@@ -188,8 +176,7 @@ static void test_call_sag_with_anchored_charge_never_becomes_empty(void) {
 static void test_call_below_idle_floor_does_not_arm_shutdown(void) {
     battery_raw_collapse_evidence_t raw;
     battery_raw_collapse_evidence_init(&raw);
-    uint16_t call_floor = battery_empty_shutdown_threshold_mv(true);
-    assert(call_floor == BATTERY_RAW_COLLAPSE_MV);
+    const uint16_t call_floor = 1800u;
 
     /* 2050 mV is below the 2100 mV idle floor but safely above the separate
      * in-call emergency floor. Repeated fresh samples still cannot arm it. */
@@ -273,6 +260,27 @@ static void test_idle_early_empty_can_learn_capacity_degradation(void) {
     decision = battery_endpoint_step(&state, &evidence);
     assert(decision.kind == BATTERY_ENDPOINT_NATURAL_EMPTY);
     assert(decision.shutdown && decision.learn_empty);
+}
+
+static void test_capacity_notice_exact_thresholds_and_hysteresis(void) {
+    /* 812 mAh measured capacity: 40.600 mAh entry, 56.840 mAh recovery. */
+    assert(!battery_capacity_low_notice(false, true, 40600001u, 812u));
+    assert(battery_capacity_low_notice(false, true, 40600000u, 812u));
+    assert(battery_capacity_low_notice(true, true, 48720000u, 812u));
+    assert(battery_capacity_low_notice(true, true, 56840000u, 812u));
+    assert(!battery_capacity_low_notice(true, true, 56840001u, 812u));
+    assert(!battery_capacity_low_notice(false, true, 48720000u, 812u));
+    assert(battery_capacity_low_notice(false, true, 0u, 812u));
+    assert(!battery_capacity_low_notice(true, false, 0u, 812u));
+    assert(!battery_capacity_low_notice(true, true, 0u, 0u));
+    /* The same rule applies to a learned NiMH capacity. */
+    assert(!battery_capacity_low_notice(false, true, 62100001u, 1242u));
+    assert(battery_capacity_low_notice(false, true, 62100000u, 1242u));
+    assert(!battery_capacity_low_notice(true, true, UINT64_MAX, UINT16_MAX));
+    assert(battery_capacity_low_notice(
+        false, true, (uint64_t)UINT16_MAX * 50000u, UINT16_MAX));
+    assert(battery_capacity_low_notice(
+        true, true, (uint64_t)UINT16_MAX * 70000u, UINT16_MAX));
 }
 
 static void test_warning_action_preserves_state_across_missing_data(void) {
@@ -405,7 +413,8 @@ static void test_charger_insert_tone_follows_call_context(void) {
 int main(void) {
     test_raw_collapse_requires_distinct_samples();
     test_sequence_wrap_is_still_distinct();
-    test_shutdown_floor_tracks_call_policy_without_mixing_samples();
+    test_shutdown_threshold_change_does_not_mix_samples(2100u, 1800u);
+    test_shutdown_threshold_change_does_not_mix_samples(3300u, 3000u);
     test_capacity_zero_requires_independent_voltage_corroboration();
     test_capacity_low_waits_out_active_call_sag();
     test_call_sag_with_anchored_charge_never_becomes_empty();
@@ -413,6 +422,7 @@ int main(void) {
     test_call_emergency_floor_shuts_down_without_learning_sag();
     test_modem_collapse_is_sag_while_capacity_has_charge();
     test_idle_early_empty_can_learn_capacity_degradation();
+    test_capacity_notice_exact_thresholds_and_hysteresis();
     test_warning_action_preserves_state_across_missing_data();
     test_only_verified_positive_charge_suppresses_empty();
     test_sag_guard_does_not_depend_on_display_bars();

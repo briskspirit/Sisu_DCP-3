@@ -15,7 +15,9 @@
 #define LTC2959_SETTLE_DELTA_MV 300u
 #define LTC2959_REPLACEMENT_JUMP_MV 600u
 #define LTC2959_PLAUSIBLE_MIN_MV 1000u
-#define LTC2959_PLAUSIBLE_MAX_MV 4000u
+/* Acquisition must include a full 4.2 V Li-ion cell and overvoltage telemetry.
+ * This is not a charging limit or a chemistry-identification threshold. */
+#define LTC2959_PLAUSIBLE_MAX_MV 4500u
 
 typedef enum {
     LTC2959_STATE_DOWN = 0,
@@ -46,7 +48,7 @@ static bool finish_conversion(uint32_t now_ms);
 static void process_snapshot(const ltc2959_raw_snapshot_t *raw);
 static void note_i2c_result(bool ok);
 static void note_sample_failure(uint32_t now_ms);
-static void mark_new_session(void);
+static void mark_new_session(bool power_reset);
 static bool write_session_zero(uint32_t *acr_out);
 static void accept_session_zero(uint32_t acr);
 static bool release_alert_with_ara(void);
@@ -58,6 +60,7 @@ bool ltc2959_hal_init(uint32_t now_ms) {
     uint32_t prior_errors = s_snapshot.i2c_error_count;
     uint32_t prior_ara_errors = s_snapshot.ara_error_count;
     uint32_t prior_session = s_snapshot.gauge_session;
+    uint32_t prior_power_resets = s_snapshot.power_reset_count;
     uint32_t prior_conversion_sequence = s_snapshot.conversion_sequence;
     uint32_t prior_sample_sequence = s_snapshot.sample_sequence;
     uint8_t prior_status_latched = s_snapshot.status_latched;
@@ -72,6 +75,7 @@ bool ltc2959_hal_init(uint32_t now_ms) {
     s_snapshot.i2c_error_count = prior_errors;
     s_snapshot.ara_error_count = prior_ara_errors;
     s_snapshot.gauge_session = prior_session;
+    s_snapshot.power_reset_count = prior_power_resets;
     s_snapshot.conversion_sequence = prior_conversion_sequence;
     s_snapshot.sample_sequence = prior_sample_sequence;
     s_snapshot.status_latched = prior_status_latched;
@@ -106,7 +110,7 @@ bool ltc2959_hal_init(uint32_t now_ms) {
          cc_control == LTC2959_CC_POR_DEFAULT &&
          acr == LTC2959_ACR_POR_DEFAULT);
     if (hardware_reset_evidence && !s_session_zero_pending) {
-        mark_new_session();
+        mark_new_session(true);
     }
     if (hardware_reset_evidence) {
         s_session_zero_pending = true;
@@ -183,7 +187,7 @@ bool ltc2959_hal_start_new_session(void) {
     if (!write_session_zero(&acr)) {
         return false;
     }
-    mark_new_session();
+    mark_new_session(false);
     accept_session_zero(acr);
     s_state = LTC2959_STATE_READY;
     s_next_sample_ms = time_ms();
@@ -254,7 +258,7 @@ void ltc2959_hal_service_alert(ltc2959_irq_result_t *out) {
         &s_alert_tracker, operation_ok);
     if ((status & LTC2959_STATUS_UVLO) != 0u) {
         if (!s_session_zero_pending) {
-            mark_new_session();
+            mark_new_session(true);
         }
         s_session_zero_pending = true;
         s_snapshot.configured = false;
@@ -477,7 +481,7 @@ static bool finish_conversion(uint32_t now_ms) {
         s_session_zero_pending) {
         if (session_reset_evidence) {
             if (!s_session_zero_pending) {
-                mark_new_session();
+                mark_new_session(true);
             }
             s_session_zero_pending = true;
         }
@@ -604,7 +608,8 @@ static void note_sample_failure(uint32_t now_ms) {
     s_next_reinit_ms = now_ms + LTC2959_REINIT_MS;
 }
 
-static void mark_new_session(void) {
+static void mark_new_session(bool power_reset) {
+    if (power_reset) s_snapshot.power_reset_count++;
     s_snapshot.gauge_session++;
     s_snapshot.continuity_valid = false;
     s_snapshot.sample_valid = false;

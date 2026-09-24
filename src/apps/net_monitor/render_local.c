@@ -18,7 +18,7 @@ static const char *soc_confidence_short(uint8_t confidence) {
 
 static const char *charge_policy_short(uint8_t policy) {
     static const char *const TEXT[] = {
-        "OBS", "ANCH", "BOOT",
+        "OBS", "ANCH", "BOOT", "LI",
     };
     return policy < sizeof(TEXT) / sizeof(TEXT[0]) ? TEXT[policy] : "?";
 }
@@ -101,7 +101,7 @@ void netmon_render_local(uint8_t id, uint8_t frame_index,
         }
         netmon_render_linef(out, 1u, "ACTIVE %s", netmon_render_yes_no(b->charge_state == BOARD_DIAG_CHARGE_ACTIVE));
         netmon_render_linef(out, 2u, "FORCE %s", netmon_render_yes_no(b->charger_forced));
-        netmon_render_linef(out, 3u, "NiMH");
+        netmon_render_linef(out, 3u, "%s", board_diag_chemistry_text(b->chemistry));
         break;
     case 45u:
         netmon_render_linef(out, 0u, "OWN %02X", (unsigned)l->rail_owner_mask);

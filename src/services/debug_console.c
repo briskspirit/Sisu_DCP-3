@@ -749,7 +749,7 @@ static void print_help(void) {
     printf("[debug]   battlearn recover-cycle <capacity_mAh> <expected_ok_count> confirm\n");
     printf("[debug]   battlearn recover-full <acr_raw> <session_delta_nAh> <expected_ok_count> confirm\n");
     printf("[debug]   charge [status|trace <on|off>|csv|history]\n");
-    printf("[debug]   charge configure <observe|anchored|bootstrap> <1000-2000> <candidate|trusted> confirm\n");
+    printf("[debug]   charge configure <observe|anchored|bootstrap|li-ion> <1000-2000> <candidate|trusted> confirm\n");
     printf("[debug]   modempoll <on|off>        ; periodic modem backstops (RAM only)\n");
     printf("[debug]   modemrx <on|off|dump>    ; opt-in raw RX capture (RAM only)\n");
     printf("[debug]   railhold <on|off>         ; hold shared +3V8 without modem start\n");
@@ -891,7 +891,7 @@ static const char *battery_soc_confidence_text(
 static const char *charge_policy_text(
     battery_charge_supervisor_policy_t policy) {
     static const char *const TEXT[] = {
-        "observe", "enforce-anchored", "enforce-bootstrap",
+        "observe", "enforce-anchored", "enforce-bootstrap", "enforce-li-ion",
     };
     uint8_t index = (uint8_t)policy;
     return index < sizeof(TEXT) / sizeof(TEXT[0]) ? TEXT[index] : "invalid";
@@ -1204,6 +1204,7 @@ static const char *charge_terminal_text(
         "safety-time", "board-temperature", "bq-fault",
         "control-readback", "gauge-continuity", "manual-debug",
         "detached", "bq-fault+coulomb-full", "maintenance-rearm",
+        "sw-taper",
     };
     uint8_t index = (uint8_t)terminal;
     return index < sizeof(TEXT) / sizeof(TEXT[0]) ? TEXT[index] : "unknown";
@@ -1250,10 +1251,14 @@ static void command_charge(char *args) {
         battery_charge_supervisor_service_snapshot_t service;
         battery_charge_supervisor_service_get_snapshot(&service);
         const battery_charge_supervisor_snapshot_t *model = &service.model;
-        const battery_charge_supervisor_profile_t *profile =
-            battery_charge_supervisor_revb2_profile();
         board_diag_snapshot_t board;
         board_diag_get_snapshot(&board);
+        const battery_charge_supervisor_profile_t *profile = NULL;
+        if (board.chemistry == BOARD_DIAG_CHEM_LI_ION) {
+            profile = battery_charge_supervisor_li_ion_profile();
+        } else if (board.chemistry == BOARD_DIAG_CHEM_NI_MH) {
+            profile = battery_charge_supervisor_revb2_profile();
+        }
         printf("[charge] policy=%s phase=%s gen=%lu pack=%lu gauge=%lu "
                "elapsed=%lums terminal=%s\n",
                charge_policy_text(model->policy),
@@ -1263,11 +1268,15 @@ static void command_charge(char *args) {
                (unsigned long)model->gauge_session,
                (unsigned long)model->elapsed_ms,
                charge_terminal_text(model->terminal_reason));
-        printf("[charge] hardware configured=%u session=%u current=%lumA timer=%lumin\n",
-               (unsigned)profile->hardware_profile_id,
-               (unsigned)model->hardware_profile_id,
-               (unsigned long)(profile->nominal_charge_current_ua / 1000u),
-               (unsigned long)(profile->nominal_backup_timer_ms / 60000u));
+        if (profile != NULL) {
+            printf("[charge] hardware configured=%u session=%u current=%lumA timer=%lumin\n",
+                   (unsigned)profile->hardware_profile_id,
+                   (unsigned)model->hardware_profile_id,
+                   (unsigned long)(profile->nominal_charge_current_ua / 1000u),
+                   (unsigned long)(profile->nominal_backup_timer_ms / 60000u));
+        } else {
+            printf("[charge] hardware unavailable (chemistry unidentified)\n");
+        }
         printf("[charge] input=%lldnAh positive=%llunAh negative=%llunAh\n",
                (long long)model->net_input_nah,
                (unsigned long long)model->positive_crosscheck_nah,
@@ -1350,7 +1359,24 @@ static void command_charge(char *args) {
                    ? "trusted" : "candidate",
                service.persisted.supervisor_inhibit_latched ? 1u : 0u,
                charge_terminal_text(service.persisted.latched_stop_reason));
-        printf("[charge] maintenance phase=%u full=%u soc<=%u=%u "
+        if (board.chemistry == BOARD_DIAG_CHEM_LI_ION) {
+            printf("[charge] taper windows=%u/%u net=%lduA positive=%luuA limit=%uuA v=%u..%umV\n",
+                   (unsigned)model->taper_windows,
+                   (unsigned)BATTERY_CHARGE_LI_ION_TAPER_WINDOWS,
+                   (long)model->taper_average_ua,
+                   (unsigned long)model->taper_positive_average_ua,
+                   (unsigned)BATTERY_CHARGE_LI_ION_TAPER_CURRENT_UA,
+                   (unsigned)BATTERY_CHARGE_LI_ION_TAPER_MIN_MV,
+                   (unsigned)BATTERY_CHARGE_LI_ION_TAPER_MAX_MV);
+            printf("[charge] maintenance=Li-ion v<%umV hold=%lums phase=%u restarts=%lu\n",
+                   (unsigned)BATTERY_CHARGE_LI_ION_RECHARGE_MV,
+                   (unsigned long)BATTERY_CHARGE_LI_ION_RECHARGE_CONFIRM_MS,
+                   (unsigned)service.maintenance_phase,
+                   (unsigned long)service.maintenance_rearm_events);
+        } else if (board.chemistry != BOARD_DIAG_CHEM_NI_MH) {
+            printf("[charge] maintenance unavailable (chemistry unidentified)\n");
+        } else {
+            printf("[charge] maintenance phase=%u full=%u soc<=%u=%u "
                "v=%umV<%u=%u pending=%u rearm-used=%u "
                "restarts=%lu bq-recoveries=%lu\n",
                (unsigned)service.maintenance_phase,
@@ -1364,6 +1390,7 @@ static void command_charge(char *args) {
                service.persisted.completion_rearm_used ? 1u : 0u,
                (unsigned long)service.maintenance_rearm_events,
                (unsigned long)service.bq_recovery_events);
+        }
         return;
     }
     if (strcmp(sub, "trace") == 0) {
@@ -1475,6 +1502,8 @@ static void command_charge(char *args) {
             policy = BATTERY_CHARGE_POLICY_ENFORCE_ANCHORED;
         } else if (policy_valid && strcmp(policy_text, "bootstrap") == 0) {
             policy = BATTERY_CHARGE_POLICY_ENFORCE_BOOTSTRAP;
+        } else if (policy_valid && strcmp(policy_text, "li-ion") == 0) {
+            policy = BATTERY_CHARGE_POLICY_ENFORCE_LI_ION;
         } else {
             policy_valid = false;
         }
@@ -1490,7 +1519,7 @@ static void command_charge(char *args) {
             strcmp(confirm, "confirm") == 0 && next_token(&args) == NULL;
         if (!syntax_ok) {
             printf("[charge] usage: charge configure "
-                   "<observe|anchored|bootstrap> <1000-2000> "
+                   "<observe|anchored|bootstrap|li-ion> <1000-2000> "
                    "<candidate|trusted> confirm\n");
             return;
         }
@@ -2531,6 +2560,9 @@ static void command_hw(const app_t *app) {
            (unsigned)s.battery_power_on_samples,
            (unsigned)s.battery_power_on_attempts,
            (unsigned)s.battery_power_on_average_mv);
+    printf("[hw] chemistry retained=%08lx reset=%08lx\n",
+           (unsigned long)powman_hw->scratch[6],
+           (unsigned long)powman_hw->chip_reset);
     printf("[hw] charger conn=%u vin=%lumV adc=%u pin=%umV en=%c forced=%u stat=%u,%u state=%s chem=%s\n",
            s.charger_connected ? 1u : 0u,
            (unsigned long)s.charger_input_mv,
@@ -2607,6 +2639,18 @@ static void command_hw(const app_t *app) {
            (unsigned)s.shared_irq_last_rtc_flags,
            (unsigned)s.shared_irq_last_ltc_status);
     if (app != 0) {
+        printf("[hw] warning voltage_low=%u early_low=%u capacity_low=%u eligible=%lums/%umV "
+               "shown=%lums/count=%lu deferred=%lums/active=%u empty=%lums/%umV\n",
+               s.battery_low ? 1u : 0u, s.battery_low_notice ? 1u : 0u,
+               app->battery_capacity_low_notice ? 1u : 0u,
+               (unsigned long)app->battery_low_eligible_ms,
+               (unsigned)app->battery_low_eligible_mv,
+               (unsigned long)app->battery_low_shown_ms,
+               (unsigned long)app->battery_low_shown_count,
+               (unsigned long)app->battery_low_deferred_ms,
+               app->battery_low_deferred ? 1u : 0u,
+               (unsigned long)app->battery_last_empty_ms,
+               (unsigned)app->battery_last_empty_mv);
         printf("[hw] route=%u poweroff=%u low_notified=%u "
                "empty_off_ms=%lu endpoint=%u sag=%u cap_v_conflict=%u\n",
                (unsigned)app->route, app->route == APP_ROUTE_POWER_OFF ? 1u : 0u,

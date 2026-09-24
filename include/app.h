@@ -388,11 +388,21 @@ typedef struct {
     bool battery_full_notified;
     bool battery_low_notified;      /* currently in the low zone (warning schedule armed) */
     bool battery_low_warn_fast;     /* the next low re-warn uses the fast (post-transition) interval */
+    bool battery_capacity_low_notice; /* notification-only 5%/7% hysteresis */
     bool battery_capacity_voltage_disagreement;
     battery_endpoint_kind_t battery_endpoint_kind;
     battery_endpoint_state_t battery_endpoint_state;
     uint32_t battery_low_next_warn_ms; /* deadline for the next repeating "Battery low" notice */
     uint32_t battery_empty_off_ms;
+    /* Last warning evidence survives soft-off while app RAM remains powered. */
+    uint32_t battery_low_eligible_ms;
+    uint32_t battery_low_shown_ms;
+    uint32_t battery_low_deferred_ms;
+    uint32_t battery_last_empty_ms;
+    uint32_t battery_low_shown_count;
+    uint16_t battery_low_eligible_mv;
+    uint16_t battery_last_empty_mv;
+    bool battery_low_deferred;
     battery_raw_collapse_evidence_t battery_raw_collapse_evidence;
     uint8_t call_register_menu_kind;
     uint8_t call_register_menu_selected;

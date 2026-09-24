@@ -22,6 +22,10 @@ static charger_control_snapshot_t s_control;
 static bool s_control_set_ok;
 static uint32_t s_control_set_calls;
 
+board_diag_chemistry_t board_diag_battery_chemistry(void) {
+    return s_board.chemistry;
+}
+
 void board_diag_get_battery_learning_observation(
     uint32_t now_ms, battery_learning_observation_t *out) {
     *out = s_gauge;
@@ -133,6 +137,7 @@ static void reset_fixture(void) {
     s_board.charge_state = BOARD_DIAG_CHARGE_ACTIVE;
     s_board.chemistry = BOARD_DIAG_CHEM_NI_MH;
     s_learner.initialized = true;
+    s_learner.profile_id = BATTERY_LEARNING_PROFILE_NIMH_2S;
     s_learner.model.nominal_capacity_mah = 1225u;
     s_learner.model.learned_capacity_valid = true;
     s_learner.model.learned_capacity_mah = 1000u;
@@ -1301,7 +1306,390 @@ static void test_failed_maintenance_start_does_not_pulse_forever(void) {
     assert(snapshot().maintenance_rearm_events == 1u);
 }
 
+static void test_li_ion_profile_completion_restore_and_recharge(void) {
+    reset_fixture();
+    seed_policy(BATTERY_CHARGE_POLICY_ENFORCE_ANCHORED, true);
+    s_board.chemistry = BOARD_DIAG_CHEM_LI_ION;
+    s_learner.profile_id = BATTERY_LEARNING_PROFILE_LI_ION_BL5C;
+    s_gauge.terminal_mv = s_gauge.reference_mv = 3900u;
+    s_learner.model.nominal_capacity_mah = 1020u;
+    s_learner.model.soc_capacity_mah = 1020u;
+    uint32_t result = battery_charge_supervisor_service_poll(1000u);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_ADMITTED);
+    assert(snapshot().model.policy == BATTERY_CHARGE_POLICY_ENFORCE_LI_ION);
+    assert(snapshot().model.hardware_profile_id == 4u);
+    assert(snapshot().model.charge_factor_permille == 1000u);
+    assert(s_stored.active_session_valid);
+    assert(battery_charge_supervisor_persisted_valid(&s_stored));
+    battery_charge_supervisor_service_init();
+    result = battery_charge_supervisor_service_poll(2000u);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_RESTORED);
+    assert(battery_charge_supervisor_service_effective_charge_factor_permille() == 1000u);
+    assert(battery_charge_supervisor_service_configure(
+        BATTERY_CHARGE_POLICY_ENFORCE_ANCHORED, 1224u, true) ==
+        BATTERY_CHARGE_CONFIG_INVALID_ARGUMENT);
+    s_board.charge_state = BOARD_DIAG_CHARGE_FULL;
+    s_gauge.terminal_mv = s_gauge.reference_mv = 4200u;
+    s_gauge.current_ua = -10000;
+    s_gauge.sample_sequence++;
+    (void)battery_charge_supervisor_service_poll(3000u);
+    s_gauge.sample_sequence++;
+    uint32_t completed_at = 3000u + BATTERY_CHARGE_COMPLETE_CONFIRM_MS;
+    result = battery_charge_supervisor_service_poll(completed_at);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+    assert(s_stored.last_terminal_full_qualified);
+    assert(s_stored.supervisor_inhibit_latched);
+    assert(s_stored.latched_stop_reason == BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE);
+    assert(battery_charge_supervisor_persisted_valid(&s_stored));
+    uint32_t generation = snapshot().model.charge_generation;
+    uint32_t controls = s_control_set_calls;
+    s_gauge.sample_sequence++;
+    s_gauge.terminal_mv = s_gauge.reference_mv = 4090u;
+    result = battery_charge_supervisor_service_poll(completed_at + 1000u);
+    assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_RESTARTED));
+    assert(s_control_set_calls == controls);
+    assert(s_control.actual_enabled); /* No inhibit before durable storage. */
+    mark_store_durable();
+    s_gauge.sample_sequence++;
+    (void)battery_charge_supervisor_service_poll(completed_at + 2000u);
+    assert(!s_control.actual_enabled);
+    battery_charge_supervisor_service_init();
+    s_gauge.sample_sequence++;
+    result = battery_charge_supervisor_service_poll(completed_at + 3000u);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_RESTORED);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+    assert(snapshot().model.phase == BATTERY_CHARGE_PHASE_COMPLETE_BQ);
+    for (unsigned second = 4; second < 70; ++second) {
+        s_gauge.sample_sequence++;
+        result = battery_charge_supervisor_service_poll(completed_at + second * 1000u);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED));
+        assert(!s_control.actual_enabled);
+    }
+    assert(snapshot().model.charge_generation == generation);
+    s_gauge.terminal_mv = s_gauge.reference_mv = 3990u;
+    for (unsigned second = 70; second < 130; ++second) {
+        s_gauge.sample_sequence++;
+        result = battery_charge_supervisor_service_poll(completed_at + second * 1000u);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED));
+    }
+    s_gauge.sample_sequence++;
+    result = battery_charge_supervisor_service_poll(completed_at + 130000u);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED);
+    assert(!s_control.actual_enabled);
+}
+
+static uint32_t li_ion_service_sample(uint32_t now_ms) {
+    s_gauge.sample_sequence++;
+    s_gauge.session_delta_nah += (int64_t)s_gauge.current_ua * 1000 / 3600;
+    return battery_charge_supervisor_service_poll(now_ms);
+}
+
+static void setup_li_ion_taper(void) {
+    reset_fixture();
+    s_board.chemistry = BOARD_DIAG_CHEM_LI_ION;
+    s_learner.profile_id = BATTERY_LEARNING_PROFILE_LI_ION_BL5C;
+    s_gauge.gauge_session = s_learner.model.gauge_session = 0u;
+    s_gauge.terminal_mv = s_gauge.reference_mv = 4180;
+    s_gauge.current_ua = 18000;
+    uint32_t result = battery_charge_supervisor_service_poll(1000);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_ADMITTED);
+    assert(snapshot().model.policy == BATTERY_CHARGE_POLICY_ENFORCE_LI_ION);
+    mark_store_durable();
+}
+
+static void test_li_ion_taper_persistence_restore_and_recharge(void) {
+    setup_li_ion_taper();
+    int64_t baseline = s_stored.start_session_delta_nah;
+    uint32_t generation = s_stored.charge_generation;
+    for (unsigned second = 1; second < 180; ++second) {
+        uint32_t result = li_ion_service_sample(1000 + second * 1000);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED));
+    }
+    s_set_status = STORE_STATUS_STORAGE_ERROR;
+    uint32_t result = li_ion_service_sample(181000);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED);
+    assert(snapshot().persistence_pending);
+    assert(s_control.actual_enabled);
+    result = li_ion_service_sample(182000);
+    assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED));
+    assert(s_control.actual_enabled);
+    s_set_status = STORE_STATUS_OK;
+    (void)li_ion_service_sample(183000);
+    assert(s_stored.supervisor_inhibit_latched && s_store_dirty);
+    assert(s_control.actual_enabled);
+    mark_store_durable();
+    result = li_ion_service_sample(184000);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+    assert(!s_control.actual_enabled);
+    assert(s_stored.last_terminal_full_qualified);
+    assert(s_stored.latched_stop_reason == BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL);
+    assert(battery_charge_supervisor_persisted_valid(&s_stored));
+    assert(battery_charge_supervisor_service_boot_inhibit_required());
+    mark_store_durable();
+    battery_charge_supervisor_service_init();
+    s_gauge.current_ua = -25000;
+    result = li_ion_service_sample(185000);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_RESTORED);
+    assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED));
+    assert(snapshot().model.full_qualified); /* History is FULL, live ACR is not. */
+    assert(s_stored.start_session_delta_nah == baseline);
+    assert(s_stored.charge_generation == generation);
+    mark_store_durable();
+
+    /* A transient dip and the exact 4.0 V boundary cannot restart charge. */
+    s_gauge.terminal_mv = s_gauge.reference_mv = 3990;
+    (void)li_ion_service_sample(186000);
+    s_gauge.terminal_mv = s_gauge.reference_mv = 4000;
+    for (unsigned second = 187; second <= 248; ++second) {
+        result = li_ion_service_sample(second * 1000);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED));
+        assert(!s_control.actual_enabled);
+    }
+    s_gauge.terminal_mv = s_gauge.reference_mv = 3990;
+    for (unsigned second = 249; second < 309; ++second) {
+        result = li_ion_service_sample(second * 1000);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED));
+    }
+    result = li_ion_service_sample(309000);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED);
+    assert(s_stored.maintenance_rearm_pending);
+    assert(!s_control.actual_enabled);
+    (void)li_ion_service_sample(310000);
+    assert(!s_control.actual_enabled);
+    mark_store_durable();
+    (void)li_ion_service_sample(311000);
+    (void)li_ion_service_sample(312000);
+    assert(s_control.actual_enabled);
+    mark_store_durable();
+    s_gauge.current_ua = 100000;
+    result = li_ion_service_sample(313000);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_RESTARTED);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_ADMITTED);
+    assert(s_stored.charge_generation == generation + 1);
+    assert(!s_stored.supervisor_inhibit_latched);
+    assert(snapshot().model.taper_windows == 0);
+}
+
+static void test_li_ion_recharge_rejects_interrupted_evidence(void) {
+    for (unsigned failure = 0; failure < 10; ++failure) {
+        setup_li_ion_taper();
+        for (unsigned second = 2; second <= 181; ++second) {
+            (void)li_ion_service_sample(second * 1000u);
+        }
+        mark_store_durable();
+        uint32_t result = li_ion_service_sample(182000u);
+        assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+        mark_store_durable();
+        s_gauge.current_ua = -25000;
+        s_gauge.terminal_mv = s_gauge.reference_mv = 3990u;
+        for (unsigned second = 183; second <= 213; ++second) {
+            (void)li_ion_service_sample(second * 1000u);
+        }
+
+        battery_learning_observation_t good_gauge = s_gauge;
+        board_diag_snapshot_t good_board = s_board;
+        switch (failure) {
+        case 0: s_gauge.terminal_mv = 4000u; break;
+        case 1: s_gauge.reference_mv = 4000u; break;
+        case 2: s_gauge.current_ua = 1000; break;
+        case 3: s_gauge.sample_valid = false; break;
+        case 4: s_gauge.continuity_valid = false; break;
+        case 5: s_gauge.current_valid = false; break;
+        case 6: s_board.charge_state = BOARD_DIAG_CHARGE_FAULT; break;
+        case 7: s_board.charger_inhibit_owner_mask |= CHARGER_INHIBIT_DEBUG; break;
+        case 8: s_board.charger_input_mv = 4200; break;
+        case 9:
+            s_learner.model.full_anchor_valid = true;
+            battery_charge_supervisor_service_init();
+            break;
+        }
+        result = li_ion_service_sample(214000u);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED));
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED));
+        s_gauge = good_gauge;
+        s_board = good_board;
+        s_gauge.sample_sequence += 2;
+        unsigned ready_second = failure == 9 ? 274u : 275u;
+        for (unsigned second = 215; second < ready_second; ++second) {
+            result = li_ion_service_sample(second * 1000u);
+            assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED));
+            assert(!s_control.actual_enabled);
+        }
+        result = li_ion_service_sample(ready_second * 1000u);
+        assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED);
+    }
+}
+
+static void test_li_ion_upgrade_and_reset_discard_partial_taper(void) {
+    setup_li_ion_taper();
+    int64_t baseline = s_stored.start_session_delta_nah;
+    for (unsigned second = 1; second <= 120; ++second) li_ion_service_sample(1000 + second * 1000);
+    assert(snapshot().model.taper_windows == 2);
+    s_stored.configured_policy = BATTERY_CHARGE_POLICY_OBSERVE;
+    battery_charge_supervisor_service_init();
+    uint32_t result = li_ion_service_sample(122000);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_RESTORED);
+    assert(snapshot().model.policy == BATTERY_CHARGE_POLICY_ENFORCE_LI_ION);
+    assert(s_stored.start_session_delta_nah == baseline);
+    assert(snapshot().model.taper_windows == 0);
+    for (unsigned second = 123; second <= 245; ++second) {
+        result = li_ion_service_sample(second * 1000);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED));
+    }
+}
+
+static void test_chemistry_change_waits_for_matching_learner(void) {
+    reset_fixture();
+    s_board.chemistry = BOARD_DIAG_CHEM_LI_ION;
+    s_gauge.gauge_session = 0u;
+    s_learner.model.gauge_session_bound = false;
+    uint32_t result = battery_charge_supervisor_service_poll(1000u);
+    assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_ADMITTED));
+    assert(snapshot().model.blockers & BATTERY_CHARGE_BLOCK_STALE_ADMISSION);
+
+    s_learner.profile_id = BATTERY_LEARNING_PROFILE_LI_ION_BL5C;
+    s_learner.initialized = false;
+    s_gauge.sample_sequence++;
+    result = battery_charge_supervisor_service_poll(2000u);
+    assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_ADMITTED));
+
+    s_learner.initialized = true;
+    s_gauge.sample_sequence++;
+    result = battery_charge_supervisor_service_poll(3000u);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_ADMITTED);
+}
+
+static void test_delayed_chemistry_restore_waits_for_learner(void) {
+    for (unsigned completed = 0; completed < 2; ++completed) {
+        setup_li_ion_taper();
+        if (completed) {
+            for (unsigned second = 2; second <= 181; ++second) {
+                (void)li_ion_service_sample(second * 1000u);
+            }
+            mark_store_durable();
+            assert(li_ion_service_sample(182000u) &
+                   BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+            mark_store_durable();
+        }
+        battery_charge_supervisor_persisted_t saved = s_stored;
+        s_board.chemistry = BOARD_DIAG_CHEM_UNKNOWN;
+        s_learner.initialized = false;
+        s_learner.model.gauge_session_bound = false;
+        (void)battery_charge_supervisor_service_poll(183000u);
+        s_board.chemistry = BOARD_DIAG_CHEM_LI_ION;
+        uint32_t result = battery_charge_supervisor_service_poll(184000u);
+        assert(result == BATTERY_CHARGE_SUPERVISOR_RESULT_NONE);
+        assert(snapshot().restore_pending && snapshot().restore_attempts == 0u);
+        assert(memcmp(&s_stored, &saved, sizeof(saved)) == 0);
+        s_learner.initialized = true;
+        s_learner.profile_id = BATTERY_LEARNING_PROFILE_NIMH_2S;
+        result = battery_charge_supervisor_service_poll(185000u);
+        assert(result == BATTERY_CHARGE_SUPERVISOR_RESULT_NONE);
+        assert(snapshot().restore_pending && snapshot().restore_attempts == 0u);
+        s_learner.profile_id = BATTERY_LEARNING_PROFILE_LI_ION_BL5C;
+        s_learner.model.full_anchor_valid = completed != 0;
+        result = battery_charge_supervisor_service_poll(186000u);
+        assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_RESTORED);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED));
+        assert(snapshot().restore_successes == 1u && snapshot().restore_failures == 0u);
+        assert(snapshot().model.phase == (completed ? BATTERY_CHARGE_PHASE_COMPLETE_SOFTWARE
+                                                   : BATTERY_CHARGE_PHASE_CHARGING));
+        assert(snapshot().maintenance_full_hold == (completed != 0));
+        assert(s_control.actual_enabled == (completed == 0));
+        assert(memcmp(&s_stored, &saved, sizeof(saved)) == 0);
+    }
+}
+
+static void test_recharge_finishes_before_returning_to_standby(void) {
+    const uint32_t awake_periods_ms[] = {1000u, 5000u};
+    for (unsigned cadence = 0; cadence < 2; ++cadence) {
+        setup_li_ion_taper();
+        for (unsigned second = 2; second <= 181; ++second) {
+            (void)li_ion_service_sample(second * 1000u);
+        }
+        mark_store_durable();
+        assert(li_ion_service_sample(182000u) & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+        mark_store_durable();
+        assert(battery_charge_supervisor_service_standby_ready());
+        s_gauge.current_ua = -25000;
+        s_gauge.terminal_mv = s_gauge.reference_mv = 3990u;
+        uint32_t now = 182000u;
+        unsigned minute_sleeps = 0u, armed = 0u, restarted = 0u;
+        for (unsigned poll = 0; poll < 70; ++poll) {
+            bool asleep = battery_charge_supervisor_service_standby_ready();
+            minute_sleeps += asleep;
+            now += asleep ? 60000u : awake_periods_ms[cadence];
+            uint32_t result = li_ion_service_sample(now);
+            if (result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED) armed++;
+            if (result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_RESTARTED) {
+                restarted++;
+                break;
+            }
+            assert(!battery_charge_supervisor_service_standby_ready());
+            mark_store_durable();
+        }
+        assert(minute_sleeps == 1u && armed == 1u && restarted == 1u);
+        assert(s_control.actual_enabled);
+        assert(battery_charge_supervisor_service_standby_ready());
+    }
+}
+
+static void test_recharge_cancellation_releases_standby_hold(void) {
+    for (unsigned failure = 0; failure < 5; ++failure) {
+        setup_li_ion_taper();
+        for (unsigned second = 2; second <= 181; ++second) {
+            (void)li_ion_service_sample(second * 1000u);
+        }
+        mark_store_durable();
+        (void)li_ion_service_sample(182000u);
+        mark_store_durable();
+        s_gauge.current_ua = -25000;
+        s_gauge.terminal_mv = s_gauge.reference_mv = 3990u;
+        (void)li_ion_service_sample(183000u);
+        assert(!battery_charge_supervisor_service_standby_ready());
+        if (failure == 0) s_gauge.sample_valid = s_gauge.current_valid = false;
+        if (failure == 1) s_gauge.terminal_mv = 4000u;
+        if (failure == 2) s_board.charger_connected = false;
+        if (failure == 3) s_board.chemistry = BOARD_DIAG_CHEM_UNKNOWN;
+        if (failure == 4) s_board.charge_state = BOARD_DIAG_CHARGE_FAULT;
+        uint32_t result = li_ion_service_sample(184000u);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_ARMED));
+        assert(battery_charge_supervisor_service_standby_ready());
+    }
+}
+
+static void test_invalid_stop_sample_preserves_pending_full(void) {
+    setup_li_ion_taper();
+    for (unsigned second = 2; second <= 181; ++second) {
+        (void)li_ion_service_sample(second * 1000u);
+    }
+    mark_store_durable();
+    s_gauge.sample_valid = s_gauge.current_valid = false;
+    uint32_t result = battery_charge_supervisor_service_poll(182000u);
+    assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_TERMINAL));
+    assert(snapshot().model.phase == BATTERY_CHARGE_PHASE_STOPPING);
+    assert(s_stored.supervisor_inhibit_latched && !s_stored.last_terminal_full_qualified);
+    assert(!s_control.actual_enabled);
+    result = battery_charge_supervisor_service_poll(192000u);
+    assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_TERMINAL));
+    s_gauge.sample_valid = s_gauge.current_valid = true;
+    result = li_ion_service_sample(193000u);
+    assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+    assert(s_stored.last_terminal_full_qualified);
+    assert(snapshot().maintenance_full_hold);
+    assert(!s_control.actual_enabled);
+}
+
 int main(void) {
+    test_delayed_chemistry_restore_waits_for_learner();
+    test_recharge_finishes_before_returning_to_standby();
+    test_recharge_cancellation_releases_standby_hold();
+    test_invalid_stop_sample_preserves_pending_full();
+    test_li_ion_recharge_rejects_interrupted_evidence();
+    test_li_ion_taper_persistence_restore_and_recharge();
+    test_li_ion_upgrade_and_reset_discard_partial_taper();
+    test_chemistry_change_waits_for_matching_learner();
+    test_li_ion_profile_completion_restore_and_recharge();
     test_maps_and_freezes_precharge_evidence();
     test_natural_empty_admission_provides_full_deficit();
     test_new_gauge_session_cannot_admit_previous_pack_soc();

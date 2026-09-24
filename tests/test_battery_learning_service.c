@@ -14,6 +14,11 @@ static store_status_t s_get_status;
 static store_status_t s_set_status;
 static bool s_store_ready;
 static uint32_t s_set_calls;
+static board_diag_chemistry_t s_chemistry;
+
+board_diag_chemistry_t board_diag_battery_chemistry(void) {
+    return s_chemistry;
+}
 
 void board_diag_get_battery_learning_observation(
     uint32_t now_ms, battery_learning_observation_t *out) {
@@ -43,6 +48,7 @@ store_status_t store_battery_learning_set(
 }
 
 static void reset_fixture(void) {
+    s_chemistry = BOARD_DIAG_CHEM_NI_MH;
     battery_learning_persisted_defaults(&s_stored, NULL);
     s_get_status = STORE_STATUS_OK;
     s_set_status = STORE_STATUS_OK;
@@ -458,7 +464,37 @@ static void test_historical_full_recovery_is_guarded_and_transactional(void) {
     assert(!snapshot.model.full_anchor_valid);
 }
 
+static void test_chemistry_isolation(void) {
+    reset_fixture();
+    s_chemistry = BOARD_DIAG_CHEM_UNKNOWN;
+    battery_learning_service_init();
+    assert(s_set_calls == 0u);
+    assert(battery_learning_service_poll(1000u, BATTERY_LEARNING_EVENT_FULL, 1224u) == 0u);
+    battery_learning_service_snapshot_t snapshot;
+    battery_learning_service_get_snapshot(&snapshot);
+    assert(!snapshot.initialized && !snapshot.model.soc_bars_valid);
+
+    s_chemistry = BOARD_DIAG_CHEM_LI_ION;
+    s_observation.terminal_mv = 4200u;
+    (void)battery_learning_service_poll(2000u, BATTERY_LEARNING_EVENT_FULL, 1224u);
+    assert(s_stored.profile_id == BATTERY_LEARNING_PROFILE_LI_ION_BL5C);
+    assert(s_stored.nominal_capacity_mah == 1020u);
+    assert(s_stored.soc_charge_factor_permille == 1000u);
+    assert(battery_learning_persisted_valid(&s_stored, NULL));
+    assert(!battery_learning_persisted_valid(&s_stored, battery_learning_nimh_profile()));
+    battery_learning_service_init();
+    battery_learning_service_get_snapshot(&snapshot);
+    assert(snapshot.model.full_anchor_valid);
+    assert(snapshot.model.nominal_capacity_mah == 1020u);
+
+    s_chemistry = BOARD_DIAG_CHEM_NI_MH;
+    (void)battery_learning_service_poll(3000u, BATTERY_LEARNING_EVENT_NONE, 1224u);
+    assert(s_stored.profile_id == BATTERY_LEARNING_PROFILE_NIMH_2S);
+    assert(!s_stored.full_anchor_valid);
+}
+
 int main(void) {
+    test_chemistry_isolation();
     test_load_and_persist_full_anchor();
     test_pending_write_retries_without_new_sample();
     test_failed_store_write_remains_pending();

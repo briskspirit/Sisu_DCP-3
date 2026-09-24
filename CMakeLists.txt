@@ -155,6 +155,7 @@ add_executable(${SISU_FIRMWARE_TARGET}
     src/hal/accessory_hal.c
     src/services/battery_charge_logic.c
     src/hal/battery_hal.c
+    src/hal/battery_chemistry_logic.c
     src/hal/bq25171_stat.c
     src/hal/battery_gauge_logic.c
     src/hal/battery_poll_logic.c
@@ -600,6 +601,7 @@ add_executable(diag_charger_adc
     src/services/battery_charge_logic.c
     src/hal/battery_gauge_logic.c
     src/hal/battery_hal.c
+    src/hal/battery_chemistry_logic.c
     src/hal/bq25171_stat.c
     src/hal/battery_poll_logic.c
     src/hal/battery_runtime_logic.c

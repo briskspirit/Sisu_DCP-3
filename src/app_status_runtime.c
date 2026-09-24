@@ -70,6 +70,7 @@ void app_status_runtime_init(app_t *app) {
         &app->battery_raw_collapse_evidence);
     battery_endpoint_state_init(&app->battery_endpoint_state);
     app->battery_endpoint_kind = BATTERY_ENDPOINT_NONE;
+    app->battery_capacity_low_notice = false;
     app->battery_capacity_voltage_disagreement = false;
     app->battery_bars = board_diag_battery_level_bars();
     app->battery_anim_level = app->battery_bars;
@@ -165,7 +166,8 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
     battery_charge_completion_decision_t completion =
         battery_charge_completion_decision(
             charge_transition.completed, supervisor_completed,
-            supervisor.model.policy == BATTERY_CHARGE_POLICY_OBSERVE);
+            supervisor.model.policy == BATTERY_CHARGE_POLICY_OBSERVE &&
+                board.chemistry == BOARD_DIAG_CHEM_NI_MH);
     bool completed = completion.ui_completed;
     bool maintenance_restarted =
         (supervisor_result &
@@ -255,15 +257,13 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
         changed = true;
     }
 
-    /* Warning state comes from the v6.00 dual-domain classifier: terminal/fast
-     * evidence, the 65 mA reference estimate, and its 20-second healthy-entry
-     * qualification are all owned by battery_gauge_logic. The app also owns the
-     * independent Rev B2 operating floor. Outside a call it matches the 2.10 V
-     * power-on gate, leaving enough margin to persist and shut down cleanly;
-     * during a call only the lower emergency floor may end the call. */
+    /* Voltage warning qualification belongs to the chemistry's gauge profile.
+     * The app also owns its independent operating floor, leaving margin to
+     * persist and shut down cleanly; during a call only the lower emergency
+     * floor may end the call. */
     bool call_active = app->last_modem_call_state != MODEM_CALL_IDLE;
     uint16_t shutdown_threshold_mv =
-        battery_empty_shutdown_threshold_mv(call_active);
+        board_diag_battery_shutdown_threshold_mv(call_active);
     bool raw_collapse_confirmed = battery_raw_collapse_evidence_update(
         &app->battery_raw_collapse_evidence,
         battery_valid && !charge_recovery_active && !powered_off,
@@ -302,14 +302,25 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
             charger, charge_recovery_active, low_zone, empty_zone)) {
         (void)battery_charge_supervisor_service_release_for_battery_floor();
     }
+    bool capacity_notice_trusted = battery_valid &&
+        learner.model.remaining_capacity_valid &&
+        learner.model.learned_capacity_valid &&
+        learner.model.soc_confidence == BATTERY_SOC_CONFIDENCE_ANCHORED &&
+        (learner.model.capacity_confidence == BATTERY_CAPACITY_CONFIDENCE_OBSERVED ||
+         learner.model.capacity_confidence == BATTERY_CAPACITY_CONFIDENCE_LEARNED);
+    app->battery_capacity_low_notice = battery_capacity_low_notice(
+        app->battery_capacity_low_notice, capacity_notice_trusted,
+        learner.model.remaining_capacity_nah, learner.model.soc_capacity_mah);
+    /* Neither early notice is physical endpoint or charger-release evidence. */
     battery_warning_action_t warning_action = battery_warning_action(
         battery_valid, charge_recovery_active, powered_off, empty_zone,
-        low_zone);
+        low_zone || board.battery_low_notice || app->battery_capacity_low_notice);
 
     if (warning_action == BATTERY_WARNING_ACTION_SUPPRESS) {
         /* Verified positive charge re-arms the warning and cancels a countdown;
          * physical VIN alone is deliberately insufficient. */
         app->battery_low_notified = false;
+        app->battery_low_deferred = false;
         battery_cancel_empty_countdown(app);
     } else if (warning_action == BATTERY_WARNING_ACTION_EMPTY) {
         /* Natural EMPTY requires physical voltage/rail evidence. Coulomb zero
@@ -326,6 +337,8 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
          * verified positive charging is the cancellation path. */
         app->battery_low_notified = false;
         if (app->battery_empty_off_ms == 0u) {
+            app->battery_last_empty_ms = now_ms;
+            app->battery_last_empty_mv = mv_fresh;
             if (endpoint.learn_empty) {
                 uint32_t endpoint_result =
                     battery_learning_service_poll(
@@ -369,6 +382,8 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
         battery_cancel_empty_countdown(app);
         if (!app->battery_low_notified) {
             app->battery_low_notified = true;
+            app->battery_low_eligible_ms = now_ms;
+            app->battery_low_eligible_mv = mv_fresh;
             app->battery_low_warn_fast = true;
             app->battery_low_next_warn_ms = now_ms; /* fire this poll */
         }
@@ -380,11 +395,19 @@ bool poll_battery(app_t *app, uint32_t now_ms) {
                 now_ms + (app->battery_low_warn_fast ? BATTERY_LOW_WARN_FAST_MS
                                                      : BATTERY_LOW_WARN_STEADY_MS);
             app->battery_low_warn_fast = false;
+            app->battery_low_deferred = false;
+            app->battery_low_shown_ms = now_ms;
+            app->battery_low_shown_count++;
             changed = true;
+        } else if (time_diff_ms(now_ms, app->battery_low_next_warn_ms) >= 0 &&
+                   !app->battery_low_deferred) {
+            app->battery_low_deferred = true;
+            app->battery_low_deferred_ms = now_ms;
         }
     } else {
         /* Healthy classifier state: clear the notification schedule. */
         app->battery_low_notified = false;
+        app->battery_low_deferred = false;
         battery_cancel_empty_countdown(app);
     }
 

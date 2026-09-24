@@ -5,14 +5,6 @@
 #include <stdint.h>
 
 #define BATTERY_RAW_COLLAPSE_CONFIRM_SAMPLES 2u
-/* Rev B2's ordinary operating floor. It deliberately matches the power-on
- * admission threshold: below this point the pack cannot be trusted to sustain
- * the 3V8 modem rail or an orderly endpoint commit. */
-#define BATTERY_OPERATIONAL_EMPTY_MV 2100u
-/* During a call, preserve the original UX rule that LOW alone never ends the
- * call. This lower emergency floor remains independent of compensation.
- * [BP] until converter-dropout testing closes the true hardware boundary. */
-#define BATTERY_RAW_COLLAPSE_MV 1800u
 
 typedef struct {
     uint32_t last_sequence;
@@ -31,10 +23,6 @@ bool battery_raw_collapse_evidence_update(
     uint32_t sample_sequence,
     uint16_t sample_mv,
     uint16_t threshold_mv);
-
-/* Ordinary idle operation shuts down before the measured Rev B2 brownout
- * region. A live call transaction retains only the hard emergency floor. */
-uint16_t battery_empty_shutdown_threshold_mv(bool call_active);
 
 typedef enum {
     BATTERY_ENDPOINT_NONE = 0,
@@ -95,6 +83,14 @@ typedef enum {
     BATTERY_WARNING_ACTION_LOW,
     BATTERY_WARNING_ACTION_HEALTHY,
 } battery_warning_action_t;
+
+/* Notification only. Use exact charge against measured capacity, not rounded
+ * display SOC. Missing/untrusted estimates discard the hysteresis latch. */
+bool battery_capacity_low_notice(
+    bool active,
+    bool estimate_trusted,
+    uint64_t remaining_nah,
+    uint16_t capacity_mah);
 
 /* Select the app-side notification action after the estimator and independent
  * safety paths have published their evidence. Missing gauge data must preserve

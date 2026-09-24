@@ -884,6 +884,7 @@ run_telit test_net_monitor_render \
 run test_netmon_control_service src/services/netmon_control_service.c src/audio/audio_levels.c
 run test_sim_presence_logic  src/apps/sim_presence_logic.c
 run test_battery_gauge       src/hal/battery_gauge_logic.c
+run test_li_ion_low_warning src/hal/battery_gauge_logic.c src/apps/battery_status_logic.c
 run test_battery_learning_logic src/services/battery_learning_logic.c
 run test_battery_learning_service src/services/battery_learning_service.c src/services/battery_learning_logic.c
 run test_board_safe_gpio     src/hal/board_safe_gpio.c
@@ -896,9 +897,12 @@ run test_charger_control_service src/services/charger_control_service.c
 run test_bq25171_stat        src/hal/bq25171_stat.c
 run test_battery_poll_logic   src/hal/battery_poll_logic.c
 run test_battery_status_logic src/apps/battery_status_logic.c
+run test_battery_warning_runtime src/app_status_runtime.c src/apps/battery_status_logic.c src/services/battery_charge_logic.c src/audio/audio_levels.c "${DEAD_CODE_FLAGS[@]}"
 run test_battery_runtime_logic src/hal/battery_runtime_logic.c
 run test_board_diag_power_gate src/services/board_diag_service.c src/services/charger_control_service.c "${DEAD_CODE_FLAGS[@]}"
 run test_ltc2959_regs        src/hal/ltc2959_regs.c
+run test_battery_chemistry_logic src/hal/battery_chemistry_logic.c
+run test_battery_hal src/hal/battery_hal.c src/hal/battery_chemistry_logic.c src/hal/battery_gauge_logic.c src/hal/battery_poll_logic.c src/hal/battery_runtime_logic.c src/hal/charger_input_logic.c src/hal/bq25171_stat.c -DSISU_LTC2959_VOLTAGE_AUTHORITATIVE=1
 run test_ltc2959_hal         src/hal/ltc2959_hal.c src/hal/ltc2959_regs.c
 run test_tca8418_hal         src/hal/tca8418_hal.c
 run test_keypad              src/hal/keypad.c src/services/event_queue.c

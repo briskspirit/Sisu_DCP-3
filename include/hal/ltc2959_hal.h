@@ -37,6 +37,8 @@ typedef struct {
     uint32_t i2c_error_count;
     uint32_t ara_error_count;
     uint32_t gauge_session;
+    /* Power-reset/UVLO evidence only; an explicit ACR re-zero is not removal. */
+    uint32_t power_reset_count;
 } ltc2959_snapshot_t;
 
 typedef struct {

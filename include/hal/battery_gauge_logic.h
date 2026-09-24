@@ -29,6 +29,9 @@
 #define BATTERY_GAUGE_WARNING_ENTRY_MS 20000u
 #define BATTERY_GAUGE_STARTUP_BIAS_MV 23u
 #define BATTERY_GAUGE_RISE_REARM_NAH INT64_C(150000000)
+#define BATTERY_GAUGE_LOW_NOTICE_HOLD_MS 10000u
+#define BATTERY_GAUGE_LOW_NOTICE_MAX_GAP_MS 10000u
+#define BATTERY_GAUGE_LOW_NOTICE_MIN_SAMPLES 3u
 
 #define BATTERY_GAUGE_MEDIAN_CAPACITY 15u
 #define BATTERY_GAUGE_CURRENT_HISTORY_CAPACITY 8u
@@ -47,6 +50,17 @@ typedef struct {
     uint16_t max_compensation_mv;
     uint8_t charge_compensation_percent;
     int64_t rise_rearm_nah;
+    uint16_t bar_floor_mv[5];
+    uint16_t low_mv;
+    uint16_t low_terminal_mv;
+    /* Optional notification-only path; never physical EMPTY corroboration. */
+    uint16_t low_notice_mv;
+    uint16_t low_notice_clear_mv;
+    uint16_t empty_mv;
+    uint16_t power_on_mv;
+    uint16_t operating_empty_mv;
+    uint16_t emergency_empty_mv;
+    uint16_t startup_bias_mv;
 } battery_gauge_profile_t;
 
 typedef struct {
@@ -73,6 +87,7 @@ typedef struct {
     bool window_current_valid;
     uint8_t bars;
     battery_gauge_warning_t warning;
+    bool low_notice;
     uint32_t model_sequence;
 } battery_gauge_snapshot_t;
 
@@ -91,6 +106,14 @@ typedef struct {
 } battery_warning_state_t;
 
 typedef struct {
+    uint32_t pending_since_ms;
+    uint32_t last_sample_ms;
+    uint8_t samples;
+    bool active;
+    bool pending;
+} battery_low_notice_state_t;
+
+typedef struct {
     uint16_t value_mv;
     uint32_t observed_ms;
 } battery_gauge_median_point_t;
@@ -104,6 +127,7 @@ typedef struct {
     battery_gauge_snapshot_t snapshot;
     battery_bar_state_t bar;
     battery_warning_state_t warning;
+    battery_low_notice_state_t low_notice;
     battery_gauge_median_point_t median[BATTERY_GAUGE_MEDIAN_CAPACITY];
     battery_gauge_current_point_t current_history[
         BATTERY_GAUGE_CURRENT_HISTORY_CAPACITY];
@@ -133,10 +157,9 @@ typedef struct {
 } battery_power_on_qualifier_t;
 
 const battery_gauge_profile_t *battery_gauge_nimh_profile(void);
-
-/* Direct PM-0x205 ladder helpers. */
-uint8_t battery_gauge_bars_from_mv(uint16_t mv);
-uint16_t battery_gauge_bar_floor_mv(uint8_t bar);
+const battery_gauge_profile_t *battery_gauge_li_ion_profile(void);
+uint8_t battery_gauge_bars_for_profile(const battery_gauge_profile_t *profile,
+                                      uint16_t mv);
 
 /* Signed correction from terminal voltage to the profile's reference-load
  * domain. window_current_ua is used conservatively when valid. */
@@ -159,6 +182,7 @@ uint8_t battery_gauge_bar_step(
 void battery_gauge_warning_state_init(battery_warning_state_t *state);
 battery_gauge_warning_t battery_gauge_warning_step(
     battery_warning_state_t *state,
+    const battery_gauge_profile_t *profile,
     uint32_t now_ms,
     uint16_t terminal_mv,
     uint16_t fast_terminal_mv,
@@ -168,7 +192,8 @@ battery_gauge_warning_t battery_gauge_warning_step(
 void battery_gauge_init(battery_gauge_state_t *state);
 /* Consume one distinct LTC observation. Sub-second observations remain
  * available as fresh safety evidence in the HAL; the Nokia-derived estimator
- * advances at most once per second. Returns true when model output changed. */
+ * advances at most once per second. The notification-only LOW path consumes
+ * every distinct sample. Returns true when model or notification output changed. */
 bool battery_gauge_update(
     battery_gauge_state_t *state,
     const battery_gauge_profile_t *profile,

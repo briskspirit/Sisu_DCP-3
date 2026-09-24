@@ -11,6 +11,7 @@ typedef enum {
     BOARD_DIAG_CHEM_LI_ION = 0,
     BOARD_DIAG_CHEM_NI_MH,
     BOARD_DIAG_CHEM_ALK,
+    BOARD_DIAG_CHEM_UNKNOWN,
     BOARD_DIAG_CHEM_COUNT,
 } board_diag_chemistry_t;
 
@@ -34,6 +35,7 @@ typedef struct {
     uint8_t battery_bars;
     bool battery_forced;
     bool battery_low;
+    bool battery_low_notice; /* Notification only, not endpoint evidence. */
     bool battery_empty;
     int16_t battery_correction_mv;
     int32_t battery_window_current_ua;
@@ -121,6 +123,8 @@ void board_diag_service_init(uint32_t now_ms,
 void board_diag_service_poll(uint32_t now_ms);
 
 uint16_t board_diag_battery_millivolts(void);
+board_diag_chemistry_t board_diag_battery_chemistry(void);
+uint16_t board_diag_battery_shutdown_threshold_mv(bool call_active);
 uint16_t board_diag_battery_millivolts_raw(void);
 uint16_t board_diag_battery_millivolts_fresh(void);
 uint32_t board_diag_battery_sample_sequence(void);
@@ -129,7 +133,7 @@ uint8_t board_diag_battery_level_bars(void);
 bool board_diag_battery_low(void);
 bool board_diag_battery_empty(void);
 /* True only when a modem-supply failure may be attributed to a marginal pack:
- * fresh valid terminal evidence is below Nokia's 2320 mV low threshold. The
+ * fresh valid terminal evidence is below the chemistry's low threshold. The
  * app independently decides whether verified positive charging is recovering
  * the pack; physical charger presence alone is not a veto. */
 bool board_diag_battery_supply_failure_indicates_empty(void);
