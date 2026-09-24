@@ -46,7 +46,11 @@ bool tca8418_hal_take_charger_status_change(void);
  * register readback cannot prove the voltage at the BQ pin. */
 bool tca8418_hal_set_charger_enabled(bool enabled);
 bool tca8418_hal_get_charger_enabled(bool *enabled);
+/* A different chemistry requires verified /CE-off first. Enabling is then
+ * held off for one second so BQ re-reads the settled resistor selection.
+ * Selector ownership/target survives expander recovery and warm RP boots. */
 bool tca8418_hal_set_charger_li_ion_mode(bool enabled);
+bool tca8418_hal_get_charger_li_ion_mode(bool *enabled);
 
 /* Reconfigure the TCA for the powered-off (dormant) window: keypad interrupts
  * off (keys must not wake an off phone) and the COL4 CHR_STAT2 falling-level

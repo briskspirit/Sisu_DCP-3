@@ -30,26 +30,52 @@ static void check_i32(int32_t got, int32_t want, const char *message) {
 }
 
 static void test_bar_ladder(void) {
-    check_u32(battery_gauge_bars_from_mv(2600u), 4u, "2600 -> 4 bars");
-    check_u32(battery_gauge_bars_from_mv(VBAT_BAR4_MV), 4u,
+    const battery_gauge_profile_t *profile = battery_gauge_nimh_profile();
+    check_u32(profile->operating_empty_mv, 2100u, "NiMH idle floor");
+    check_u32(profile->emergency_empty_mv, 1800u, "NiMH call floor");
+    check_u32(battery_gauge_bars_for_profile(profile, 2600u), 4u, "2600 -> 4 bars");
+    check_u32(battery_gauge_bars_for_profile(profile, VBAT_BAR4_MV), 4u,
               "4-bar floor is inclusive");
-    check_u32(battery_gauge_bars_from_mv(VBAT_BAR4_MV - 1u), 3u,
+    check_u32(battery_gauge_bars_for_profile(profile, VBAT_BAR4_MV - 1u), 3u,
               "just below 4-bar floor -> 3");
-    check_u32(battery_gauge_bars_from_mv(VBAT_BAR3_MV), 3u,
+    check_u32(battery_gauge_bars_for_profile(profile, VBAT_BAR3_MV), 3u,
               "3-bar floor is inclusive");
-    check_u32(battery_gauge_bars_from_mv(VBAT_BAR3_MV - 1u), 2u,
+    check_u32(battery_gauge_bars_for_profile(profile, VBAT_BAR3_MV - 1u), 2u,
               "just below 3-bar floor -> 2");
-    check_u32(battery_gauge_bars_from_mv(VBAT_BAR2_MV), 2u,
+    check_u32(battery_gauge_bars_for_profile(profile, VBAT_BAR2_MV), 2u,
               "2-bar floor is inclusive");
-    check_u32(battery_gauge_bars_from_mv(VBAT_BAR2_MV - 1u), 1u,
+    check_u32(battery_gauge_bars_for_profile(profile, VBAT_BAR2_MV - 1u), 1u,
               "the authentic wide 1-bar band starts below 2425 mV");
-    check_u32(battery_gauge_bars_from_mv(VBAT_BAR1_MV), 1u,
+    check_u32(battery_gauge_bars_for_profile(profile, VBAT_BAR1_MV), 1u,
               "1-bar floor is inclusive");
-    check_u32(battery_gauge_bars_from_mv(VBAT_BAR1_MV - 1u), 0u,
+    check_u32(battery_gauge_bars_for_profile(profile, VBAT_BAR1_MV - 1u), 0u,
               "below the empty floor -> 0");
-    check_u32(battery_gauge_bar_floor_mv(0u), 0u, "bar zero has no floor");
-    check_u32(battery_gauge_bar_floor_mv(5u), VBAT_BAR4_MV,
-              "bar-floor lookup clamps above four");
+    check_u32(profile->bar_floor_mv[0], 0u, "bar zero has no floor");
+    check_u32(battery_gauge_bars_for_profile(profile, UINT16_MAX), 4u,
+              "bar ladder never exceeds four");
+}
+
+static void test_li_ion_profile(void) {
+    const battery_gauge_profile_t *profile = battery_gauge_li_ion_profile();
+    check_u32(battery_gauge_bars_for_profile(profile, 4200u), 4u, "Li-ion full bars");
+    check_u32(battery_gauge_bars_for_profile(profile, 3750u), 2u, "Li-ion mid bars");
+    check_u32(battery_gauge_bars_for_profile(profile, 3100u), 0u, "Li-ion empty bars");
+    check_u32(profile->power_on_mv, 3400u, "Li-ion admission is not NiMH floor");
+    check_u32(profile->operating_empty_mv, 3300u, "Li-ion conservative idle floor");
+    check_u32(profile->emergency_empty_mv, 3000u, "Li-ion call floor");
+    check_i32(battery_gauge_load_correction_mv(profile, -300000, 0, false, false),
+              0, "Li-ion does not borrow unqualified NiMH compensation");
+    battery_gauge_state_t state;
+    const uint16_t voltages[] = {4200u, 3450u, 3100u};
+    for (unsigned i = 0; i < 3; i++) {
+        battery_gauge_init(&state);
+        battery_gauge_observation_t observation = {
+            .sample_sequence = 1u, .terminal_mv = voltages[i], .sample_valid = true,
+        };
+        check(battery_gauge_update(&state, profile, &observation), "Li-ion sample consumed");
+        check_u32(state.snapshot.reference_mv, voltages[i], "Li-ion has no NiMH startup bias");
+        check_u32(state.snapshot.warning, i, "Li-ion healthy/low/empty classification");
+    }
 }
 
 static void test_reference_load_correction(void) {
@@ -163,37 +189,38 @@ static void test_bar_projection(void) {
 }
 
 static void test_warning_classifier(void) {
+    const battery_gauge_profile_t *profile = battery_gauge_nimh_profile();
     battery_warning_state_t state;
     battery_gauge_warning_state_init(&state);
 
     check_u32(battery_gauge_warning_step(
-                  &state, 0u, 2500u, 2500u, 2500u, 2500u),
+                  &state, profile, 0u, 2500u, 2500u, 2500u, 2500u),
               BATTERY_GAUGE_WARNING_HEALTHY,
               "healthy evidence seeds healthy");
     check_u32(battery_gauge_warning_step(
-                  &state, 1000u, 2200u, 2200u, 2200u, 2400u),
+                  &state, profile, 1000u, 2200u, 2200u, 2200u, 2400u),
               BATTERY_GAUGE_WARNING_HEALTHY,
               "healthy-to-low transition starts the 20-second hold");
     check_u32(battery_gauge_warning_step(
-                  &state, 20999u, 2200u, 2200u, 2200u, 2400u),
+                  &state, profile, 20999u, 2200u, 2200u, 2200u, 2400u),
               BATTERY_GAUGE_WARNING_HEALTHY,
               "warning remains held just before 20 seconds");
     check_u32(battery_gauge_warning_step(
-                  &state, 21000u, 2200u, 2200u, 2200u, 2400u),
+                  &state, profile, 21000u, 2200u, 2200u, 2200u, 2400u),
               BATTERY_GAUGE_WARNING_LOW,
               "persistent failure enters low after 20 seconds");
     check_u32(battery_gauge_warning_step(
-                  &state, 21001u, 1800u, 1800u, 1800u, 1800u),
+                  &state, profile, 21001u, 1800u, 1800u, 1800u, 1800u),
               BATTERY_GAUGE_WARNING_EMPTY,
               "low-to-empty transition is immediate");
     check_u32(battery_gauge_warning_step(
-                  &state, 21002u, 2500u, 2500u, 2500u, 2500u),
+                  &state, profile, 21002u, 2500u, 2500u, 2500u, 2500u),
               BATTERY_GAUGE_WARNING_HEALTHY,
               "healthy evidence clears warning state immediately");
 
     battery_gauge_warning_state_init(&state);
     check_u32(battery_gauge_warning_step(
-                  &state, UINT32_MAX - 10u,
+                  &state, profile, UINT32_MAX - 10u,
                   2200u, 2200u, 2200u, 2400u),
               BATTERY_GAUGE_WARNING_LOW,
               "an unhealthy first estimate is published without a fake delay");
@@ -373,6 +400,7 @@ static void test_power_on_qualifier(void) {
 }
 
 int main(void) {
+    test_li_ion_profile();
     test_bar_ladder();
     test_reference_load_correction();
     test_bar_projection();

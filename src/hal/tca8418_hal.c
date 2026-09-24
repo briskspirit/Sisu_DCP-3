@@ -119,6 +119,15 @@ static bool s_charger_status_change_pending;
  * recovery so re-init cannot briefly undo a supervisor inhibit. */
 static bool s_charger_enabled_target;
 static bool s_charger_target_explicit;
+static bool s_li_ion_target;
+static bool s_chemistry_target_explicit;
+static bool s_charger_rearm_pending;
+static uint32_t s_charger_rearm_at_ms;
+
+static void hold_charger_for_chemistry(void) {
+    s_charger_rearm_pending = true;
+    s_charger_rearm_at_ms = time_ms() + 1000u;
+}
 
 static bool read_headset_level(bool *level_high) {
     if (level_high == NULL) {
@@ -172,6 +181,23 @@ static bool arm_charger_opposite_levels(uint8_t current_bits) {
         (uint8_t)((~current_bits) & TCA_CHARGER_STATUS_BITS));
 }
 
+static bool acquire_disabled_charger(void) {
+    uint8_t output = 0u, direction = 0u, keypad = 0u, pull = 0u;
+    if (!read_reg(TCA_REG_GPIO_DAT_OUT2, &output) ||
+        !read_reg(TCA_REG_GPIO_DIR2, &direction) ||
+        !read_reg(TCA_REG_KP_GPIO2, &keypad) ||
+        !read_reg(TCA_REG_GPIO_PULL2, &pull) ||
+        !write_reg(TCA_REG_GPIO_DAT_OUT2, (uint8_t)(output | TCA_COL5_BIT)) ||
+        !write_reg(TCA_REG_KP_GPIO2, (uint8_t)(keypad & ~TCA_COL5_BIT)) ||
+        !write_reg(TCA_REG_GPIO_PULL2, (uint8_t)(pull | TCA_COL5_BIT)) ||
+        !write_reg(TCA_REG_GPIO_DIR2, (uint8_t)(direction | TCA_COL5_BIT))) {
+        return false;
+    }
+    bool high = false, configured = false;
+    return read_output_bit(TCA_COL5_BIT, &high, &configured) &&
+           configured && high;
+}
+
 bool tca8418_hal_init(void) {
     s_ready = false;
     s_key_state = 0u;
@@ -190,8 +216,27 @@ bool tca8418_hal_init(void) {
             s_charger_enabled_target = false;
         }
     }
-    uint8_t charger_output = s_charger_enabled_target
-        ? 0u : TCA_COL5_BIT;
+    bool retained_li_ion = false;
+    bool selector_configured = false;
+    bool selector_read = read_output_bit(
+        TCA_COL6_BIT, &retained_li_ion, &selector_configured);
+    if (!s_chemistry_target_explicit) {
+        s_li_ion_target = selector_read && selector_configured &&
+                          retained_li_ion;
+    }
+    if (!selector_read || !selector_configured ||
+        retained_li_ion != s_li_ion_target) {
+        /* Do not restore COL6 until /CE is driven and verified inactive. Keep
+         * all other output latches intact while acquiring that single pin. */
+        if (!acquire_disabled_charger()) {
+            return false;
+        }
+        hold_charger_for_chemistry();
+    }
+    uint8_t charger_output = (uint8_t)(
+        (s_charger_enabled_target && !s_charger_rearm_pending
+            ? 0u : TCA_COL5_BIT) |
+        (s_li_ion_target ? TCA_COL6_BIT : 0u));
 
     /* Keyboard pins: ROW0..ROW5 and COL0..COL2. Everything else remains GPIO,
      * with COL5/COL6 as controlled outputs and COL7 left Hi-Z for the
@@ -200,8 +245,8 @@ bool tca8418_hal_init(void) {
         !write_reg(TCA_REG_KP_GPIO2, 0x07u) ||
         !write_reg(TCA_REG_KP_GPIO3, 0x00u) ||
         /* Safe output acquisition order: preload /CE from the durable software
-         * target (fail-disabled before the arbiter starts), leave NiMH select
-         * low, disconnect the POR pull-ups, then take output ownership. */
+         * target (fail-disabled if selector ownership was lost), preserve the
+         * chemistry target, disconnect POR pulls, then take ownership. */
         !write_reg(TCA_REG_GPIO_DAT_OUT2, charger_output) ||
         !write_reg(TCA_REG_GPIO_PULL2, (uint8_t)(TCA_COL5_BIT | TCA_COL6_BIT)) ||
         /* ROW6 is unused and ROW7 is HEAD_INT; both are inputs. Explicit writes
@@ -228,8 +273,8 @@ bool tca8418_hal_init(void) {
          *    outputs. Rev B2 fits the COL6 100k pull-down, but its COL5 R77
          *    pull-down is DNP. The BQ25171's weak internal pull-down therefore
          *    loses to the TCA's POR pull-up until this initialization completes.
-         *    Disable both TCA pull-ups and drive the safe NiMH mode plus the
-         *    retained /CE target explicitly. R77 remains a required board
+         *    Disable both TCA pull-ups and drive the retained chemistry and
+         *    /CE targets explicitly. R77 remains a required board
          *    rework for charger recovery while the RP/TCA rail is absent or
          *    below regulation.
          * Matrix pins (ROW0-5, COL0-2) keep their pull-ups: the keyscan engine
@@ -646,6 +691,19 @@ bool tca8418_hal_set_charger_enabled(bool enabled) {
     /* BQ25171 /CE is active low. */
     s_charger_enabled_target = enabled;
     s_charger_target_explicit = true;
+    if (enabled) {
+        bool li_ion = false;
+        if (!tca8418_hal_get_charger_li_ion_mode(&li_ion) ||
+            li_ion != s_li_ion_target) {
+            return false;
+        }
+        if (s_charger_rearm_pending) {
+            if (time_diff_ms(time_ms(), s_charger_rearm_at_ms) < 0) {
+                return false;
+            }
+            s_charger_rearm_pending = false;
+        }
+    }
     return configure_output_bit(TCA_COL5_BIT, !enabled);
 }
 
@@ -672,7 +730,42 @@ bool tca8418_hal_get_charger_enabled(bool *enabled) {
 }
 
 bool tca8418_hal_set_charger_li_ion_mode(bool enabled) {
+    bool current = false;
+    if (!tca8418_hal_get_charger_li_ion_mode(&current)) {
+        return false;
+    }
+    if (current == enabled) {
+        s_li_ion_target = enabled;
+        s_chemistry_target_explicit = true;
+        return true;
+    }
+    bool charging_enabled = true;
+    if (!tca8418_hal_get_charger_enabled(&charging_enabled) ||
+        charging_enabled) {
+        return false;
+    }
+    s_li_ion_target = enabled;
+    s_chemistry_target_explicit = true;
+    hold_charger_for_chemistry();
     return configure_output_bit(TCA_COL6_BIT, enabled);
+}
+
+bool tca8418_hal_get_charger_li_ion_mode(bool *enabled) {
+    if (enabled == NULL || !s_ready) {
+        return false;
+    }
+    bool configured = false;
+    bool high = false;
+    if (!read_output_bit(TCA_COL6_BIT, &high, &configured)) {
+        return false;
+    }
+    if (!configured || high != s_li_ion_target) {
+        s_ready = false;
+        s_next_reinit_ms = time_ms();
+        return false;
+    }
+    *enabled = high;
+    return true;
 }
 
 static bool configure_output_bit(uint8_t bit, bool high) {

@@ -11,6 +11,11 @@
 
 static int s_failures;
 
+const char *board_diag_chemistry_text(board_diag_chemistry_t chemistry) {
+    return chemistry == BOARD_DIAG_CHEM_LI_ION ? "Li-ion" :
+           chemistry == BOARD_DIAG_CHEM_NI_MH ? "NiMH" : "---";
+}
+
 static void check(bool condition, const char *message) {
     if (!condition) {
         fprintf(stderr, "FAIL: %s\n", message);
@@ -393,6 +398,11 @@ static void test_representative_exact_frames(void) {
                         &local, &modem, &control, &frame);
     check_lines(&frame, "POL BOOT", "FAC 1224 T", "STOP 0 L0", "REL 0",
                 "charge enforcement configuration is exact");
+    local.battery_charge_supervisor.policy = BATTERY_CHARGE_POLICY_ENFORCE_LI_ION;
+    netmon_format_frame(netmon_registry_find(48u), 4u, caps, 1200u,
+                        &local, &modem, &control, &frame);
+    check_lines(&frame, "POL LI", "FAC 1224 T", "STOP 0 L0", "REL 0",
+                "Li-ion enforcement policy has a diagnostic name");
 
     memset(&local.battery_learning, 0, sizeof(local.battery_learning));
     local.battery_learning.nominal_capacity_mah = 1225u;

@@ -24,6 +24,7 @@ static bool s_cached_charger_connected = true;
 static bool s_charge_status_valid = true;
 static battery_charge_status_t s_charge_status = BATTERY_CHARGE_ACTIVE;
 static bool s_charger_enabled;
+static battery_chemistry_t s_chemistry = BATTERY_CHEMISTRY_NIMH_2S;
 
 static void check(bool condition, const char *message) {
     if (!condition) {
@@ -80,6 +81,24 @@ bool battery_hal_charger_input_present_now(uint32_t now_ms) {
 
 bool battery_hal_charger_connected(void) {
     return s_cached_charger_connected;
+}
+
+const battery_gauge_profile_t *battery_hal_gauge_profile(void) {
+    static const battery_gauge_profile_t profile = {
+        .low_mv = VBAT_LOW_MV,
+        .empty_mv = VBAT_EMPTY_MV,
+        .operating_empty_mv = 2100u,
+        .emergency_empty_mv = 1800u,
+    };
+    static const battery_gauge_profile_t li_ion_profile = {
+        .operating_empty_mv = 3300u,
+        .emergency_empty_mv = 3000u,
+    };
+    return s_chemistry == BATTERY_CHEMISTRY_LI_ION_1S ? &li_ion_profile : &profile;
+}
+
+battery_chemistry_t battery_hal_chemistry(void) {
+    return s_chemistry;
 }
 
 bool battery_hal_valid(void) {
@@ -230,6 +249,7 @@ static void test_learning_observation_is_raw_and_override_safe(void) {
     board_diag_debug_clear_charger_force();
     memset(&s_ltc, 0, sizeof(s_ltc));
     s_ltc.sample_valid = true;
+    s_ltc.last_conversion_sample_valid = true;
     s_ltc.continuity_valid = true;
     s_ltc.current_polarity_verified = true;
     s_ltc.sample_sequence = UINT32_MAX;
@@ -256,11 +276,42 @@ static void test_learning_observation_is_raw_and_override_safe(void) {
               !observation.charger_connected && !observation.charge_active,
           "physical learning observation publishes honest qualification");
 
+    s_ltc.last_conversion_sample_valid = false;
+    board_diag_get_battery_learning_observation(4322u, &observation);
+    check(!observation.sample_valid && !observation.current_valid &&
+              observation.continuity_valid &&
+              observation.sample_sequence == UINT32_MAX,
+          "failed conversion invalidates cached evidence without inventing a sample or reset");
+    s_ltc.last_conversion_sample_valid = true;
+    board_diag_get_battery_learning_observation(4323u, &observation);
+    check(observation.sample_valid && observation.current_valid,
+          "valid conversion restores observation authority");
+
+    s_chemistry = BATTERY_CHEMISTRY_UNKNOWN;
+    board_diag_get_battery_learning_observation(4322u, &observation);
+    check(!observation.authoritative,
+          "unidentified chemistry cannot authorize learning");
+    s_chemistry = BATTERY_CHEMISTRY_NIMH_2S;
+
     board_diag_debug_force_battery_mv(2400u);
     board_diag_get_battery_learning_observation(4322u, &observation);
     check(!observation.authoritative,
           "debug-forced battery evidence cannot contaminate learning");
     board_diag_debug_clear_battery_force();
+}
+
+static void test_shutdown_floor_uses_active_profile(void) {
+    s_chemistry = BATTERY_CHEMISTRY_NIMH_2S;
+    check(board_diag_battery_shutdown_threshold_mv(false) == 2100u,
+          "NiMH idle shutdown uses the active profile");
+    check(board_diag_battery_shutdown_threshold_mv(true) == 1800u,
+          "NiMH call shutdown uses the active profile");
+    s_chemistry = BATTERY_CHEMISTRY_LI_ION_1S;
+    check(board_diag_battery_shutdown_threshold_mv(false) == 3300u,
+          "Li-ion idle shutdown uses the active profile");
+    check(board_diag_battery_shutdown_threshold_mv(true) == 3000u,
+          "Li-ion call shutdown uses the active profile");
+    s_chemistry = BATTERY_CHEMISTRY_NIMH_2S;
 }
 
 int main(void) {
@@ -272,6 +323,7 @@ int main(void) {
     test_unknown_battery_does_not_trust_stale_cached_charger();
     test_supply_failure_needs_fresh_marginal_pack_evidence();
     test_learning_observation_is_raw_and_override_safe();
+    test_shutdown_floor_uses_active_profile();
     if (s_failures != 0) {
         fprintf(stderr, "%d board power-gate test(s) failed\n", s_failures);
         return 1;

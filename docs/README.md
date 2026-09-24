@@ -32,6 +32,9 @@ claim is the current best understanding, not a measured fact.
 - [Battery charge supervisor](battery_charge_supervisor_design.md): implemented
   charge accounting, opt-in durable `/CE` enforcement, terminal provenance,
   reset continuity, and its qualification boundary.
+- [BL-5C Li-ion support](li_ion_battery_support.md): insertion requirements,
+  retained chemistry, taper termination, maintenance recharge, warning policy,
+  and bench qualification limits.
 - [CLCC call model](call_model.md): id-authoritative call state, transactions,
   projection, and the host-test oracle.
 - [Storage engine](storage_engine.md): flash journals, persistent records, and

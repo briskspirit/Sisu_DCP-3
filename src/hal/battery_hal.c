@@ -2,6 +2,8 @@
 
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
+#include "hardware/regs/powman.h"
+#include "hardware/structs/powman.h"
 #include "hal/bq25171_stat.h"
 #include "hal/battery_gauge_logic.h"
 #include "hal/battery_poll_logic.h"
@@ -52,6 +54,24 @@ static battery_sample_mode_t s_sample_mode;
 static battery_poll_schedule_t s_poll_schedule;
 static bool s_charger_irq_settling;
 static uint32_t s_charger_irq_settle_until_ms;
+/* Scratch 4/5/7 belong to dormant telemetry. Scratch 6 survives switched-core
+ * watchdog resets and deep sleep, but clears on POWMAN reset. No flash restore:
+ * a previous battery's chemistry must not outlive its powered domain. */
+#define CHEMISTRY_SCRATCH_INDEX 6u
+static battery_chemistry_state_t s_chemistry;
+static uint32_t s_power_reset_count;
+static bool s_cold_insertion_pending;
+static bool s_chemistry_restore_pending;
+
+battery_chemistry_t battery_hal_chemistry(void) {
+    return s_chemistry_restore_pending ? BATTERY_CHEMISTRY_UNKNOWN
+                                       : s_chemistry.chemistry;
+}
+
+const battery_gauge_profile_t *battery_hal_gauge_profile(void) {
+    return s_chemistry.chemistry == BATTERY_CHEMISTRY_LI_ION_1S
+        ? battery_gauge_li_ion_profile() : battery_gauge_nimh_profile();
+}
 
 static void sample_charger_input_adc(void) {
     adc_select_input(CHARGER_INPUT_ADC_INPUT);
@@ -80,6 +100,23 @@ static void sample_charger_input(uint32_t now_ms, bool force_confirm) {
 }
 
 void battery_hal_init(void) {
+    uint32_t retained_chemistry = powman_hw->scratch[CHEMISTRY_SCRATCH_INDEX];
+    battery_chemistry_init(&s_chemistry,
+                           retained_chemistry);
+    /* Keep the retained word through transport failures, but do not let it
+     * authorize charging before this boot has checked the live gauge. */
+    s_chemistry_restore_pending =
+        s_chemistry.chemistry != BATTERY_CHEMISTRY_UNKNOWN;
+    /* Reset causes occupy the upper half; rescue/double-tap flags are not
+     * causes. BOR, RUN, watchdog, dormant wake, and ambiguous combinations
+     * cannot turn loss of identity into permission to assume NiMH. */
+    uint32_t reset_cause = powman_hw->chip_reset &
+        (POWMAN_CHIP_RESET_BITS & UINT32_C(0xffff0000));
+    s_cold_insertion_pending = retained_chemistry == 0u &&
+        reset_cause == POWMAN_CHIP_RESET_HAD_POR_BITS;
+    ltc2959_snapshot_t before_init;
+    ltc2959_hal_get_snapshot(&before_init);
+    s_power_reset_count = before_init.power_reset_count;
     adc_init();
     adc_gpio_init(CHARGER_INPUT_ADC_PIN);
     gpio_set_input_enabled(CHARGER_INPUT_ADC_PIN, false);
@@ -163,10 +200,11 @@ void battery_hal_poll(uint32_t now_ms) {
                     s_charge_status == BATTERY_CHARGE_ACTIVE;
     uint32_t sample_period_ms =
         battery_sample_period_ms(s_sample_mode, charging);
-    if (battery_power_on_qualifier_sample_count(&s_power_on_qualifier) <
+    if ((s_chemistry.chemistry == BATTERY_CHEMISTRY_UNKNOWN ||
+        (battery_power_on_qualifier_sample_count(&s_power_on_qualifier) <
             BATTERY_POWER_ON_REQUIRED_VALID &&
         battery_power_on_qualifier_attempt_count(&s_power_on_qualifier) <
-            BATTERY_POWER_ON_MAX_ATTEMPTS &&
+            BATTERY_POWER_ON_MAX_ATTEMPTS)) &&
         sample_period_ms > BATTERY_SAMPLE_HIGH_LOAD_MS) {
         /* The original admits power from five valid conversions out of at most
          * ten attempts. Finish that bounded acquisition while core 0 is already
@@ -176,6 +214,27 @@ void battery_hal_poll(uint32_t now_ms) {
     ltc2959_hal_poll(now_ms, sample_period_ms);
     ltc2959_snapshot_t ltc;
     ltc2959_hal_get_snapshot(&ltc);
+    if (ltc.power_reset_count != s_power_reset_count) {
+        s_power_reset_count = ltc.power_reset_count;
+        battery_chemistry_power_lost(&s_chemistry, s_cold_insertion_pending);
+        s_cold_insertion_pending = false;
+        battery_gauge_init(&s_gauge_state);
+    }
+    /* Reading the boot registers consumes the cold-start window even if a
+     * later configuration write fails. A subsequent UVLO is not insertion. */
+    if (ltc.present) s_cold_insertion_pending = false;
+    bool chemistry_sample_valid = ltc.present && ltc.configured &&
+        ltc.sample_valid && ltc.last_conversion_sample_valid;
+    if (chemistry_sample_valid) s_chemistry_restore_pending = false;
+    bool chemistry_changed = battery_chemistry_observe(
+        &s_chemistry, now_ms, ltc.conversion_sequence,
+        chemistry_sample_valid,
+        s_charger_filter.stable_present ||
+            s_charger_input_mv >= CHARGER_INPUT_ATTACH_MV,
+        ltc.voltage_mv);
+    powman_hw->scratch[CHEMISTRY_SCRATCH_INDEX] =
+        battery_chemistry_retained_word(&s_chemistry);
+    if (chemistry_changed) battery_gauge_init(&s_gauge_state);
     if (ltc.gauge_session != s_ltc_gauge_session) {
         s_ltc_gauge_session = ltc.gauge_session;
         battery_gauge_init(&s_gauge_state);
@@ -189,28 +248,27 @@ void battery_hal_poll(uint32_t now_ms) {
             &s_power_on_qualifier, ltc.gauge_session,
             ltc.conversion_sequence, ltc.last_conversion_sample_valid,
             ltc.voltage_mv);
-    }
-    if (ltc.sample_sequence != s_ltc_sample_sequence) {
         s_ltc_sample_sequence = ltc.sample_sequence;
-        if (ltc.sample_valid) {
+        bool sample_valid = ltc.sample_valid && ltc.last_conversion_sample_valid;
+        if (sample_valid) {
             s_battery_mv_raw = ltc.voltage_mv;
             s_battery_mv_fresh = ltc.voltage_mv;
         }
         battery_gauge_observation_t observation = {
             .now_ms = now_ms,
-            .sample_sequence = ltc.sample_sequence,
+            .sample_sequence = ltc.conversion_sequence,
             .gauge_session = ltc.gauge_session,
             .terminal_mv = ltc.voltage_mv,
             .current_ua = ltc.current_ua,
             .session_delta_nah = ltc.session_delta_nah,
-            .sample_valid = ltc.sample_valid,
-            .current_valid = ltc.sample_valid &&
+            .sample_valid = sample_valid,
+            .current_valid = sample_valid &&
                              ltc.current_polarity_verified,
             .continuity_valid = ltc.continuity_valid,
             .charge_active = charging,
         };
         (void)battery_gauge_update(
-            &s_gauge_state, battery_gauge_nimh_profile(), &observation);
+            &s_gauge_state, battery_hal_gauge_profile(), &observation);
         battery_gauge_get_snapshot(&s_gauge_state, &s_gauge_snapshot);
         if (s_gauge_snapshot.valid) {
             s_battery_mv = s_gauge_snapshot.reference_mv;
@@ -219,13 +277,17 @@ void battery_hal_poll(uint32_t now_ms) {
     }
     s_battery_valid =
         SISU_LTC2959_VOLTAGE_AUTHORITATIVE != 0 &&
-        ltc.sample_valid &&
+        battery_hal_chemistry() != BATTERY_CHEMISTRY_UNKNOWN &&
+        ltc.sample_valid && ltc.last_conversion_sample_valid &&
         s_gauge_snapshot.valid;
 }
 
 bool battery_hal_standby_ready(void) {
     return !s_charger_irq_settling &&
-           !s_charger_filter.candidate_active;
+           !s_charger_filter.candidate_active &&
+           /* Finish a candidate from an existing maintenance wake instead of
+            * repeatedly losing its short dwell to another minute of sleep. */
+           !(s_battery_valid && s_gauge_state.low_notice.pending);
 }
 
 bool battery_hal_valid(void) {
@@ -255,6 +317,10 @@ uint8_t battery_hal_level_bars(void) {
 bool battery_hal_low(void) {
     return s_battery_valid &&
            s_gauge_snapshot.warning == BATTERY_GAUGE_WARNING_LOW;
+}
+
+bool battery_hal_low_notice(void) {
+    return s_battery_valid && s_gauge_snapshot.low_notice;
 }
 
 bool battery_hal_empty(void) {
@@ -336,7 +402,7 @@ bool battery_hal_charge_status_levels(bool *stat1_high, bool *stat2_high) {
 }
 
 uint8_t battery_hal_level_bars_from_mv(uint16_t mv) {
-    return battery_gauge_bars_from_mv(mv);
+    return battery_gauge_bars_for_profile(battery_hal_gauge_profile(), mv);
 }
 
 battery_power_on_gate_t battery_hal_power_on_gate_from_mv(uint16_t mv,
@@ -344,7 +410,10 @@ battery_power_on_gate_t battery_hal_power_on_gate_from_mv(uint16_t mv,
     if (charger) {
         return BATTERY_POWER_ON_OK;
     }
-    return (mv < VBAT_POWERON_MIN_MV) ? BATTERY_POWER_ON_REFUSE
+    if (battery_hal_chemistry() == BATTERY_CHEMISTRY_UNKNOWN) {
+        return BATTERY_POWER_ON_PENDING;
+    }
+    return (mv < battery_hal_gauge_profile()->power_on_mv) ? BATTERY_POWER_ON_REFUSE
                                       : BATTERY_POWER_ON_OK;
 }
 

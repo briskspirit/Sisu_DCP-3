@@ -124,6 +124,19 @@ static void test_warm_rp_boot_preserves_retained_charger_target(void) {
     assert((s_writes[latch_write].value & COL5) != 0u);
     assert(tca8418_hal_get_charger_enabled(&enabled));
     assert(!enabled);
+
+    /* An RP-only restart must not change a retained Li-ion selector while
+     * /CE is active, or pulse the BQ timer just to reacquire the expander. */
+    s_regs[REG_DAT_OUT2] = COL6;
+    s_write_count = 0u;
+    assert(tca8418_hal_init());
+    latch_write = first_write_to(REG_DAT_OUT2);
+    assert(s_writes[latch_write].value == COL6);
+    bool li_ion = false;
+    assert(tca8418_hal_get_charger_li_ion_mode(&li_ion));
+    assert(li_ion);
+    assert(tca8418_hal_get_charger_enabled(&enabled));
+    assert(enabled);
 }
 
 static void test_charger_control_is_verified_and_recovers(void) {
@@ -147,6 +160,8 @@ static void test_charger_control_is_verified_and_recovers(void) {
     assert(tca8418_hal_get_charger_enabled(&enabled));
     assert(!enabled);
 
+    assert(!tca8418_hal_set_charger_enabled(true));
+    s_now_ms = 1000u;
     assert(tca8418_hal_set_charger_enabled(true));
     assert(tca8418_hal_get_charger_enabled(&enabled));
     assert(enabled);
@@ -168,7 +183,7 @@ static void test_charger_control_is_verified_and_recovers(void) {
     s_regs[REG_DIR2] &= (uint8_t)~COL5;
     s_regs[REG_PULL2] &= (uint8_t)~COL5;
     s_regs[REG_DAT_OUT2] |= COL5;
-    s_now_ms = 100u;
+    s_now_ms = 1100u;
     assert(!tca8418_hal_get_charger_enabled(&enabled));
     (void)tca8418_hal_key_state();
     assert(tca8418_hal_get_charger_enabled(&enabled));
@@ -190,9 +205,57 @@ static void test_charger_control_is_verified_and_recovers(void) {
     assert((s_regs[REG_DAT_OUT2] & COL5) != 0u);
 }
 
+static void test_chemistry_change_is_disabled_and_retained(void) {
+    s_write_count = 0u;
+    s_now_ms = 2000u;
+    assert(tca8418_hal_set_charger_enabled(true));
+    assert(!tca8418_hal_set_charger_li_ion_mode(true));
+    assert((s_regs[REG_DAT_OUT2] & COL6) == 0u);
+    assert(tca8418_hal_set_charger_enabled(false));
+    assert(tca8418_hal_set_charger_li_ion_mode(true));
+    assert((s_regs[REG_DAT_OUT2] & (COL5 | COL6)) == (COL5 | COL6));
+    assert(!tca8418_hal_set_charger_enabled(true));
+    s_now_ms = 2999u;
+    assert(!tca8418_hal_set_charger_enabled(true));
+    s_now_ms = 3000u;
+    assert(tca8418_hal_set_charger_enabled(true));
+
+    /* Lose the selector but not /CE. Recovery must inhibit before restoring
+     * Li-ion and cannot re-enable until the resistor-selection hold expires. */
+    s_regs[REG_DIR2] &= (uint8_t)~COL6;
+    s_regs[REG_DAT_OUT2] &= (uint8_t)~COL6;
+    s_write_count = 0u;
+    bool li_ion = false;
+    assert(!tca8418_hal_get_charger_li_ion_mode(&li_ion));
+    (void)tca8418_hal_key_state();
+    size_t first_output = first_write_to(REG_DAT_OUT2);
+    assert(s_writes[first_output].value == COL5);
+    bool selector_written = false;
+    for (size_t i = first_output + 1u; i < s_write_count; i++) {
+        if (s_writes[i].reg == REG_DAT_OUT2 &&
+            (s_writes[i].value & COL6) != 0u) {
+            assert((s_writes[i].value & COL5) != 0u);
+            selector_written = true;
+        }
+    }
+    assert(selector_written);
+    assert(tca8418_hal_get_charger_li_ion_mode(&li_ion));
+    assert(li_ion);
+    bool enabled = true;
+    assert(tca8418_hal_get_charger_enabled(&enabled));
+    assert(!enabled);
+    assert(!tca8418_hal_set_charger_enabled(true));
+    s_now_ms = 4000u;
+    assert(tca8418_hal_set_charger_enabled(true));
+    assert(!tca8418_hal_set_charger_li_ion_mode(false));
+    assert(tca8418_hal_set_charger_enabled(false));
+    assert(tca8418_hal_set_charger_li_ion_mode(false));
+}
+
 int main(void) {
     test_warm_rp_boot_preserves_retained_charger_target();
     test_charger_control_is_verified_and_recovers();
+    test_chemistry_change_is_disabled_and_retained();
     puts("TCA8418 charger-control tests passed");
     return 0;
 }

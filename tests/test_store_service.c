@@ -1910,6 +1910,35 @@ static void test_charge_supervisor_payload_and_persistence(void) {
                 "charge supervisor survives restart");
 }
 
+static void test_li_ion_charge_holds_survive_storage(void) {
+    fresh_store();
+    battery_charge_supervisor_persisted_t expected = charge_supervisor_fixture();
+    expected.hardware_profile_id = battery_charge_supervisor_li_ion_profile()->hardware_profile_id;
+    expected.chemistry = BATTERY_CHARGE_CHEMISTRY_LI_ION_1S;
+    expected.configured_policy = BATTERY_CHARGE_POLICY_ENFORCE_LI_ION;
+    expected.configured_charge_factor_permille = expected.charge_factor_permille = 1000u;
+    expected.configured_charge_factor_confident = expected.charge_factor_confident = false;
+    expected.target_input_nah = expected.deficit_nah;
+    expected.safety_input_nah = 0u;
+    expected.last_terminal_mv = 4180u;
+    const battery_charge_supervisor_terminal_t reasons[] = {
+        BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL,
+        BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE,
+    };
+    for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); ++i) {
+        expected.latched_stop_reason = expected.last_terminal_reason = reasons[i];
+        assert_true(store_battery_charge_supervisor_set(&expected) == STORE_STATUS_OK,
+                    "Li-ion qualified hold accepted");
+        flush_commits();
+        assert_true(store_service_init() == STORE_STATUS_OK,
+                    "Li-ion qualified hold reload succeeds");
+        battery_charge_supervisor_persisted_t actual;
+        assert_true(store_battery_charge_supervisor_get(&actual) == STORE_STATUS_OK &&
+                        memcmp(&actual, &expected, sizeof(actual)) == 0,
+                    "Li-ion full endpoint, baseline and hold survive storage");
+    }
+}
+
 static void populate_wire_fixture(void) {
     assert_true(store_setting_set_u8(STORE_SETTING_PHONEBOOK_VIEW_MODE, 2u) ==
                     STORE_STATUS_OK,
@@ -2736,6 +2765,7 @@ int main(void) {
     test_factory_restore_persistence();
     test_battery_learning_payload_and_persistence();
     test_charge_supervisor_payload_and_persistence();
+    test_li_ion_charge_holds_survive_storage();
     test_corrupt_picture_payload_is_preserved();
     test_storage_health_persistence();
     test_critical_corruption_is_not_defaulted();

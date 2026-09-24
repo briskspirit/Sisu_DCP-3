@@ -52,6 +52,27 @@ static const battery_learning_profile_t NIMH_PROFILE = {
     .charge_factor_permille = NIMH_CHARGE_FACTOR_PERMILLE,
 };
 
+static const battery_learning_profile_t LI_ION_PROFILE = {
+    .profile_id = BATTERY_LEARNING_PROFILE_LI_ION_BL5C,
+    .nominal_capacity_mah = 1020u,
+    .capacity_min_mah = 300u,
+    .capacity_max_mah = 1600u,
+    .learning_temperature_min_mdegc = CAPACITY_LEARNING_TEMP_MIN_MDEGC,
+    .learning_temperature_max_mdegc = CAPACITY_LEARNING_TEMP_MAX_MDEGC,
+    .resistance_temperature_min_mdegc = RESISTANCE_LEARNING_TEMP_MIN_MDEGC,
+    .resistance_temperature_max_mdegc = RESISTANCE_LEARNING_TEMP_MAX_MDEGC,
+    .resistance_step_min_ma = RESISTANCE_STEP_MIN_MA,
+    .resistance_min_mohm = RESISTANCE_MIN_MOHM,
+    .resistance_max_mohm = RESISTANCE_MAX_MOHM,
+    .resistance_persist_delta_mohm = RESISTANCE_PERSIST_DELTA_MOHM,
+    .capacity_consistency_percent = CAPACITY_CONSISTENCY_PERCENT,
+    .recharge_invalidate_nah = RECHARGE_INVALIDATE_NAH,
+    .acr_lsb_nah = NIMH_ACR_LSB_NAH,
+    /* Coulomb ledger prior only. This is not authority to terminate Li-ion
+     * charging; BQ's CC/CV termination supplies the FULL endpoint. */
+    .charge_factor_permille = 1000u,
+};
+
 static uint16_t saturating_increment_u16(uint16_t value) {
     return value == UINT16_MAX ? value : (uint16_t)(value + 1u);
 }
@@ -121,11 +142,13 @@ static bool temperature_in_range(int32_t value, int32_t low, int32_t high) {
     return value >= low && value <= high;
 }
 
-static battery_resistance_bin_t resistance_bin_for_mv(uint16_t mv) {
-    if (mv >= RESISTANCE_HIGH_FLOOR_MV) {
+static battery_resistance_bin_t resistance_bin_for_mv(
+    const battery_learning_profile_t *profile, uint16_t mv) {
+    bool li_ion = profile->profile_id == BATTERY_LEARNING_PROFILE_LI_ION_BL5C;
+    if (mv >= (li_ion ? 3850u : RESISTANCE_HIGH_FLOOR_MV)) {
         return BATTERY_RESISTANCE_BIN_HIGH;
     }
-    return mv >= RESISTANCE_MID_FLOOR_MV
+    return mv >= (li_ion ? 3500u : RESISTANCE_MID_FLOOR_MV)
         ? BATTERY_RESISTANCE_BIN_MID
         : BATTERY_RESISTANCE_BIN_LOW;
 }
@@ -350,7 +373,7 @@ static void refresh_snapshot(battery_learning_state_t *state,
            persisted->resistance_sample_count,
            sizeof(snapshot->resistance_sample_count));
     snapshot->current_resistance_bin =
-        resistance_bin_for_mv(state->latest_terminal_mv);
+        resistance_bin_for_mv(profile, state->latest_terminal_mv);
     snapshot->current_resistance_bin_valid =
         state->latest_observation_valid;
 
@@ -517,7 +540,7 @@ static uint32_t observe_resistance_step(
                      observation->terminal_mv) /
                     2u);
                 battery_resistance_bin_t bin =
-                    resistance_bin_for_mv(midpoint_mv);
+                    resistance_bin_for_mv(profile, midpoint_mv);
                 uint8_t count = state->resistance_window_count[bin];
                 state->resistance_window[bin][count++] =
                     (uint16_t)resistance_mohm;
@@ -562,6 +585,10 @@ const battery_learning_profile_t *battery_learning_nimh_profile(void) {
     return &NIMH_PROFILE;
 }
 
+const battery_learning_profile_t *battery_learning_li_ion_profile(void) {
+    return &LI_ION_PROFILE;
+}
+
 void battery_learning_persisted_defaults(
     battery_learning_persisted_t *persisted,
     const battery_learning_profile_t *profile) {
@@ -583,7 +610,11 @@ bool battery_learning_persisted_valid(
         return false;
     }
     if (profile == NULL) {
-        profile = &NIMH_PROFILE;
+        if (persisted->profile_id == BATTERY_LEARNING_PROFILE_LI_ION_BL5C) {
+            profile = &LI_ION_PROFILE;
+        } else {
+            profile = &NIMH_PROFILE;
+        }
     }
     if (persisted->profile_id != (uint8_t)profile->profile_id ||
         persisted->nominal_capacity_mah != profile->nominal_capacity_mah ||
@@ -1047,6 +1078,12 @@ static uint32_t update_soc_ledger(
         state->soc_bootstrap_reference_sum_mv /
         BATTERY_LEARNING_SOC_BOOTSTRAP_SAMPLE_COUNT);
     uint8_t percent = battery_learning_bootstrap_soc_percent(reference_mv);
+    if (profile->profile_id == BATTERY_LEARNING_PROFILE_LI_ION_BL5C) {
+        /* Coarse initial buckets only, replaced by the ACR ledger after a
+         * qualified endpoint. These are not a measured BL-5C OCV curve. */
+        percent = reference_mv < 3300u ? 0u : reference_mv < 3700u ? 25u :
+                  reference_mv < 3850u ? 50u : reference_mv < 4000u ? 75u : 100u;
+    }
     int64_t remaining = (capacity_nah(capacity) * percent + 50) / 100;
     soc_set_anchor(
         persisted, capacity, observation->session_delta_nah, remaining,

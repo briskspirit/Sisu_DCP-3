@@ -19,6 +19,17 @@ static bool s_release_inhibit_pending;
 static bool s_incompatible_latch;
 static battery_charge_maintenance_phase_t s_maintenance_phase;
 static uint32_t s_maintenance_disabled_at_ms;
+static uint8_t s_profile_id;
+static bool s_li_ion_recharge_pending;
+static uint32_t s_li_ion_recharge_since_ms;
+static uint32_t s_li_ion_recharge_sample_ms;
+static uint32_t s_li_ion_recharge_sequence;
+
+static const battery_charge_supervisor_profile_t *active_profile(void) {
+    return board_diag_battery_chemistry() == BOARD_DIAG_CHEM_LI_ION
+        ? battery_charge_supervisor_li_ion_profile()
+        : battery_charge_supervisor_revb2_profile();
+}
 
 static uint32_t saturating_increment_u32(uint32_t value) {
     return value == UINT32_MAX ? value : value + 1u;
@@ -42,6 +53,7 @@ static battery_charge_supervisor_chemistry_t map_chemistry(
     case BOARD_DIAG_CHEM_LI_ION:
         return BATTERY_CHARGE_CHEMISTRY_LI_ION_1S;
     case BOARD_DIAG_CHEM_ALK:
+    case BOARD_DIAG_CHEM_UNKNOWN:
     case BOARD_DIAG_CHEM_COUNT:
         return BATTERY_CHARGE_CHEMISTRY_UNKNOWN;
     }
@@ -49,15 +61,22 @@ static battery_charge_supervisor_chemistry_t map_chemistry(
 }
 
 static battery_charge_supervisor_admission_t map_admission(
-    const battery_learning_snapshot_t *learning,
+    const battery_learning_service_snapshot_t *learner,
     uint32_t gauge_session) {
+    const battery_learning_snapshot_t *learning = &learner->model;
+    uint8_t expected_profile =
+        board_diag_battery_chemistry() == BOARD_DIAG_CHEM_LI_ION
+            ? BATTERY_LEARNING_PROFILE_LI_ION_BL5C
+            : BATTERY_LEARNING_PROFILE_NIMH_2S;
     /* A freshly initialized learner may safely consume its persisted ACR
      * origin before its first poll only when the HAL reports session zero,
      * which is the learner's own "same powered gauge" rule. Any nonzero or
      * changed session must be processed by the learner before admission. */
-    bool source_current = learning->gauge_session_bound
-        ? learning->gauge_session == gauge_session
-        : gauge_session == 0u;
+    bool source_current = learner->initialized &&
+        learner->profile_id == expected_profile &&
+        (learning->gauge_session_bound
+            ? learning->gauge_session == gauge_session
+            : gauge_session == 0u);
     uint16_t capacity_mah = learning->soc_capacity_mah;
     if (capacity_mah == 0u) {
         capacity_mah = learning->learned_capacity_valid
@@ -161,7 +180,7 @@ static void collect_observation(
              CHARGER_INHIBIT_SUPERVISOR) != 0u,
         .chemistry = map_chemistry(board.chemistry),
         .hardware_profile_id = profile->hardware_profile_id,
-        .admission = map_admission(&learner.model, gauge.gauge_session),
+        .admission = map_admission(&learner, gauge.gauge_session),
     };
 }
 
@@ -289,7 +308,8 @@ static bool maintenance_soc_ready(
     const battery_charge_supervisor_observation_t *observation) {
     const battery_charge_supervisor_admission_t *admission =
         &observation->admission;
-    if (!observation->sample_valid || !observation->current_valid ||
+    if (observation->chemistry != BATTERY_CHARGE_CHEMISTRY_NIMH_2S ||
+        !observation->sample_valid || !observation->current_valid ||
         !observation->continuity_valid || !observation->authoritative ||
         !admission->source_current || !admission->capacity_valid ||
         !admission->remaining_valid ||
@@ -326,7 +346,49 @@ static void update_maintenance_readiness(
     s_snapshot.maintenance_soc_ready = maintenance_soc_ready(observation);
     s_snapshot.maintenance_voltage_mv = observation->reference_mv;
     s_snapshot.maintenance_voltage_ready = observation->reference_valid &&
-        observation->reference_mv < BATTERY_CHARGE_MAINTENANCE_RESTART_MV;
+        observation->reference_mv <
+            (observation->chemistry == BATTERY_CHARGE_CHEMISTRY_LI_ION_1S
+                ? BATTERY_CHARGE_LI_ION_RECHARGE_MV
+                : BATTERY_CHARGE_MAINTENANCE_RESTART_MV);
+}
+
+static bool li_ion_recharge_ready(
+    const battery_charge_supervisor_observation_t *observation) {
+    bool eligible = observation->chemistry == BATTERY_CHARGE_CHEMISTRY_LI_ION_1S &&
+        s_pending_persisted.configured_policy == BATTERY_CHARGE_POLICY_ENFORCE_LI_ION &&
+        s_pending_persisted.supervisor_inhibit_latched &&
+        (s_pending_persisted.latched_stop_reason == BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL ||
+         s_pending_persisted.latched_stop_reason == BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE) &&
+        s_snapshot.maintenance_full_hold && s_snapshot.maintenance_voltage_ready &&
+        observation->charger_present && observation->status_valid &&
+        observation->charger_state != BATTERY_CHARGER_FAULT &&
+        observation->charger_enable_valid && !observation->charger_enable_readback &&
+        !observation->charger_enable_requested && observation->supervisor_inhibit_active &&
+        observation->inhibit_owner_mask == CHARGER_INHIBIT_SUPERVISOR &&
+        observation->sample_valid && observation->current_valid &&
+        observation->continuity_valid && observation->authoritative &&
+        observation->admission.source_current &&
+        observation->admission.pack_generation == s_snapshot.model.pack_generation &&
+        observation->gauge_session == s_snapshot.model.gauge_session &&
+        observation->current_ua <= 0 &&
+        observation->terminal_mv < BATTERY_CHARGE_LI_ION_RECHARGE_MV &&
+        observation->charger_input_mv >= (uint32_t)observation->terminal_mv + 500u;
+    if (!eligible || (s_li_ion_recharge_pending &&
+        (uint32_t)(observation->now_ms - s_li_ion_recharge_sample_ms) >
+            BATTERY_CHARGE_LI_ION_SAMPLE_GAP_MS)) {
+        s_li_ion_recharge_pending = false;
+        s_li_ion_recharge_sequence = observation->sample_sequence;
+        return false;
+    }
+    if (s_li_ion_recharge_sequence == observation->sample_sequence) return false;
+    s_li_ion_recharge_sequence = observation->sample_sequence;
+    s_li_ion_recharge_sample_ms = observation->now_ms;
+    if (!s_li_ion_recharge_pending) {
+        s_li_ion_recharge_pending = true;
+        s_li_ion_recharge_since_ms = observation->now_ms;
+    }
+    return (uint32_t)(observation->now_ms - s_li_ion_recharge_since_ms) >=
+        BATTERY_CHARGE_LI_ION_RECHARGE_CONFIRM_MS;
 }
 
 static bool unqualified_bq_recovery_ready(
@@ -464,6 +526,14 @@ static void persist_terminal(
     bool voltage_valid,
     bool trace_complete) {
     battery_charge_supervisor_persisted_t persisted = s_pending_persisted;
+    if (model->chemistry == BATTERY_CHARGE_CHEMISTRY_LI_ION_1S &&
+        model->full_qualified &&
+        reason == BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE) {
+        /* A hardware FULL is already qualified. Retain its identity and hold
+         * /CE off so the configured host recharge voltage owns the next cycle. */
+        persisted.supervisor_inhibit_latched = true;
+        persisted.latched_stop_reason = reason;
+    }
     bool retain_latch = persisted.supervisor_inhibit_latched &&
         reason != BATTERY_CHARGE_TERMINAL_DETACHED;
     if (retain_latch) {
@@ -529,9 +599,32 @@ static void persist_reset_detach(
 
 static bool restore_evidence_ready(
     const battery_charge_supervisor_observation_t *observation) {
+    battery_learning_service_snapshot_t learner;
+    battery_learning_service_get_snapshot(&learner);
+    uint8_t expected_profile =
+        observation->chemistry == BATTERY_CHARGE_CHEMISTRY_LI_ION_1S
+            ? BATTERY_LEARNING_PROFILE_LI_ION_BL5C
+            : BATTERY_LEARNING_PROFILE_NIMH_2S;
+    /* Chemistry may become known during this poll, before the learner's turn.
+     * Missing initialization is not evidence that the saved pack changed. */
     return observation->status_valid && observation->sample_valid &&
         observation->current_valid && observation->continuity_valid &&
-        observation->charger_enable_valid;
+        observation->charger_enable_valid && learner.initialized &&
+        learner.profile_id == expected_profile;
+}
+
+static bool restored_full_needs_anchor(
+    const battery_charge_supervisor_observation_t *observation) {
+    battery_learning_service_snapshot_t learner;
+    battery_learning_service_get_snapshot(&learner);
+    /* Replaying FULL feeds the live ACR to the learner. Only fill a missing
+     * anchor while that counter still matches the saved endpoint; never move
+     * a durable anchor forward after a reset during the discharge hold. */
+    return !learner.model.full_anchor_valid &&
+        s_pending_persisted.last_terminal_net_input_valid &&
+        saturating_sub_i64(observation->session_delta_nah,
+                          s_pending_persisted.start_session_delta_nah) ==
+            s_pending_persisted.last_terminal_net_input_nah;
 }
 
 static uint32_t service_maintenance_step(
@@ -611,6 +704,7 @@ bool battery_charge_supervisor_service_boot_inhibit_required(void) {
 
 void battery_charge_supervisor_service_init(void) {
     memset(&s_snapshot, 0, sizeof(s_snapshot));
+    if (board_diag_battery_chemistry() == BOARD_DIAG_CHEM_UNKNOWN) return;
     memset(s_trace, 0, sizeof(s_trace));
     battery_charge_supervisor_persisted_defaults(&s_pending_persisted);
     s_restore_pending = false;
@@ -618,11 +712,14 @@ void battery_charge_supervisor_service_init(void) {
     s_incompatible_latch = false;
     s_maintenance_phase = BATTERY_CHARGE_MAINTENANCE_IDLE;
     s_maintenance_disabled_at_ms = 0u;
+    s_li_ion_recharge_pending = false;
+    s_li_ion_recharge_sequence = 0u;
 
     battery_charge_supervisor_persisted_t stored;
     store_status_t status = store_battery_charge_supervisor_get(&stored);
     const battery_charge_supervisor_profile_t *profile =
-        battery_charge_supervisor_revb2_profile();
+        active_profile();
+    s_profile_id = profile->hardware_profile_id;
     bool structurally_valid = status == STORE_STATUS_OK &&
         battery_charge_supervisor_persisted_valid(&stored);
     s_snapshot.storage_unavailable = !structurally_valid;
@@ -634,6 +731,15 @@ void battery_charge_supervisor_service_init(void) {
         (stored.hardware_profile_id == profile->hardware_profile_id &&
          stored.chemistry == profile->chemistry);
     bool valid = structurally_valid && profile_valid;
+    if (profile->chemistry == BATTERY_CHARGE_CHEMISTRY_LI_ION_1S &&
+        structurally_valid &&
+        ((stored.configured_policy != BATTERY_CHARGE_POLICY_OBSERVE &&
+          stored.configured_policy != BATTERY_CHARGE_POLICY_ENFORCE_LI_ION) ||
+         stored.configured_charge_factor_confident ||
+         (stored.configured_charge_factor_permille != 0u &&
+          stored.configured_charge_factor_permille != 1000u))) {
+        valid = false;
+    }
     if (valid) {
         s_pending_persisted = stored;
     } else if (structurally_valid && stored.supervisor_inhibit_latched) {
@@ -646,9 +752,20 @@ void battery_charge_supervisor_service_init(void) {
          * baseline or terminal summary across an evidence-domain change. */
         s_pending_persisted.charge_generation = stored.charge_generation;
     }
+    bool policy_upgraded = false;
+    if (profile->chemistry == BATTERY_CHARGE_CHEMISTRY_LI_ION_1S &&
+        !s_incompatible_latch && !s_snapshot.storage_unavailable) {
+        /* Preserve the existing Li-ion admission and ACR origin on upgrade.
+         * Only the endpoint policy changes; taper evidence starts empty. */
+        policy_upgraded = s_pending_persisted.configured_policy !=
+            BATTERY_CHARGE_POLICY_ENFORCE_LI_ION;
+        s_pending_persisted.configured_policy = BATTERY_CHARGE_POLICY_ENFORCE_LI_ION;
+        s_pending_persisted.hardware_profile_id = profile->hardware_profile_id;
+        s_pending_persisted.chemistry = profile->chemistry;
+    }
     battery_charge_supervisor_init(
         &s_state,
-        valid ? s_pending_persisted.configured_policy
+        valid || policy_upgraded ? s_pending_persisted.configured_policy
               : BATTERY_CHARGE_POLICY_OBSERVE);
     battery_charge_supervisor_seed_generation(
         &s_state, s_pending_persisted.charge_generation);
@@ -659,7 +776,7 @@ void battery_charge_supervisor_service_init(void) {
             BATTERY_CHARGE_MAINTENANCE_WAIT_INHIBIT;
     }
     s_snapshot.initialized = true;
-    if (!valid && !s_incompatible_latch && !s_snapshot.storage_unavailable) {
+    if ((!valid || policy_upgraded) && !s_incompatible_latch && !s_snapshot.storage_unavailable) {
         request_persist(&s_pending_persisted);
         try_persist();
     }
@@ -667,6 +784,7 @@ void battery_charge_supervisor_service_init(void) {
 }
 
 bool battery_charge_supervisor_service_release_for_battery_floor(void) {
+    if (board_diag_battery_chemistry() != BOARD_DIAG_CHEM_NI_MH) return false;
     if (!s_snapshot.initialized) {
         battery_charge_supervisor_service_init();
     }
@@ -711,7 +829,11 @@ bool battery_charge_supervisor_service_release_for_battery_floor(void) {
 }
 
 uint32_t battery_charge_supervisor_service_poll(uint32_t now_ms) {
-    if (!s_snapshot.initialized) {
+    if (board_diag_battery_chemistry() == BOARD_DIAG_CHEM_UNKNOWN) {
+        memset(&s_snapshot, 0, sizeof(s_snapshot));
+        return BATTERY_CHARGE_SUPERVISOR_RESULT_NONE;
+    }
+    if (!s_snapshot.initialized || s_profile_id != active_profile()->hardware_profile_id) {
         battery_charge_supervisor_service_init();
     }
     if (s_snapshot.storage_unavailable) {
@@ -723,7 +845,7 @@ uint32_t battery_charge_supervisor_service_poll(uint32_t now_ms) {
     service_control_preflight();
 
     const battery_charge_supervisor_profile_t *profile =
-        battery_charge_supervisor_revb2_profile();
+        active_profile();
     battery_charge_supervisor_observation_t observation;
     collect_observation(now_ms, profile, &observation);
     battery_charge_supervisor_snapshot_t before;
@@ -732,6 +854,21 @@ uint32_t battery_charge_supervisor_service_poll(uint32_t now_ms) {
     bool reset_detach = false;
     bool restore_rejected = false;
     uint32_t result = BATTERY_CHARGE_SUPERVISOR_RESULT_NONE;
+
+    if (profile->chemistry == BATTERY_CHARGE_CHEMISTRY_LI_ION_1S &&
+        before.phase == BATTERY_CHARGE_PHASE_COMPLETE_BQ &&
+        !s_pending_persisted.supervisor_inhibit_latched &&
+        observation.charger_present && observation.status_valid &&
+        observation.charger_state == BATTERY_CHARGER_ACTIVE &&
+        observation.charger_enable_valid && observation.charger_enable_readback &&
+        observation.charger_enable_requested && observation.inhibit_owner_mask == 0u &&
+        observation.authoritative && observation.sample_valid && observation.current_valid &&
+        observation.current_ua > 0) {
+        /* An unqualified BQ completion cannot authorize a host hold. If BQ
+         * resumes, start new accounting without applying NiMH's SOC rule. */
+        reset_model_for_attached_rearm();
+        result |= BATTERY_CHARGE_SUPERVISOR_RESULT_MAINTENANCE_RESTARTED;
+    }
 
     if (s_incompatible_latch) {
         if (!observation.charger_present) {
@@ -788,14 +925,14 @@ uint32_t battery_charge_supervisor_service_poll(uint32_t now_ms) {
                 result = BATTERY_CHARGE_SUPERVISOR_RESULT_RESTORED;
                 battery_charge_supervisor_snapshot_t restored;
                 battery_charge_supervisor_get_snapshot(&s_state, &restored);
-                if (restored.phase ==
-                    BATTERY_CHARGE_PHASE_COMPLETE_SOFTWARE) {
-                    /* Re-emit the idempotent FULL edge after reset. This closes
-                     * the narrow crash window where the durable stop record made
-                     * it to flash but the learner's FULL anchor did not. */
-                    result |=
-                        BATTERY_CHARGE_SUPERVISOR_RESULT_SOFTWARE_STOPPED |
-                        BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED;
+                if ((restored.phase == BATTERY_CHARGE_PHASE_COMPLETE_SOFTWARE ||
+                     restored.phase == BATTERY_CHARGE_PHASE_COMPLETE_BQ) &&
+                    restored.full_qualified &&
+                    restored_full_needs_anchor(&observation)) {
+                    result |= BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED;
+                    if (restored.phase == BATTERY_CHARGE_PHASE_COMPLETE_SOFTWARE) {
+                        result |= BATTERY_CHARGE_SUPERVISOR_RESULT_SOFTWARE_STOPPED;
+                    }
                 }
             } else {
                 restore_rejected = true;
@@ -820,6 +957,7 @@ uint32_t battery_charge_supervisor_service_poll(uint32_t now_ms) {
     uint8_t foreign_inhibits = (uint8_t)(
         observation.inhibit_owner_mask &
         (uint8_t)~CHARGER_INHIBIT_SUPERVISOR);
+    bool li_ion_ready = li_ion_recharge_ready(&observation);
     bool maintenance_ready =
         result == BATTERY_CHARGE_SUPERVISOR_RESULT_NONE &&
         s_maintenance_phase == BATTERY_CHARGE_MAINTENANCE_IDLE &&
@@ -827,12 +965,12 @@ uint32_t battery_charge_supervisor_service_poll(uint32_t now_ms) {
         observation.charger_enable_valid && foreign_inhibits == 0u &&
         observation.chemistry == profile->chemistry &&
         observation.hardware_profile_id == profile->hardware_profile_id &&
-        s_pending_persisted.configured_policy ==
+        ((s_pending_persisted.configured_policy ==
             BATTERY_CHARGE_POLICY_ENFORCE_ANCHORED &&
         s_pending_persisted.configured_charge_factor_confident &&
         s_snapshot.maintenance_full_hold &&
         s_snapshot.maintenance_soc_ready &&
-        s_snapshot.maintenance_voltage_ready &&
+        s_snapshot.maintenance_voltage_ready) || li_ion_ready) &&
         supervisor_store_durable();
     if (maintenance_ready) {
         request_maintenance_inhibit();
@@ -1000,12 +1138,26 @@ uint32_t battery_charge_supervisor_service_poll(uint32_t now_ms) {
     return result;
 }
 
+bool battery_charge_supervisor_service_standby_ready(void) {
+    return !s_snapshot.initialized ||
+        (!s_li_ion_recharge_pending &&
+         s_maintenance_phase == BATTERY_CHARGE_MAINTENANCE_IDLE);
+}
+
 battery_charge_supervisor_config_status_t
 battery_charge_supervisor_service_configure(
     battery_charge_supervisor_policy_t policy,
     uint16_t charge_factor_permille,
     bool factor_confident) {
-    if (policy > BATTERY_CHARGE_POLICY_ENFORCE_BOOTSTRAP ||
+    if (board_diag_battery_chemistry() == BOARD_DIAG_CHEM_UNKNOWN ||
+        (board_diag_battery_chemistry() == BOARD_DIAG_CHEM_LI_ION &&
+         (policy != BATTERY_CHARGE_POLICY_ENFORCE_LI_ION ||
+          charge_factor_permille != 1000u || factor_confident))) {
+        return BATTERY_CHARGE_CONFIG_INVALID_ARGUMENT;
+    }
+    if (policy > BATTERY_CHARGE_POLICY_ENFORCE_LI_ION ||
+        (board_diag_battery_chemistry() != BOARD_DIAG_CHEM_LI_ION &&
+         policy == BATTERY_CHARGE_POLICY_ENFORCE_LI_ION) ||
         charge_factor_permille < BATTERY_CHARGE_FACTOR_MIN_PERMILLE ||
         charge_factor_permille > BATTERY_CHARGE_FACTOR_MAX_PERMILLE) {
         return BATTERY_CHARGE_CONFIG_INVALID_ARGUMENT;
@@ -1034,7 +1186,7 @@ battery_charge_supervisor_service_configure(
     }
 
     const battery_charge_supervisor_profile_t *profile =
-        battery_charge_supervisor_revb2_profile();
+        active_profile();
     battery_charge_supervisor_persisted_t candidate = s_pending_persisted;
     candidate.hardware_profile_id = profile->hardware_profile_id;
     candidate.chemistry = profile->chemistry;
@@ -1087,6 +1239,7 @@ void battery_charge_supervisor_service_note_legacy(bool active,
 
 uint16_t
 battery_charge_supervisor_service_effective_charge_factor_permille(void) {
+    if (board_diag_battery_chemistry() == BOARD_DIAG_CHEM_LI_ION) return 1000u;
     if (!s_snapshot.initialized) {
         battery_charge_supervisor_service_init();
     }
@@ -1096,7 +1249,7 @@ battery_charge_supervisor_service_effective_charge_factor_permille(void) {
         factor <= BATTERY_CHARGE_FACTOR_MAX_PERMILLE) {
         return factor;
     }
-    return battery_charge_supervisor_revb2_profile()
+    return active_profile()
         ->charge_factor_prior_permille;
 }
 

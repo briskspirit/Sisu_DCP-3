@@ -65,6 +65,7 @@ typedef enum {
     /* Profile 1 used the LTC2959 data-sheet ACR scale. Do not restore its
      * capacity or absolute-anchor evidence under calibrated scale revision 2. */
     BATTERY_LEARNING_PROFILE_NIMH_2S = 2,
+    BATTERY_LEARNING_PROFILE_LI_ION_BL5C = 3,
 } battery_learning_profile_id_t;
 
 typedef struct {
@@ -222,6 +223,7 @@ typedef struct {
 } battery_learning_state_t;
 
 const battery_learning_profile_t *battery_learning_nimh_profile(void);
+const battery_learning_profile_t *battery_learning_li_ion_profile(void);
 
 /* Coarse initialization only. The input is the Nokia 65 mA reference-load
  * voltage, not open-circuit voltage. The result is deliberately tagged

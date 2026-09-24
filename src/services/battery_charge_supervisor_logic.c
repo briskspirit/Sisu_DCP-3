@@ -34,6 +34,23 @@ static const battery_charge_supervisor_profile_t REVB2_PROFILE = {
     .control_confirm_ms = 5000u,
 };
 
+/* Rev B2 selector B: 18k VSET, 82k CHM_TMR, 1.10k ISET. BQ owns CC/CV
+ * regulation; the host can terminate net-battery taper despite system load. */
+static const battery_charge_supervisor_profile_t LI_ION_PROFILE = {
+    .chemistry = BATTERY_CHARGE_CHEMISTRY_LI_ION_1S,
+    .hardware_profile_id = 4u,
+    .nominal_charge_current_ua = 273000u,
+    .nominal_backup_timer_ms = 10u * 60u * 60u * 1000u,
+    .charge_factor_prior_permille = 1000u,
+    .admission_current_min_ma = 1u,
+    .completion_confirm_ms = BATTERY_CHARGE_COMPLETE_CONFIRM_MS,
+    .control_confirm_ms = 5000u,
+};
+
+const battery_charge_supervisor_profile_t *battery_charge_supervisor_li_ion_profile(void) {
+    return &LI_ION_PROFILE;
+}
+
 static uint32_t next_nonzero_u32(uint32_t value) {
     value++;
     return value == 0u ? 1u : value;
@@ -89,7 +106,8 @@ bool battery_charge_supervisor_terminal_qualifies_full(
         terminal ==
             BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_AND_CURVE_FULL ||
         terminal ==
-            BATTERY_CHARGE_TERMINAL_BQ_FAULT_AFTER_COULOMB_FULL;
+            BATTERY_CHARGE_TERMINAL_BQ_FAULT_AFTER_COULOMB_FULL ||
+        terminal == BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL;
 }
 
 static bool expected_stop_control(
@@ -169,6 +187,7 @@ static void reset_session_fields(battery_charge_supervisor_state_t *state) {
     state->sample_seen = false;
     state->integration_sample_valid = false;
     state->previous_minute_valid = false;
+    state->taper_window_valid = false;
     state->minute_sample_count = 0u;
     state->minute_current_sum_ua = 0;
     state->minute_temperature_sum_mdegc = 0;
@@ -181,6 +200,10 @@ static uint32_t blockers_for_observation(
     uint32_t blockers = state->snapshot.policy ==
             BATTERY_CHARGE_POLICY_OBSERVE
         ? BATTERY_CHARGE_BLOCK_POLICY_OBSERVE : 0u;
+    bool li_ion = profile->chemistry == BATTERY_CHARGE_CHEMISTRY_LI_ION_1S;
+    if (li_ion != (state->snapshot.policy == BATTERY_CHARGE_POLICY_ENFORCE_LI_ION)) {
+        blockers |= BATTERY_CHARGE_BLOCK_POLICY_OBSERVE;
+    }
     if (!state->snapshot.admitted) {
         blockers |= BATTERY_CHARGE_BLOCK_NOT_ADMITTED;
     }
@@ -213,6 +236,15 @@ static uint32_t blockers_for_observation(
     if (observation->hardware_profile_id != profile->hardware_profile_id) {
         blockers |= BATTERY_CHARGE_BLOCK_HARDWARE_PROFILE;
     }
+    if (!state->had_active) {
+        blockers |= BATTERY_CHARGE_BLOCK_NO_ACTIVE_HISTORY;
+    }
+    if (!observation->status_valid) {
+        blockers |= BATTERY_CHARGE_BLOCK_STATUS_INVALID;
+    }
+    /* Li-ion taper is physical endpoint evidence, independent of learned
+     * capacity, starting SOC and the NiMH replacement factor. */
+    if (li_ion) return blockers;
     if (!state->snapshot.deficit_valid) {
         blockers |= BATTERY_CHARGE_BLOCK_UNKNOWN_DEFICIT;
     }
@@ -236,13 +268,72 @@ static uint32_t blockers_for_observation(
     if (!state->snapshot.charge_factor_confident) {
         blockers |= BATTERY_CHARGE_BLOCK_FACTOR_UNLEARNED;
     }
-    if (!state->had_active) {
-        blockers |= BATTERY_CHARGE_BLOCK_NO_ACTIVE_HISTORY;
-    }
-    if (!observation->status_valid) {
-        blockers |= BATTERY_CHARGE_BLOCK_STATUS_INVALID;
-    }
     return blockers;
+}
+
+static bool observe_li_ion_taper(
+    battery_charge_supervisor_state_t *state,
+    const battery_charge_supervisor_observation_t *obs,
+    bool distinct_sample) {
+    battery_charge_supervisor_snapshot_t *snapshot = &state->snapshot;
+    if (snapshot->stop_reason == BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL) {
+        /* Retain the qualified window diagnostics after requesting the stop. */
+        state->taper_window_valid = false;
+        return false;
+    }
+    if (snapshot->phase != BATTERY_CHARGE_PHASE_CHARGING ||
+        snapshot->policy != BATTERY_CHARGE_POLICY_ENFORCE_LI_ION ||
+        snapshot->chemistry != BATTERY_CHARGE_CHEMISTRY_LI_ION_1S ||
+        snapshot->blockers != 0u || obs->inhibit_owner_mask != 0u ||
+        obs->charger_state != BATTERY_CHARGER_ACTIVE ||
+        obs->terminal_mv < BATTERY_CHARGE_LI_ION_TAPER_MIN_MV ||
+        obs->terminal_mv > BATTERY_CHARGE_LI_ION_TAPER_MAX_MV ||
+        obs->charger_input_mv < (uint32_t)obs->terminal_mv + 500u ||
+        (state->taper_window_valid &&
+         (uint32_t)(obs->now_ms - state->taper_last_ms) >
+             BATTERY_CHARGE_LI_ION_SAMPLE_GAP_MS)) {
+        state->taper_window_valid = false;
+        snapshot->taper_windows = 0u;
+        return false;
+    }
+    if (!distinct_sample) return false;
+    if (state->taper_window_valid) {
+        uint32_t gap = obs->now_ms - state->taper_last_ms;
+        /* Positive-only integration prevents modem discharge pulses from
+         * cancelling substantial charging current into a false taper. */
+        int64_t previous = state->taper_last_current_ua > 0
+            ? state->taper_last_current_ua : 0;
+        int64_t current = obs->current_ua > 0 ? obs->current_ua : 0;
+        state->taper_positive_nah += (uint64_t)(previous + current) * gap / 7200u;
+        uint32_t elapsed = obs->now_ms - state->taper_started_ms;
+        if (elapsed >= BATTERY_CHARGE_LI_ION_TAPER_WINDOW_MS) {
+            int64_t delta = saturating_sub_i64(
+                obs->session_delta_nah, state->taper_start_nah);
+            int64_t max_nah = (int64_t)BATTERY_CHARGE_LI_ION_TAPER_CURRENT_UA *
+                elapsed / 3600;
+            int64_t diagnostic_limit = (int64_t)INT32_MAX * elapsed / 3600;
+            snapshot->taper_average_ua = delta > diagnostic_limit ? INT32_MAX :
+                delta < -diagnostic_limit ? -INT32_MAX : (int32_t)(delta * 3600 / elapsed);
+            snapshot->taper_positive_average_ua =
+                (uint32_t)(state->taper_positive_nah * 3600u / elapsed);
+            if (delta >= 0 && delta < max_nah &&
+                state->taper_positive_nah < (uint64_t)max_nah) {
+                snapshot->taper_windows++;
+            } else {
+                snapshot->taper_windows = 0u;
+            }
+            state->taper_window_valid = false;
+        }
+    }
+    if (!state->taper_window_valid) {
+        state->taper_window_valid = true;
+        state->taper_started_ms = obs->now_ms;
+        state->taper_start_nah = obs->session_delta_nah;
+        state->taper_positive_nah = 0u;
+    }
+    state->taper_last_ms = obs->now_ms;
+    state->taper_last_current_ua = obs->current_ua;
+    return snapshot->taper_windows >= BATTERY_CHARGE_LI_ION_TAPER_WINDOWS;
 }
 
 static void freeze_admission(
@@ -477,7 +568,7 @@ void battery_charge_supervisor_init(
     if (state == NULL) {
         return;
     }
-    if (policy > BATTERY_CHARGE_POLICY_ENFORCE_BOOTSTRAP) {
+    if (policy > BATTERY_CHARGE_POLICY_ENFORCE_LI_ION) {
         policy = BATTERY_CHARGE_POLICY_OBSERVE;
     }
     memset(state, 0, sizeof(*state));
@@ -582,7 +673,8 @@ uint32_t battery_charge_supervisor_update(
 
     if (session_live && observation->status_valid &&
         observation->charger_state == BATTERY_CHARGER_FAULT) {
-        if (coulomb_full_evidence(state, observation)) {
+        if (profile->chemistry == BATTERY_CHARGE_CHEMISTRY_NIMH_2S &&
+            coulomb_full_evidence(state, observation)) {
             snapshot->phase = BATTERY_CHARGE_PHASE_COMPLETE_BQ;
             snapshot->terminal_reason =
                 BATTERY_CHARGE_TERMINAL_BQ_FAULT_AFTER_COULOMB_FULL;
@@ -598,7 +690,8 @@ uint32_t battery_charge_supervisor_update(
         }
         state->full_pending = false;
         result |= BATTERY_CHARGE_SUPERVISOR_RESULT_TERMINAL;
-    } else if (snapshot->phase == BATTERY_CHARGE_PHASE_CHARGING &&
+    } else if ((snapshot->phase == BATTERY_CHARGE_PHASE_CHARGING ||
+                snapshot->phase == BATTERY_CHARGE_PHASE_STOPPING) &&
                (!observation->continuity_valid ||
                 observation->gauge_session != snapshot->gauge_session ||
                 !observation->admission.source_current ||
@@ -608,14 +701,16 @@ uint32_t battery_charge_supervisor_update(
             state, BATTERY_CHARGE_TERMINAL_GAUGE_CONTINUITY_LOST);
         result |= BATTERY_CHARGE_SUPERVISOR_RESULT_DEGRADED |
                   BATTERY_CHARGE_SUPERVISOR_RESULT_TERMINAL;
-    } else if (snapshot->phase == BATTERY_CHARGE_PHASE_CHARGING &&
+    } else if ((snapshot->phase == BATTERY_CHARGE_PHASE_CHARGING ||
+                snapshot->phase == BATTERY_CHARGE_PHASE_STOPPING) &&
                observation->sample_valid &&
                !observation->current_valid) {
         mark_degraded(
             state, BATTERY_CHARGE_TERMINAL_GAUGE_CONTINUITY_LOST);
         result |= BATTERY_CHARGE_SUPERVISOR_RESULT_DEGRADED |
                   BATTERY_CHARGE_SUPERVISOR_RESULT_TERMINAL;
-    } else if (snapshot->phase == BATTERY_CHARGE_PHASE_CHARGING &&
+    } else if ((snapshot->phase == BATTERY_CHARGE_PHASE_CHARGING ||
+                snapshot->phase == BATTERY_CHARGE_PHASE_STOPPING) &&
                !observation->authoritative) {
         mark_degraded(state, BATTERY_CHARGE_TERMINAL_MANUAL_DEBUG_STOP);
         result |= BATTERY_CHARGE_SUPERVISOR_RESULT_DEGRADED |
@@ -657,6 +752,7 @@ uint32_t battery_charge_supervisor_update(
     }
 
     bool can_observe_completion = observation->status_valid &&
+        observation->sample_valid && observation->current_valid &&
         observation->charger_state == BATTERY_CHARGER_FULL &&
         observation->charger_enable_valid &&
         observation->charger_enable_requested &&
@@ -677,6 +773,22 @@ uint32_t battery_charge_supervisor_update(
                 : BATTERY_CHARGE_TERMINAL_BQ_ALREADY_FULL_AT_ATTACH;
             snapshot->full_qualified =
                 coulomb_full_evidence(state, observation);
+            if (profile->chemistry == BATTERY_CHARGE_CHEMISTRY_LI_ION_1S) {
+                snapshot->full_qualified = state->had_active &&
+                    snapshot->admitted && state->generation_authoritative &&
+                    observation->authoritative && observation->sample_valid &&
+                    observation->current_valid && observation->continuity_valid &&
+                    observation->gauge_session == snapshot->gauge_session &&
+                    observation->admission.source_current &&
+                    observation->admission.pack_generation == snapshot->pack_generation &&
+                    observation->chemistry == profile->chemistry &&
+                    observation->hardware_profile_id == profile->hardware_profile_id &&
+                    observation->terminal_mv >= 4100u &&
+                    observation->terminal_mv <= 4250u &&
+                    observation->current_ua <= 35000 &&
+                    observation->charger_input_mv >=
+                        (uint32_t)observation->terminal_mv + 500u;
+            }
             state->full_pending = false;
             result |= BATTERY_CHARGE_SUPERVISOR_RESULT_BQ_COMPLETE |
                       BATTERY_CHARGE_SUPERVISOR_RESULT_TERMINAL;
@@ -696,7 +808,17 @@ uint32_t battery_charge_supervisor_update(
 
     snapshot->blockers = blockers_for_observation(state, profile, observation);
 
-    if (snapshot->phase == BATTERY_CHARGE_PHASE_CHARGING &&
+    if (observe_li_ion_taper(state, observation, distinct_sample)) {
+        snapshot->candidate = BATTERY_CHARGE_CANDIDATE_SOFTWARE_TAPER_FULL;
+        snapshot->phase = BATTERY_CHARGE_PHASE_STOPPING;
+        snapshot->stop_requested = true;
+        snapshot->stop_reason = BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL;
+        state->stop_control_seen = false;
+        result |= BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED;
+    }
+
+    if (profile->chemistry == BATTERY_CHARGE_CHEMISTRY_NIMH_2S &&
+        snapshot->phase == BATTERY_CHARGE_PHASE_CHARGING &&
         !snapshot->full_candidate && snapshot->net_input_nah >= 0) {
         uint64_t input_nah = (uint64_t)snapshot->net_input_nah;
         if (snapshot->target_valid &&
@@ -746,14 +868,28 @@ uint32_t battery_charge_supervisor_update(
             if (observation->charger_enable_valid &&
                 !observation->charger_enable_requested &&
                 !observation->charger_enable_readback) {
+                /* The stop latch continues to hold /CE off while an ordinary
+                 * conversion failure recovers. Do not finalize an unqualified
+                 * FULL that can never be retried. Identity loss above is terminal. */
+                if (!observation->sample_valid || !observation->current_valid) {
+                    return result;
+                }
                 bool software_full = snapshot->stop_reason ==
-                    BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_FULL;
+                    BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_FULL ||
+                    snapshot->stop_reason == BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL;
                 snapshot->phase = software_full
                     ? BATTERY_CHARGE_PHASE_COMPLETE_SOFTWARE
                     : BATTERY_CHARGE_PHASE_STOPPED_SAFETY;
                 snapshot->terminal_reason = snapshot->stop_reason;
                 snapshot->full_qualified = software_full &&
-                    snapshot->session_authoritative;
+                    snapshot->session_authoritative && observation->authoritative &&
+                    observation->sample_valid && observation->current_valid &&
+                    observation->continuity_valid &&
+                    observation->gauge_session == snapshot->gauge_session &&
+                    observation->admission.source_current &&
+                    observation->admission.pack_generation == snapshot->pack_generation &&
+                    observation->chemistry == snapshot->chemistry &&
+                    observation->hardware_profile_id == snapshot->hardware_profile_id;
                 result |= BATTERY_CHARGE_SUPERVISOR_RESULT_SOFTWARE_STOPPED |
                           BATTERY_CHARGE_SUPERVISOR_RESULT_TERMINAL;
                 if (snapshot->full_qualified) {
@@ -796,7 +932,7 @@ bool battery_charge_supervisor_persisted_valid(
     if (persisted == NULL ||
         persisted->chemistry > BATTERY_CHARGE_CHEMISTRY_LI_ION_1S ||
         persisted->configured_policy >
-            BATTERY_CHARGE_POLICY_ENFORCE_BOOTSTRAP ||
+            BATTERY_CHARGE_POLICY_ENFORCE_LI_ION ||
         persisted->frozen_capacity_confidence >
             BATTERY_CAPACITY_CONFIDENCE_CONFLICTED ||
         persisted->frozen_soc_provenance >
@@ -804,9 +940,9 @@ bool battery_charge_supervisor_persisted_valid(
         persisted->frozen_soc_confidence >
             BATTERY_SOC_CONFIDENCE_ANCHORED ||
         persisted->last_terminal_reason >
-            BATTERY_CHARGE_TERMINAL_MAINTENANCE_REARM ||
+            BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL ||
         persisted->latched_stop_reason >
-            BATTERY_CHARGE_TERMINAL_MAINTENANCE_REARM) {
+            BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL) {
         return false;
     }
     if ((persisted->configured_charge_factor_confident &&
@@ -835,6 +971,10 @@ bool battery_charge_supervisor_persisted_valid(
         if ((persisted->latched_stop_reason !=
                  BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_FULL &&
              persisted->latched_stop_reason !=
+                 BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE &&
+             persisted->latched_stop_reason !=
+                 BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL &&
+             persisted->latched_stop_reason !=
                  BATTERY_CHARGE_TERMINAL_SAFETY_CHARGE_LIMIT) ||
             !persisted->active_session_valid) {
             return false;
@@ -843,6 +983,10 @@ bool battery_charge_supervisor_persisted_valid(
                BATTERY_CHARGE_TERMINAL_NONE) {
         return false;
     }
+    if ((persisted->latched_stop_reason == BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL ||
+         persisted->latched_stop_reason == BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE ||
+         persisted->last_terminal_reason == BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL) &&
+        persisted->chemistry != BATTERY_CHARGE_CHEMISTRY_LI_ION_1S) return false;
     if (persisted->active_session_valid) {
         uint64_t capacity_nah =
             (uint64_t)persisted->frozen_capacity_mah *
@@ -881,7 +1025,8 @@ bool battery_charge_supervisor_persisted_valid(
                  persisted->deficit_nah,
                  persisted->charge_factor_permille)) ||
             (persisted->frozen_capacity_valid &&
-             persisted->safety_input_nah == 0u)) {
+             persisted->safety_input_nah == 0u &&
+             persisted->chemistry != BATTERY_CHARGE_CHEMISTRY_LI_ION_1S)) {
             return false;
         }
     }
@@ -967,19 +1112,29 @@ bool battery_charge_supervisor_restore_active(
     battery_charge_supervisor_state_t restored;
     battery_charge_supervisor_init(&restored, policy);
     battery_charge_supervisor_snapshot_t *snapshot = &restored.snapshot;
-    bool terminal_stop_persisted = stopped_latched &&
+    bool terminal_persisted = stopped_latched &&
         persisted->last_terminal_valid &&
-        persisted->last_terminal_generation == persisted->charge_generation &&
+        persisted->last_terminal_generation == persisted->charge_generation;
+    bool terminal_stop_persisted = terminal_persisted &&
         persisted->last_terminal_reason == persisted->latched_stop_reason;
-    snapshot->phase = terminal_stop_persisted
-        ? (persisted->latched_stop_reason ==
-                   BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_FULL
-               ? BATTERY_CHARGE_PHASE_COMPLETE_SOFTWARE
-               : BATTERY_CHARGE_PHASE_STOPPED_SAFETY)
-        : (stopped_latched ? BATTERY_CHARGE_PHASE_STOPPING
-                           : BATTERY_CHARGE_PHASE_CHARGING);
-    snapshot->terminal_reason = terminal_stop_persisted
-        ? persisted->latched_stop_reason
+    snapshot->phase = stopped_latched ? BATTERY_CHARGE_PHASE_STOPPING
+                                     : BATTERY_CHARGE_PHASE_CHARGING;
+    if (terminal_stop_persisted) {
+        snapshot->phase = persisted->latched_stop_reason ==
+                BATTERY_CHARGE_TERMINAL_BQ_COMPLETE_AFTER_ACTIVE
+            ? BATTERY_CHARGE_PHASE_COMPLETE_BQ
+            : battery_charge_supervisor_terminal_qualifies_full(persisted->latched_stop_reason)
+                ? BATTERY_CHARGE_PHASE_COMPLETE_SOFTWARE
+                : BATTERY_CHARGE_PHASE_STOPPED_SAFETY;
+    } else if (terminal_persisted) {
+        /* A failed stop is terminal too. Retrying its old FULL request after
+         * reset would overwrite a recorded BQ/readback fault with success. */
+        snapshot->phase = persisted->last_terminal_reason == BATTERY_CHARGE_TERMINAL_BQ_FAULT ||
+                persisted->last_terminal_reason == BATTERY_CHARGE_TERMINAL_CONTROL_READBACK_FAILED
+            ? BATTERY_CHARGE_PHASE_FAULT : BATTERY_CHARGE_PHASE_DEGRADED;
+    }
+    snapshot->terminal_reason = terminal_persisted
+        ? persisted->last_terminal_reason
         : BATTERY_CHARGE_TERMINAL_NONE;
     snapshot->charge_generation = persisted->charge_generation;
     snapshot->pack_generation = persisted->pack_generation;
@@ -1026,10 +1181,11 @@ bool battery_charge_supervisor_restore_active(
     snapshot->candidate = persisted->latched_stop_reason ==
             BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_FULL
         ? BATTERY_CHARGE_CANDIDATE_SOFTWARE_COULOMB_FULL
-        : BATTERY_CHARGE_CANDIDATE_NONE;
+        : persisted->latched_stop_reason == BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL
+            ? BATTERY_CHARGE_CANDIDATE_SOFTWARE_TAPER_FULL
+            : BATTERY_CHARGE_CANDIDATE_NONE;
     snapshot->full_qualified = terminal_stop_persisted &&
-        persisted->latched_stop_reason ==
-            BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_FULL;
+        persisted->last_terminal_full_qualified;
     snapshot->terminal_mv = observation->terminal_mv;
     snapshot->current_ua = observation->current_ua;
     snapshot->temperature_mdegc = observation->temperature_mdegc;
@@ -1040,7 +1196,7 @@ bool battery_charge_supervisor_restore_active(
     restored.generation_authoritative = true;
     restored.had_active = true;
     restored.stop_control_seen = stopped_latched &&
-        !terminal_stop_persisted;
+        !terminal_persisted;
     restored.stop_requested_ms = observation->now_ms;
     restored.sample_seen = true;
     restored.last_sample_sequence = observation->sample_sequence;

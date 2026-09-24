@@ -1,4 +1,4 @@
-/* Rev B2 Nokia-charger and battery-gauge observation diagnostic. */
+/* Rev B2 NiMH charger and battery-gauge observation diagnostic. */
 
 #include <stdio.h>
 
@@ -31,13 +31,11 @@ int main(void) {
 
     bool tca_ok = tca8418_hal_init();
     bool disable_ok = tca_ok && tca8418_hal_set_charger_enabled(false);
-    bool nimh_ok = tca_ok && tca8418_hal_set_charger_li_ion_mode(false);
     s_charger_enabled = false;
     s_enable_armed = false;
     battery_hal_init();
-    printf("[charger] Rev B2 charger/ADC diagnostic, TCA=%u disable=%u "
-           "NiMH=%u\n",
-           tca_ok ? 1u : 0u, disable_ok ? 1u : 0u, nimh_ok ? 1u : 0u);
+    printf("[charger] Rev B2 NiMH-only charger/ADC diagnostic, TCA=%u disable=%u\n",
+           tca_ok ? 1u : 0u, disable_ok ? 1u : 0u);
     printf("[charger] SAFE DEFAULT: /CE high (disabled). "
            "a=arm, e=enable 60s, d=disable\n");
 
@@ -45,6 +43,11 @@ int main(void) {
     while (true) {
         uint32_t now_ms =
             to_ms_since_boot(get_absolute_time());
+        battery_hal_poll(now_ms);
+        if (s_charger_enabled &&
+            battery_hal_chemistry() != BATTERY_CHEMISTRY_NIMH_2S) {
+            disable_charger("chemistry unavailable");
+        }
         int ch = getchar_timeout_us(0);
         if (ch == 'a' || ch == 'A') {
             s_enable_armed = true;
@@ -56,7 +59,11 @@ int main(void) {
                 (int32_t)(now_ms - s_enable_arm_deadline_ms) >= 0) {
                 s_enable_armed = false;
                 printf("[charger] enable REFUSED; press a then e\n");
-            } else if (tca8418_hal_set_charger_enabled(true)) {
+            } else if (battery_hal_chemistry() != BATTERY_CHEMISTRY_NIMH_2S) {
+                s_enable_armed = false;
+                printf("[charger] enable REFUSED; this diagnostic requires identified NiMH\n");
+            } else if (tca8418_hal_set_charger_li_ion_mode(false) &&
+                       tca8418_hal_set_charger_enabled(true)) {
                 s_enable_armed = false;
                 s_charger_enabled = true;
                 s_enable_deadline_ms = now_ms + CHARGER_ENABLE_WINDOW_MS;
@@ -78,7 +85,6 @@ int main(void) {
             (int32_t)(now_ms - s_enable_deadline_ms) >= 0) {
             disable_charger("timeout");
         }
-        battery_hal_poll(now_ms);
         if ((int32_t)(now_ms - next_print_ms) >= 0) {
             next_print_ms = now_ms + 500u;
             ltc2959_snapshot_t ltc;

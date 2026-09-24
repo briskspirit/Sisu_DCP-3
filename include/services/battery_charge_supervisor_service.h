@@ -73,6 +73,10 @@ void battery_charge_supervisor_service_init(void);
  * additive charger-inhibit owner, but only after its stop latch is durable. */
 uint32_t battery_charge_supervisor_service_poll(uint32_t now_ms);
 
+/* Finish an attached recharge qualification/rearm before returning to the
+ * minute-spaced standby cadence. Does not introduce a periodic wake source. */
+bool battery_charge_supervisor_service_standby_ready(void);
+
 /* Release only this service's /CE owner when app-side LOW/EMPTY evidence says
  * an attached pack is not actually recovering. Hardware release is fail-open;
  * the cleared latch is still retried to durability before model re-admission. */

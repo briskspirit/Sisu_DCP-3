@@ -8,11 +8,12 @@ typedef enum {
     CHARGER_INHIBIT_SUPERVISOR = 1u << 0,
     CHARGER_INHIBIT_DEBUG = 1u << 1,
     CHARGER_INHIBIT_FAULT = 1u << 2,
+    CHARGER_INHIBIT_CHEMISTRY = 1u << 3,
 } charger_inhibit_owner_t;
 
 #define CHARGER_INHIBIT_VALID_MASK \
     (CHARGER_INHIBIT_SUPERVISOR | CHARGER_INHIBIT_DEBUG | \
-     CHARGER_INHIBIT_FAULT)
+     CHARGER_INHIBIT_FAULT | CHARGER_INHIBIT_CHEMISTRY)
 
 typedef struct {
     uint8_t inhibit_owner_mask;

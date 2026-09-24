@@ -7,6 +7,7 @@
 #include "hal/bq25171_stat.h"
 #include "hal/battery_gauge_logic.h"
 #include "hal/battery_runtime_logic.h"
+#include "hal/battery_chemistry_logic.h"
 
 /* Rev B2 battery / charger HAL. Board-1 P1-C validation qualified LTC2959
  * voltage as the user-facing source; builds may still disable that policy
@@ -21,12 +22,14 @@
  * low/empty supervision takes over. Rev B2 qualifies the terminal evidence
  * through the bounded LTC window documented below. */
 typedef enum {
-    BATTERY_POWER_ON_OK = 0,   /* >= VBAT_POWERON_MIN_MV, or charger present */
-    BATTERY_POWER_ON_REFUSE,   /* < VBAT_POWERON_MIN_MV, no charger: silent hard refuse */
+    BATTERY_POWER_ON_OK = 0,   /* Chemistry's power-on floor, or qualified charger */
+    BATTERY_POWER_ON_REFUSE,   /* Below the floor, no charger: silent hard refuse */
     BATTERY_POWER_ON_PENDING,  /* bounded startup qualification still acquiring */
 } battery_power_on_gate_t;
 
 void battery_hal_init(void);
+battery_chemistry_t battery_hal_chemistry(void);
+const battery_gauge_profile_t *battery_hal_gauge_profile(void);
 /* Select acquisition policy for work the RP is already awake to perform. This
  * changes no standby deadline and is therefore not a wake source. */
 void battery_hal_set_sample_mode(battery_sample_mode_t mode);
@@ -43,6 +46,7 @@ uint32_t battery_hal_sample_sequence(void);
 uint8_t battery_hal_level_bars(void);
 uint8_t battery_hal_level_bars_from_mv(uint16_t mv);  /* same mapping, explicit mV */
 bool battery_hal_low(void);
+bool battery_hal_low_notice(void);
 bool battery_hal_empty(void);
 int16_t battery_hal_load_correction_mv(void);
 int32_t battery_hal_window_current_ua(void);

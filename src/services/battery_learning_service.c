@@ -10,11 +10,17 @@ static battery_learning_state_t s_state;
 static battery_learning_persisted_t s_pending_persisted;
 static battery_learning_service_snapshot_t s_snapshot;
 
+static const battery_learning_profile_t *active_profile(void) {
+    return board_diag_battery_chemistry() == BOARD_DIAG_CHEM_LI_ION
+        ? battery_learning_li_ion_profile() : battery_learning_nimh_profile();
+}
+
 static uint32_t saturating_increment_u32(uint32_t value) {
     return value == UINT32_MAX ? value : value + 1u;
 }
 
 static void publish_snapshot(void) {
+    s_snapshot.profile_id = s_state.persisted.profile_id;
     battery_learning_get_snapshot(&s_state, &s_snapshot.model);
 }
 
@@ -34,11 +40,13 @@ static void try_persist(void) {
 
 void battery_learning_service_init(void) {
     memset(&s_snapshot, 0, sizeof(s_snapshot));
+    if (board_diag_battery_chemistry() == BOARD_DIAG_CHEM_UNKNOWN) return;
+    const battery_learning_profile_t *profile = active_profile();
     battery_learning_persisted_t persisted;
     store_status_t status = store_battery_learning_get(&persisted);
     bool valid = status == STORE_STATUS_OK &&
-                 battery_learning_persisted_valid(&persisted, NULL);
-    battery_learning_init(&s_state, NULL, valid ? &persisted : NULL);
+                 battery_learning_persisted_valid(&persisted, profile);
+    battery_learning_init(&s_state, profile, valid ? &persisted : NULL);
     s_snapshot.initialized = true;
     bool migrated_full_anchor = valid && !persisted.soc_valid &&
                                 persisted.full_anchor_valid &&
@@ -53,14 +61,27 @@ void battery_learning_service_init(void) {
     publish_snapshot();
 }
 
-uint32_t battery_learning_service_poll(uint32_t now_ms, uint32_t events,
-                                       uint16_t charge_factor_permille) {
-    if (!s_snapshot.initialized) {
+static bool ensure_current_profile(void) {
+    if (board_diag_battery_chemistry() == BOARD_DIAG_CHEM_UNKNOWN) {
+        memset(&s_snapshot, 0, sizeof(s_snapshot));
+        return false;
+    }
+    if (!s_snapshot.initialized ||
+        s_snapshot.profile_id != active_profile()->profile_id) {
         battery_learning_service_init();
     }
-    battery_learning_profile_t profile = *battery_learning_nimh_profile();
+    return s_snapshot.initialized;
+}
+
+uint32_t battery_learning_service_poll(uint32_t now_ms, uint32_t events,
+                                       uint16_t charge_factor_permille) {
+    if (!ensure_current_profile()) {
+        return BATTERY_LEARNING_RESULT_NONE;
+    }
+    battery_learning_profile_t profile = *active_profile();
     if (charge_factor_permille >= BATTERY_CHARGE_FACTOR_MIN_PERMILLE &&
-        charge_factor_permille <= BATTERY_CHARGE_FACTOR_MAX_PERMILLE) {
+        charge_factor_permille <= BATTERY_CHARGE_FACTOR_MAX_PERMILLE &&
+        profile.profile_id == BATTERY_LEARNING_PROFILE_NIMH_2S) {
         profile.charge_factor_permille = charge_factor_permille;
     }
     battery_learning_observation_t observation;
@@ -87,8 +108,8 @@ battery_learning_provision_status_t battery_learning_service_provision(
     if (provision == NULL) {
         return BATTERY_LEARNING_PROVISION_INVALID_ARGUMENT;
     }
-    if (!s_snapshot.initialized) {
-        battery_learning_service_init();
+    if (!ensure_current_profile()) {
+        return BATTERY_LEARNING_PROVISION_OBSERVATION_UNAVAILABLE;
     }
     if (!store_service_ready()) {
         return BATTERY_LEARNING_PROVISION_STORE_NOT_READY;
@@ -117,9 +138,9 @@ battery_learning_provision_status_t battery_learning_service_provision(
     /* Bind the candidate to the gauge session visible at command time. This
      * makes provisioning safe even if CDC wins the race against the first
      * ordinary sidecar poll after boot or battery replacement. */
-    (void)battery_learning_update(&candidate, NULL, &observation,
+    (void)battery_learning_update(&candidate, active_profile(), &observation,
                                   BATTERY_LEARNING_EVENT_NONE);
-    if (!battery_learning_provision(&candidate, NULL, provision)) {
+    if (!battery_learning_provision(&candidate, active_profile(), provision)) {
         return BATTERY_LEARNING_PROVISION_INVALID_ARGUMENT;
     }
     battery_learning_persisted_t persisted;
@@ -142,13 +163,13 @@ battery_learning_service_recover_capacity_cycle(
     uint16_t capacity_mah,
     uint16_t expected_accepted_cycles) {
     const battery_learning_profile_t *profile =
-        battery_learning_nimh_profile();
+        active_profile();
     if (capacity_mah < profile->capacity_min_mah ||
         capacity_mah > profile->capacity_max_mah) {
         return BATTERY_LEARNING_RECOVER_INVALID_ARGUMENT;
     }
-    if (!s_snapshot.initialized) {
-        battery_learning_service_init();
+    if (!ensure_current_profile()) {
+        return BATTERY_LEARNING_RECOVER_OBSERVATION_UNAVAILABLE;
     }
     if (!store_service_ready()) {
         return BATTERY_LEARNING_RECOVER_STORE_NOT_READY;
@@ -202,8 +223,8 @@ battery_learning_service_recover_full_endpoint(
     uint32_t full_acr_raw,
     int64_t full_session_delta_nah,
     uint16_t expected_accepted_cycles) {
-    if (!s_snapshot.initialized) {
-        battery_learning_service_init();
+    if (!ensure_current_profile()) {
+        return BATTERY_LEARNING_RECOVER_OBSERVATION_UNAVAILABLE;
     }
     if (!store_service_ready()) {
         return BATTERY_LEARNING_RECOVER_STORE_NOT_READY;
@@ -227,7 +248,7 @@ battery_learning_service_recover_full_endpoint(
 
     battery_learning_state_t candidate = s_state;
     const battery_learning_profile_t *profile =
-        battery_learning_nimh_profile();
+        active_profile();
     (void)battery_learning_update(
         &candidate, profile, &observation, BATTERY_LEARNING_EVENT_NONE);
     if (candidate.persisted.accepted_capacity_cycles !=

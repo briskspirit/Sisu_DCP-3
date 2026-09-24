@@ -1044,6 +1044,7 @@ static void test_latched_stop_restores_before_or_after_confirmation(void) {
     persisted.last_terminal_reason =
         BATTERY_CHARGE_TERMINAL_SOFTWARE_COULOMB_FULL;
     persisted.last_terminal_generation = persisted.charge_generation;
+    persisted.last_terminal_full_qualified = true;
     battery_charge_supervisor_init(
         &state, BATTERY_CHARGE_POLICY_ENFORCE_ANCHORED);
     assert(battery_charge_supervisor_restore_active(
@@ -1052,6 +1053,24 @@ static void test_latched_stop_restores_before_or_after_confirmation(void) {
     battery_charge_supervisor_snapshot_t model = snapshot(&state);
     assert(model.phase == BATTERY_CHARGE_PHASE_COMPLETE_SOFTWARE);
     assert(model.full_qualified);
+    persisted.last_terminal_full_qualified = false;
+    assert(battery_charge_supervisor_restore_active(
+        &state, BATTERY_CHARGE_POLICY_ENFORCE_ANCHORED, NULL, &persisted, &obs));
+    assert(!snapshot(&state).full_qualified);
+    const battery_charge_supervisor_terminal_t failures[] = {
+        BATTERY_CHARGE_TERMINAL_BQ_FAULT,
+        BATTERY_CHARGE_TERMINAL_CONTROL_READBACK_FAILED,
+        BATTERY_CHARGE_TERMINAL_GAUGE_CONTINUITY_LOST,
+    };
+    for (unsigned i = 0; i < sizeof(failures) / sizeof(failures[0]); ++i) {
+        persisted.last_terminal_reason = failures[i];
+        assert(battery_charge_supervisor_restore_active(
+            &state, BATTERY_CHARGE_POLICY_ENFORCE_ANCHORED, NULL, &persisted, &obs));
+        uint32_t result = battery_charge_supervisor_update(&state, NULL, &obs);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED));
+        assert(!snapshot(&state).full_qualified);
+        assert(snapshot(&state).terminal_reason == failures[i]);
+    }
 }
 
 static uint32_t random_next(uint32_t *state) {
@@ -1123,7 +1142,246 @@ static void test_randomized_public_api_invariants(void) {
     }
 }
 
+static battery_charge_supervisor_observation_t li_ion_observation(void) {
+    battery_charge_supervisor_observation_t obs = observation(1000u, 1u);
+    obs.chemistry = BATTERY_CHARGE_CHEMISTRY_LI_ION_1S;
+    obs.hardware_profile_id = 4u;
+    obs.terminal_mv = 4180u;
+    obs.current_ua = 18000;
+    obs.admission.capacity_valid = false;
+    obs.admission.remaining_valid = false;
+    obs.admission.charge_factor_permille = 1000u;
+    obs.admission.charge_factor_confident = false;
+    return obs;
+}
+
+static uint32_t taper_sample(battery_charge_supervisor_state_t *state,
+                             battery_charge_supervisor_observation_t *obs,
+                             uint32_t elapsed, int32_t actual_current) {
+    obs->now_ms += elapsed;
+    obs->sample_sequence++;
+    obs->session_delta_nah += (int64_t)actual_current * elapsed / 3600;
+    return battery_charge_supervisor_update(state, battery_charge_supervisor_li_ion_profile(), obs);
+}
+
+static void test_li_ion_taper_stop_and_current_crosscheck(void) {
+    for (unsigned scenario = 0; scenario < 12; ++scenario) {
+        battery_charge_supervisor_state_t state;
+        battery_charge_supervisor_init(&state, BATTERY_CHARGE_POLICY_ENFORCE_LI_ION);
+        battery_charge_supervisor_observation_t obs = li_ion_observation();
+        if (scenario == 1) obs.terminal_mv = 4000;
+        if (scenario == 2) obs.current_ua = 30000;
+        if (scenario == 3) obs.current_ua = -18000;
+        if (scenario == 4) obs.charger_input_mv = 4400;
+        if (scenario == 5) obs.terminal_mv = 4251;
+        if (scenario == 6) obs.current_ua = 18000; /* ACR says high current. */
+        if (scenario == 7) obs.current_ua = 60000; /* Net cancellation is not taper. */
+        if (scenario == 8) obs.current_ua = 40000; /* Modest positive pulses are OK. */
+        if (scenario == 9) obs.now_ms = UINT32_MAX - 30000u;
+        if (scenario == 10) obs.terminal_mv = 4170;
+        if (scenario == 11) obs.current_ua = 27000; /* Strictly below 27 mA. */
+        (void)battery_charge_supervisor_update(&state, battery_charge_supervisor_li_ion_profile(), &obs);
+        uint32_t result = 0;
+        for (unsigned second = 1; second <= 180; ++second) {
+            if (scenario == 7) obs.current_ua = second % 2 ? -60000 : 60000;
+            if (scenario == 8) obs.current_ua = second % 2 ? -10000 : 40000;
+            int32_t actual = scenario == 6 ? 100000 :
+                scenario == 7 ? 0 : scenario == 8 ? 15000 : obs.current_ua;
+            result = taper_sample(&state, &obs, 1000u, actual);
+            if (second < 180) assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED));
+        }
+        bool expected = scenario == 0 || scenario == 8 || scenario == 9 || scenario == 10;
+        assert(((result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED) != 0u) == expected);
+        assert(!state.snapshot.full_qualified);
+        if (!expected) continue;
+        assert(state.snapshot.stop_reason == BATTERY_CHARGE_TERMINAL_SOFTWARE_TAPER_FULL);
+        obs.supervisor_inhibit_active = true;
+        obs.charger_enable_readback = false;
+        obs.charger_enable_requested = false;
+        obs.charger_state = BATTERY_CHARGER_DETACHED;
+        result = taper_sample(&state, &obs, 1000, -25000);
+        assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+        assert(state.snapshot.phase == BATTERY_CHARGE_PHASE_COMPLETE_SOFTWARE);
+    }
+}
+
+static void test_li_ion_taper_resets_and_requires_fresh_evidence(void) {
+    for (unsigned scenario = 0; scenario < 8; ++scenario) {
+        battery_charge_supervisor_state_t state;
+        battery_charge_supervisor_init(&state, BATTERY_CHARGE_POLICY_ENFORCE_LI_ION);
+        battery_charge_supervisor_observation_t obs = li_ion_observation();
+        (void)battery_charge_supervisor_update(&state, battery_charge_supervisor_li_ion_profile(), &obs);
+        for (unsigned second = 1; second <= 120; ++second) taper_sample(&state, &obs, 1000, 18000);
+        assert(state.snapshot.taper_windows == 2);
+        if (scenario == 0) obs.sample_valid = false;
+        if (scenario == 1) obs.terminal_mv = 4169;
+        if (scenario == 2) obs.status_valid = false;
+        if (scenario == 3) obs.charger_input_mv = 4600;
+        if (scenario == 4) obs.now_ms += 11000;
+        if (scenario == 5) obs.current_valid = false;
+        if (scenario == 6) obs.charger_state = BATTERY_CHARGER_FAULT;
+        if (scenario == 7) obs.gauge_session++;
+        uint32_t result = taper_sample(&state, &obs, 1000, 18000);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED));
+        assert(!state.snapshot.full_qualified);
+        assert(state.snapshot.taper_windows == 0);
+        obs.sample_valid = obs.status_valid = obs.current_valid = true;
+        obs.terminal_mv = 4180;
+        obs.charger_input_mv = 5000;
+        for (unsigned second = 1; second <= 120; ++second) {
+            result = taper_sample(&state, &obs, 1000, 18000);
+            assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED));
+        }
+    }
+    battery_charge_supervisor_state_t state;
+    battery_charge_supervisor_init(&state, BATTERY_CHARGE_POLICY_ENFORCE_LI_ION);
+    battery_charge_supervisor_observation_t obs = li_ion_observation();
+    (void)battery_charge_supervisor_update(&state, battery_charge_supervisor_li_ion_profile(), &obs);
+    for (unsigned second = 1; second <= 300; ++second) {
+        obs.now_ms += 1000;
+        uint32_t result = battery_charge_supervisor_update(&state, battery_charge_supervisor_li_ion_profile(), &obs);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED));
+    }
+    assert(state.snapshot.taper_windows == 0);
+}
+
+static void test_full_confirmation_waits_for_sample_recovery(void) {
+    for (unsigned hardware = 0; hardware < 2; ++hardware) {
+        battery_charge_supervisor_state_t state;
+        battery_charge_supervisor_init(&state, BATTERY_CHARGE_POLICY_ENFORCE_LI_ION);
+        battery_charge_supervisor_observation_t obs = li_ion_observation();
+        const battery_charge_supervisor_profile_t *profile = battery_charge_supervisor_li_ion_profile();
+        (void)battery_charge_supervisor_update(&state, profile, &obs);
+        if (hardware) {
+            obs.charger_state = BATTERY_CHARGER_FULL;
+            (void)taper_sample(&state, &obs, 1000u, 0);
+        } else {
+            for (unsigned second = 1; second <= 180; ++second) {
+                (void)taper_sample(&state, &obs, 1000u, 18000);
+            }
+            assert(state.snapshot.phase == BATTERY_CHARGE_PHASE_STOPPING);
+            obs.supervisor_inhibit_active = true;
+            obs.inhibit_owner_mask = 1u;
+            obs.charger_enable_requested = obs.charger_enable_readback = false;
+            obs.charger_state = BATTERY_CHARGER_DETACHED;
+        }
+        obs.sample_valid = obs.current_valid = false;
+        /* No successful conversion sequence change during transport failure. */
+        obs.now_ms += 20000u;
+        uint32_t result = battery_charge_supervisor_update(&state, profile, &obs);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_TERMINAL));
+        assert(!state.snapshot.full_qualified);
+        assert(state.snapshot.phase == (hardware ? BATTERY_CHARGE_PHASE_CHARGING
+                                                : BATTERY_CHARGE_PHASE_STOPPING));
+        obs.sample_valid = obs.current_valid = true;
+        result = taper_sample(&state, &obs, 1000u, 0);
+        if (hardware) {
+            assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED));
+            result = taper_sample(&state, &obs, profile->completion_confirm_ms, 0);
+        }
+        assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+        result = taper_sample(&state, &obs, 1000u, 0);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED));
+    }
+
+    for (unsigned failure = 0; failure < 5; ++failure) {
+        battery_charge_supervisor_state_t state;
+        battery_charge_supervisor_init(&state, BATTERY_CHARGE_POLICY_ENFORCE_LI_ION);
+        battery_charge_supervisor_observation_t obs = li_ion_observation();
+        (void)battery_charge_supervisor_update(&state, battery_charge_supervisor_li_ion_profile(), &obs);
+        for (unsigned second = 1; second <= 180; ++second) {
+            (void)taper_sample(&state, &obs, 1000u, 18000);
+        }
+        obs.supervisor_inhibit_active = true;
+        obs.inhibit_owner_mask = 1u;
+        obs.charger_enable_requested = obs.charger_enable_readback = false;
+        obs.charger_state = BATTERY_CHARGER_DETACHED;
+        if (failure == 0) obs.gauge_session++;
+        if (failure == 1) obs.admission.pack_generation++;
+        if (failure == 2) obs.continuity_valid = false;
+        if (failure == 3) obs.current_valid = false;
+        if (failure == 4) obs.authoritative = false;
+        uint32_t result = taper_sample(&state, &obs, 1000u, 0);
+        assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_DEGRADED);
+        assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_TERMINAL);
+        assert(!state.snapshot.full_qualified);
+    }
+}
+
+static void test_failed_conversion_breaks_taper_without_new_sample(void) {
+    battery_charge_supervisor_state_t state;
+    battery_charge_supervisor_init(&state, BATTERY_CHARGE_POLICY_ENFORCE_LI_ION);
+    battery_charge_supervisor_observation_t obs = li_ion_observation();
+    const battery_charge_supervisor_profile_t *profile = battery_charge_supervisor_li_ion_profile();
+    (void)battery_charge_supervisor_update(&state, profile, &obs);
+    for (unsigned second = 1; second <= 120; ++second) {
+        (void)taper_sample(&state, &obs, 1000u, 18000);
+    }
+    assert(state.snapshot.taper_windows == 2u);
+    obs.sample_valid = obs.current_valid = false;
+    obs.now_ms += 1000u;
+    (void)battery_charge_supervisor_update(&state, profile, &obs);
+    assert(state.snapshot.taper_windows == 0u);
+    assert(!state.taper_window_valid);
+    obs.sample_valid = obs.current_valid = true;
+    for (unsigned second = 0; second < 180; ++second) {
+        uint32_t result = taper_sample(&state, &obs, 1000u, 18000);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED));
+    }
+    assert(taper_sample(&state, &obs, 1000u, 18000) &
+           BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED);
+}
+
+static void test_li_ion_uses_bq_completion_not_nimh_coulombs(void) {
+    const battery_charge_supervisor_profile_t *profile =
+        battery_charge_supervisor_li_ion_profile();
+    assert(profile->hardware_profile_id == 4u);
+    assert(profile->charge_factor_prior_permille == 1000u);
+    assert(profile->nominal_backup_timer_ms == 36000000u);
+    for (unsigned scenario = 0u; scenario < 6u; scenario++) {
+        battery_charge_supervisor_state_t state;
+        battery_charge_supervisor_init(&state, BATTERY_CHARGE_POLICY_ENFORCE_ANCHORED);
+        battery_charge_supervisor_observation_t obs = observation(1000u, 1u);
+        obs.chemistry = BATTERY_CHARGE_CHEMISTRY_LI_ION_1S;
+        obs.hardware_profile_id = 4u;
+        obs.terminal_mv = 3900u;
+        obs.admission.charge_factor_permille = 1000u;
+        obs.admission.charge_factor_confident = true;
+        uint32_t result = battery_charge_supervisor_update(&state, profile, &obs);
+        assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_ADMITTED);
+        obs.now_ms = 2000u;
+        obs.sample_sequence++;
+        obs.session_delta_nah += INT64_C(2000000000);
+        result = battery_charge_supervisor_update(&state, profile, &obs);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_STOP_REQUESTED));
+        assert(!snapshot(&state).full_qualified);
+        obs.now_ms = 3000u;
+        obs.sample_sequence++;
+        obs.charger_state = BATTERY_CHARGER_FULL;
+        obs.terminal_mv = 4200u;
+        obs.current_ua = -10000;
+        if (scenario == 1u) obs.terminal_mv = 3800u;
+        if (scenario == 2u) obs.current_ua = 100000;
+        if (scenario == 3u) obs.charger_input_mv = 4350u;
+        if (scenario == 4u) obs.charger_state = BATTERY_CHARGER_FAULT;
+        if (scenario == 5u) obs.sample_valid = false;
+        result = battery_charge_supervisor_update(&state, profile, &obs);
+        assert(!(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED));
+        obs.now_ms += profile->completion_confirm_ms;
+        obs.sample_sequence++;
+        result = battery_charge_supervisor_update(&state, profile, &obs);
+        assert(snapshot(&state).full_qualified == (scenario == 0u));
+        if (scenario == 0u) assert(result & BATTERY_CHARGE_SUPERVISOR_RESULT_FULL_QUALIFIED);
+        if (scenario == 4u) assert(snapshot(&state).phase == BATTERY_CHARGE_PHASE_FAULT);
+    }
+}
+
 int main(void) {
+    test_full_confirmation_waits_for_sample_recovery();
+    test_failed_conversion_breaks_taper_without_new_sample();
+    test_li_ion_taper_stop_and_current_crosscheck();
+    test_li_ion_taper_resets_and_requires_fresh_evidence();
+    test_li_ion_uses_bq_completion_not_nimh_coulombs();
     test_revb2_hardware_profile_identity();
     test_stale_admission_is_blocked_and_pack_change_degrades();
     test_invalid_policy_fails_observe_only();

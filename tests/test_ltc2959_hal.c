@@ -239,6 +239,7 @@ static void test_stale_sample_recovery_preserves_coulomb_session(void) {
     assert(snapshot.continuity_valid);
     assert(snapshot.session_delta_nah ==
            (int64_t)50 * LTC2959_ACR_LSB_NAH);
+    uint32_t power_resets = snapshot.power_reset_count;
 
     set_acr(boot_acr + 100u);
     poll_at(5009u);
@@ -290,6 +291,7 @@ static void test_stale_sample_recovery_preserves_coulomb_session(void) {
     assert(snapshot.conversion_sequence == 8u);
     assert(snapshot.last_conversion_sample_valid);
     assert(snapshot.sample_sequence == 5u);
+    assert(snapshot.power_reset_count == power_resets);
     assert(snapshot.session_delta_nah ==
            (int64_t)200 * LTC2959_ACR_LSB_NAH);
 }
@@ -314,6 +316,7 @@ static void test_explicit_new_session_uses_one_burst(void) {
     ltc2959_snapshot_t after;
     ltc2959_hal_get_snapshot(&after);
     assert(after.gauge_session == before.gauge_session + 1u);
+    assert(after.power_reset_count == before.power_reset_count);
     assert(after.continuity_valid);
     assert(!after.sample_valid);
     assert(after.acr_raw == LTC2959_ACR_POR_DEFAULT);
@@ -338,6 +341,7 @@ static void test_uvlo_reseeds_uncertain_acr(void) {
     ltc2959_snapshot_t after;
     ltc2959_hal_get_snapshot(&after);
     assert(after.gauge_session == before.gauge_session + 1u);
+    assert(after.power_reset_count == before.power_reset_count + 1u);
     assert(after.continuity_valid);
     assert(after.acr_raw == LTC2959_ACR_POR_DEFAULT);
     assert(after.session_delta_nah == 0);
@@ -413,6 +417,40 @@ static void test_shorter_period_advances_pending_deadline(void) {
     assert(snapshot.sample_sequence == base_sequence + 3u);
 }
 
+static void test_li_ion_voltage_acquisition_does_not_reset_acr(void) {
+    const uint16_t voltages[] = {3600u, 4200u, 4400u};
+    for (size_t i = 0u; i < sizeof(voltages) / sizeof(voltages[0]); i++) {
+        prepare_present_gauge();
+        ltc2959_snapshot_t before;
+        ltc2959_hal_get_snapshot(&before);
+        set_u16_be(LTC2959_REG_VOLTAGE_MSB,
+                   ltc2959_voltage_raw_from_mv(voltages[i]));
+        poll_at(3u);
+        poll_at(6u);
+        poll_at(9u);
+        ltc2959_snapshot_t after;
+        ltc2959_hal_get_snapshot(&after);
+        assert(after.sample_valid);
+        assert(after.voltage_mv >= voltages[i] - 1u);
+        assert(after.voltage_mv <= voltages[i] + 1u);
+        assert(after.gauge_session == before.gauge_session);
+        assert(after.acr_raw == 0x80000001u);
+        assert(s_acr_write_count == 0u);
+    }
+
+    prepare_present_gauge();
+    set_u16_be(LTC2959_REG_VOLTAGE_MSB,
+               ltc2959_voltage_raw_from_mv(4600u));
+    poll_at(3u);
+    poll_at(6u);
+    poll_at(9u);
+    ltc2959_snapshot_t snapshot;
+    ltc2959_hal_get_snapshot(&snapshot);
+    assert(!snapshot.sample_valid);
+    assert(!snapshot.last_conversion_sample_valid);
+    assert(s_acr_write_count == 0u);
+}
+
 int main(void) {
     test_stale_sample_recovery_preserves_coulomb_session();
     test_explicit_new_session_uses_one_burst();
@@ -422,6 +460,7 @@ int main(void) {
     test_shorter_period_advances_pending_deadline();
     test_ara_evidence_and_pending_retry();
     test_ara_transport_failure_evidence();
+    test_li_ion_voltage_acquisition_does_not_reset_acr();
     puts("LTC2959 HAL recovery tests passed");
     return 0;
 }

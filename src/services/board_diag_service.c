@@ -23,13 +23,6 @@
 #define BOARD_DIAG_SIM_DISCHARGE_STEP_MV 1u
 #define BOARD_DIAG_MODEM_MONITOR_POLL_MS 1000u
 #define BOARD_DIAG_FORCE_SAMPLE_MS 250u
-/* Charger-sim discharge/charge range for the NetMon bench tool. [BP] 2-cell NiMH:
- * MIN below EMPTY (1900) so the sim walks through LOW/EMPTY/hard-off, MAX above
- * BAR4 (2575) for a "full" pack. Were stale Li-ion values (3450-4150) that pinned
- * the gauge at 4 bars and masked low/empty until reboot. (Rev-B Li-ion will need a
- * chemistry-aware range keyed on s_chemistry.) */
-#define BOARD_DIAG_BATTERY_MV_MIN 1700u
-#define BOARD_DIAG_BATTERY_MV_MAX 2800u
 
 static uint16_t s_battery_mv;
 static uint16_t s_battery_mv_raw;
@@ -40,7 +33,8 @@ static uint32_t s_force_sample_ms;
 static bool s_battery_valid;
 static bool s_charger_connected;
 static bool s_charger_forced;
-static board_diag_chemistry_t s_chemistry = BOARD_DIAG_CHEM_NI_MH;
+static board_diag_chemistry_t s_chemistry = BOARD_DIAG_CHEM_UNKNOWN;
+static uint32_t s_next_chemistry_check_ms;
 static bool s_vbus_present;
 static bool s_vbus_forced;
 static bool s_headset_inserted;
@@ -69,6 +63,54 @@ static void refresh_cached_inputs(void);
 static void step_forced_battery(uint32_t now_ms);
 static void note_battery_sample(void);
 
+/* Simulation spans both warning endpoints, without changing real chemistry. */
+static uint16_t simulated_battery_min_mv(void) {
+    return s_chemistry == BOARD_DIAG_CHEM_LI_ION ? 2900u : 1700u;
+}
+
+static uint16_t simulated_battery_max_mv(void) {
+    return s_chemistry == BOARD_DIAG_CHEM_LI_ION ? 4200u : 2800u;
+}
+
+board_diag_chemistry_t board_diag_battery_chemistry(void) {
+    switch (battery_hal_chemistry()) {
+    case BATTERY_CHEMISTRY_NIMH_2S: return BOARD_DIAG_CHEM_NI_MH;
+    case BATTERY_CHEMISTRY_LI_ION_1S: return BOARD_DIAG_CHEM_LI_ION;
+    case BATTERY_CHEMISTRY_UNKNOWN: return BOARD_DIAG_CHEM_UNKNOWN;
+    }
+    return BOARD_DIAG_CHEM_UNKNOWN;
+}
+
+uint16_t board_diag_battery_shutdown_threshold_mv(bool call_active) {
+    const battery_gauge_profile_t *profile = battery_hal_gauge_profile();
+    return call_active ? profile->emergency_empty_mv : profile->operating_empty_mv;
+}
+
+static bool chemistry_selector_matches(void) {
+    bool li_ion = false;
+    return s_chemistry != BOARD_DIAG_CHEM_UNKNOWN &&
+        tca8418_hal_get_charger_li_ion_mode(&li_ion) &&
+        li_ion == (s_chemistry == BOARD_DIAG_CHEM_LI_ION) &&
+        tca8418_hal_set_charger_li_ion_mode(li_ion);
+}
+
+static void synchronize_charger_chemistry(uint32_t now_ms) {
+    board_diag_chemistry_t chemistry = board_diag_battery_chemistry();
+    if (chemistry == s_chemistry &&
+        time_diff_ms(now_ms, s_next_chemistry_check_ms) < 0) return;
+    s_next_chemistry_check_ms = now_ms + 1000u;
+    s_chemistry = chemistry;
+    if (chemistry_selector_matches()) {
+        (void)charger_control_service_set_inhibit(CHARGER_INHIBIT_CHEMISTRY, false);
+        return;
+    }
+    if (!charger_control_service_set_inhibit(CHARGER_INHIBIT_CHEMISTRY, true) ||
+        s_chemistry == BOARD_DIAG_CHEM_UNKNOWN) return;
+    if (tca8418_hal_set_charger_li_ion_mode(s_chemistry == BOARD_DIAG_CHEM_LI_ION)) {
+        (void)charger_control_service_set_inhibit(CHARGER_INHIBIT_CHEMISTRY, false);
+    }
+}
+
 static uint32_t saturating_add_u32(uint32_t a, uint32_t b) {
     return a > UINT32_MAX - b ? UINT32_MAX : a + b;
 }
@@ -90,11 +132,14 @@ void board_diag_service_init(uint32_t now_ms,
     s_battery_valid = battery_hal_valid();
     s_charger_connected = battery_hal_charger_connected();
     s_charger_forced = false;
-    s_chemistry = BOARD_DIAG_CHEM_NI_MH;
+    s_chemistry = board_diag_battery_chemistry();
     s_tca_present = false;
-    (void)tca8418_hal_set_charger_li_ion_mode(false);
     charger_control_service_init(
-        now_ms, supervisor_inhibit_at_boot ? CHARGER_INHIBIT_SUPERVISOR : 0u);
+        now_ms, (uint8_t)(
+            (supervisor_inhibit_at_boot ? CHARGER_INHIBIT_SUPERVISOR : 0u) |
+            (chemistry_selector_matches() ? 0u : CHARGER_INHIBIT_CHEMISTRY)));
+    s_next_chemistry_check_ms = now_ms;
+    synchronize_charger_chemistry(now_ms);
     s_vbus_present = board_service_vbus_present();
     s_vbus_forced = false;
     s_headset_inserted = false;
@@ -111,6 +156,7 @@ void board_diag_service_init(uint32_t now_ms,
 
 void board_diag_service_poll(uint32_t now_ms) {
     battery_hal_poll(now_ms);
+    synchronize_charger_chemistry(now_ms);
     uint32_t source_sequence = battery_hal_sample_sequence();
     if (source_sequence != s_battery_source_sequence) {
         s_battery_source_sequence = source_sequence;
@@ -202,7 +248,8 @@ bool board_diag_battery_low(void) {
         return false;
     }
     if (s_batt_force_active || s_charger_forced) {
-        return s_battery_mv >= VBAT_EMPTY_MV && s_battery_mv < VBAT_LOW_MV;
+        const battery_gauge_profile_t *profile = battery_hal_gauge_profile();
+        return s_battery_mv >= profile->empty_mv && s_battery_mv < profile->low_mv;
     }
     return battery_hal_low();
 }
@@ -212,7 +259,7 @@ bool board_diag_battery_empty(void) {
         return false;
     }
     if (s_batt_force_active || s_charger_forced) {
-        return s_battery_mv < VBAT_EMPTY_MV;
+        return s_battery_mv < battery_hal_gauge_profile()->empty_mv;
     }
     return battery_hal_empty();
 }
@@ -222,7 +269,7 @@ bool board_diag_battery_supply_failure_indicates_empty(void) {
      * regulator fault must stay a modem fault. Conversely, use fresh terminal
      * voltage rather than the compensated/slow display estimate so a marginal
      * pack cannot have its physical collapse hidden by load compensation. */
-    return s_battery_valid && s_battery_mv_fresh < VBAT_LOW_MV;
+    return s_battery_valid && s_battery_mv_fresh < battery_hal_gauge_profile()->low_mv;
 }
 
 static bool charger_can_recover_pack(bool charger_present) {
@@ -236,7 +283,7 @@ static bool charger_can_recover_pack(bool charger_present) {
         return false;
     }
     if (s_charger_forced) {
-        return s_battery_mv < BOARD_DIAG_BATTERY_MV_MAX;
+        return s_battery_mv < simulated_battery_max_mv();
     }
     return battery_hal_charge_status_valid() &&
         battery_hal_charger_state_from_inputs(
@@ -305,7 +352,7 @@ battery_charger_state_t board_diag_charger_state(void) {
     }
     if (s_charger_forced) {
         return control.actual_enabled &&
-                       s_battery_mv < BOARD_DIAG_BATTERY_MV_MAX
+                       s_battery_mv < simulated_battery_max_mv()
                    ? BATTERY_CHARGER_ACTIVE
                    : BATTERY_CHARGER_FULL;
     }
@@ -329,6 +376,7 @@ void board_diag_get_battery_learning_observation(
     }
     ltc2959_snapshot_t ltc;
     ltc2959_hal_get_snapshot(&ltc);
+    bool sample_valid = ltc.sample_valid && ltc.last_conversion_sample_valid;
     *out = (battery_learning_observation_t){
         .now_ms = now_ms,
         .sample_sequence = ltc.sample_sequence,
@@ -339,8 +387,8 @@ void board_diag_get_battery_learning_observation(
         .current_ua = ltc.current_ua,
         .temperature_mdegc = ltc.temperature_mdegc,
         .reference_mv = s_battery_mv,
-        .sample_valid = ltc.sample_valid,
-        .current_valid = ltc.sample_valid &&
+        .sample_valid = sample_valid,
+        .current_valid = sample_valid &&
                          ltc.current_polarity_verified,
         .continuity_valid = ltc.continuity_valid,
         .reference_valid = s_battery_valid,
@@ -348,7 +396,8 @@ void board_diag_get_battery_learning_observation(
         .charge_active = board_diag_charge_status_valid() &&
                          board_diag_charger_state() ==
                              BATTERY_CHARGER_ACTIVE,
-        .authoritative = !s_batt_force_active && !s_charger_forced,
+        .authoritative = !s_batt_force_active && !s_charger_forced &&
+                         board_diag_battery_chemistry() != BOARD_DIAG_CHEM_UNKNOWN,
     };
 }
 
@@ -361,6 +410,8 @@ void board_diag_get_snapshot(board_diag_snapshot_t *out) {
     out->battery_bars = board_diag_battery_level_bars();
     out->battery_forced = s_batt_force_active;
     out->battery_low = board_diag_battery_low();
+    out->battery_low_notice = s_batt_force_active || s_charger_forced
+        ? out->battery_low : battery_hal_low_notice();
     out->battery_empty = board_diag_battery_empty();
     out->battery_correction_mv =
         s_batt_force_active || s_charger_forced
@@ -383,7 +434,7 @@ void board_diag_get_snapshot(board_diag_snapshot_t *out) {
     ltc2959_hal_get_snapshot(&ltc);
     out->ltc_present = ltc.present;
     out->ltc_configured = ltc.configured;
-    out->ltc_sample_valid = ltc.sample_valid;
+    out->ltc_sample_valid = ltc.sample_valid && ltc.last_conversion_sample_valid;
     out->ltc_continuity_valid = ltc.continuity_valid;
     out->ltc_current_polarity_verified =
         ltc.current_polarity_verified;
@@ -419,7 +470,7 @@ void board_diag_get_snapshot(board_diag_snapshot_t *out) {
         out->charge_state = BOARD_DIAG_CHARGE_DISABLED;
     } else if (s_charger_forced) {
         out->charge_state = s_charger_connected ?
-            (s_battery_mv >= BOARD_DIAG_BATTERY_MV_MAX ? BOARD_DIAG_CHARGE_FULL : BOARD_DIAG_CHARGE_ACTIVE) :
+            (s_battery_mv >= simulated_battery_max_mv() ? BOARD_DIAG_CHARGE_FULL : BOARD_DIAG_CHARGE_ACTIVE) :
             BOARD_DIAG_CHARGE_DETACHED;
     } else {
         out->charge_state = charge_state_from_inputs(
@@ -664,15 +715,15 @@ static void step_forced_battery(uint32_t now_ms) {
     charger_control_snapshot_t control;
     charger_control_service_get_snapshot(&control);
     if (s_charger_connected && control.actual_enabled) {
-        if (s_battery_mv + BOARD_DIAG_SIM_CHARGE_STEP_MV < BOARD_DIAG_BATTERY_MV_MAX) {
+        if (s_battery_mv + BOARD_DIAG_SIM_CHARGE_STEP_MV < simulated_battery_max_mv()) {
             s_battery_mv = (uint16_t)(s_battery_mv + BOARD_DIAG_SIM_CHARGE_STEP_MV);
         } else {
-            s_battery_mv = BOARD_DIAG_BATTERY_MV_MAX;
+            s_battery_mv = simulated_battery_max_mv();
         }
-    } else if (s_battery_mv > BOARD_DIAG_BATTERY_MV_MIN + BOARD_DIAG_SIM_DISCHARGE_STEP_MV) {
+    } else if (s_battery_mv > simulated_battery_min_mv() + BOARD_DIAG_SIM_DISCHARGE_STEP_MV) {
         s_battery_mv = (uint16_t)(s_battery_mv - BOARD_DIAG_SIM_DISCHARGE_STEP_MV);
     } else {
-        s_battery_mv = BOARD_DIAG_BATTERY_MV_MIN;
+        s_battery_mv = simulated_battery_min_mv();
     }
 }
 

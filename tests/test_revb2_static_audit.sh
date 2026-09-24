@@ -528,6 +528,9 @@ require_fixed \
     'core1_services_standby_ready()' src/services/standby_sleep.c \
     "dormant policy must require core1 audio and DMA quiescence"
 require_fixed \
+    'battery_charge_supervisor_service_standby_ready()' src/services/standby_sleep.c \
+    "standby must finish recharge qualification before returning to minute-spaced samples"
+require_fixed \
     'message_service_sleep_ready()' src/services/standby_sleep.c \
     "standby must allow retained SMS queues deferred by storage failures"
 require_fixed \
@@ -611,7 +614,7 @@ require_fixed \
     'battery_raw_collapse_evidence_update(' src/app_status_runtime.c \
     "raw-collapse shutdown must require distinct LTC samples"
 require_fixed \
-    'battery_empty_shutdown_threshold_mv(call_active)' src/app_status_runtime.c \
+    'board_diag_battery_shutdown_threshold_mv(call_active)' src/app_status_runtime.c \
     "ordinary EMPTY must retain a separate in-call emergency floor"
 require_fixed \
     'battery_endpoint_step(' src/app_status_runtime.c \
